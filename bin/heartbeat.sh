@@ -124,16 +124,48 @@ run_discovery() {
   cd "$dir"
   mkdir -p docs/proposals
 
+  # Gather product context from whatever docs exist
+  local product_context=""
+  for ctx_file in docs/product-context.md docs/specs/*.md docs/ELUCIDATE_VISION.md docs/CHESS_TRAINER_PROJECT.md; do
+    if [ -f "$ctx_file" ]; then
+      product_context="${product_context}\n--- ${ctx_file} ---\n$(head -100 "$ctx_file")\n"
+    fi
+  done
+  # Fall back to CLAUDE.md and README for product context
+  if [ -z "$product_context" ]; then
+    [ -f CLAUDE.md ] && product_context="$(head -50 CLAUDE.md)"
+    [ -f README.md ] && product_context="${product_context}\n$(head -50 README.md)"
+  fi
+
   local discovery_prompt
-  discovery_prompt=$(write_prompt "${name}-discovery" "You are a discovery agent. Scan this codebase and identify opportunities.
+  discovery_prompt=$(write_prompt "${name}-discovery" "You are a product-aware discovery agent for the '$name' project.
 
+Your job has TWO phases:
+
+## Phase 1: Code Quality (2-3 findings)
+Scan the codebase for bugs, tech debt, and DX improvements. These are the quick wins.
+
+## Phase 2: Feature Discovery (2-4 findings)
+Read the product context below, understand what this project IS and WHO it's for, then propose features that would meaningfully advance it. Think like a product engineer:
+- What's the next feature a user would expect?
+- What's missing that would make this product more complete?
+- What would differentiate this from competitors?
+- What existing feature could be deepened or improved?
+
+Do NOT propose generic features (dark mode, analytics, i18n) unless they're specifically relevant.
+DO propose features grounded in the product's actual purpose and user needs.
+
+## Product Context
+${product_context}
+
+## Instructions
 Use your MCP tools BEFORE making suggestions:
-- Use jcodemunch search_symbols and get_file_outline to understand the codebase structure
-- Use context7 to check if the project's framework has newer patterns or APIs
+- Use jcodemunch to understand the codebase structure and what's already built
+- Use context7 to check framework capabilities for proposed features
 - Use codebase-memory-mcp to understand the architecture
-- Check git log to avoid proposing work already in progress or recently completed
+- Check git log to avoid proposing work already done or in progress
 
-Categorize each as: quick-win (<1hr, low risk) | feature | tech-debt | dx
+Categorize each finding as: quick-win (<1hr, low risk) | feature | tech-debt | dx
 
 Output ONLY valid JSON (no markdown fences, no explanation):
 {
@@ -152,17 +184,21 @@ Output ONLY valid JSON (no markdown fences, no explanation):
 }
 
 Rules:
-- Check git log and branches to avoid proposing work already in progress
-- Be specific about files and what needs to change
+- Phase 1 findings: be specific about files and what needs to change
+- Phase 2 findings: describe the feature clearly, list files that would need to be created or modified
 - quick-win means: single file, low risk, obvious improvement
-- Limit to 5-7 findings max — prioritize by impact")
+- feature means: new capability that advances the product (may need multiple files)
+- Check git log and branches to avoid proposing work already in progress
+- 5-7 findings total, mix of both phases, prioritized by impact")
 
   local discovery_system
-  discovery_system=$(write_prompt "${name}-discovery-sys" "You have MCP tools — use them to deeply understand the codebase before making proposals:
+  discovery_system=$(write_prompt "${name}-discovery-sys" "You are a product engineer, not just a code scanner. You have MCP tools — use them:
 - jcodemunch: search_symbols, get_file_outline, get_file_tree, find_dead_code, get_repo_health
 - context7: resolve-library-id + query-docs for current framework documentation
 - codebase-memory-mcp: search_code, get_architecture, detect_changes
-ALWAYS investigate before proposing. Generic suggestions that ignore the actual code are worthless.")
+ALWAYS investigate the codebase AND read the product context before proposing.
+For feature proposals, think about what would make this product MORE USEFUL to its target users.
+Generic suggestions that ignore the actual product or code are worthless.")
 
   run_claude "$dir" "$discovery_prompt" "$discovery_system" 30 "--output-format json" > "$raw_file" 2>/dev/null || true
 
