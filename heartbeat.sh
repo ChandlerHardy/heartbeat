@@ -176,7 +176,10 @@ Use your MCP tools BEFORE making suggestions:
 
 Categorize each finding as: quick-win (<1hr, low risk) | feature | tech-debt | dx
 
-Output ONLY valid JSON (no markdown fences, no explanation):
+CRITICAL: You MUST write your findings as valid JSON to the file: ${findings_file}
+Use the Write tool or bash to write the file. Do NOT output JSON to stdout — write it to the file.
+
+The JSON schema:
 {
   \"project\": \"$name\",
   \"findings\": [
@@ -209,43 +212,29 @@ ALWAYS investigate the codebase AND read the product context before proposing.
 For feature proposals, think about what would make this product MORE USEFUL to its target users.
 Generic suggestions that ignore the actual product or code are worthless.")
 
-  run_claude "$dir" "$discovery_prompt" "$discovery_system" 30 "--output-format json" > "$raw_file" 2>/dev/null || true
+  # Claude writes findings to $findings_file via Write/bash tool.
+  # Capture stdout too in case it outputs JSON there instead.
+  run_claude "$dir" "$discovery_prompt" "$discovery_system" 30 > "$raw_file" 2>/dev/null || true
 
-  # Extract .result from claude --output-format json wrapper, then strip markdown fences
-  local raw_result
-  raw_result=$(jq -r '.result // empty' "$raw_file" 2>/dev/null || cat "$raw_file" 2>/dev/null)
-
-  # Try parsing as-is, then use python to extract JSON from markdown-wrapped output
-  if echo "$raw_result" | jq -e '.findings' > /dev/null 2>&1; then
-    echo "$raw_result" | jq '.' > "$findings_file"
-  elif echo "$raw_result" | python3 -c "
-import sys, json, re
-text = sys.stdin.read()
-# Strip markdown fences
-text = re.sub(r'^\`\`\`(?:json)?\s*', '', text, flags=re.MULTILINE)
-text = re.sub(r'^\`\`\`\s*$', '', text, flags=re.MULTILINE)
-# Try parsing the cleaned text
-try:
-    obj = json.loads(text.strip())
-    assert 'findings' in obj
-    json.dump(obj, sys.stdout)
-    sys.exit(0)
-except: pass
-# Last resort: find JSON object with findings key
-match = re.search(r'\{.*\"findings\"\s*:\s*\[.*\].*\}', text, re.DOTALL)
-if match:
-    try:
-        obj = json.loads(match.group())
-        json.dump(obj, sys.stdout)
-        sys.exit(0)
-    except: pass
-sys.exit(1)
-" > "$findings_file" 2>/dev/null; then
-    : # python extraction succeeded
+  # Check if Claude wrote the file directly (preferred path)
+  if jq -e '.findings' "$findings_file" > /dev/null 2>&1; then
+    log "  Findings file written directly by Claude"
   else
-    log "  Discovery failed — could not parse JSON output"
-    echo "$raw_result" > "${TMPDIR}/${name}-raw-debug.txt"
-    echo '{"findings":[]}' > "$findings_file"
+    # Fallback: parse stdout for JSON
+    local raw_text
+    raw_text=$(cat "$raw_file" 2>/dev/null)
+
+    # If --output-format json was used, unwrap .result
+    local unwrapped
+    unwrapped=$(echo "$raw_text" | jq -r '.result // empty' 2>/dev/null)
+    [ -z "$unwrapped" ] && unwrapped="$raw_text"
+
+    if echo "$unwrapped" | jq -e '.findings' > /dev/null 2>&1; then
+      echo "$unwrapped" | jq '.' > "$findings_file"
+    else
+      log "  Discovery failed — could not parse JSON output"
+      echo '{"findings":[]}' > "$findings_file"
+    fi
   fi
 
   cp "$findings_file" "docs/proposals/${TODAY}-heartbeat.json"
