@@ -67,32 +67,33 @@ Run an interactive vision interview to refine a project's product-context.md.
 ### `implement <project> [quick-wins | #<issue>]`
 Trigger OCI implementation. Two modes:
 
+**This command runs LOCALLY in the current session** (not on OCI). You're already in Claude Code with full MCP tools — use them directly.
+
 **By issue number:** `/heartbeat implement gnomestead #15`
-```bash
-# Get issue details
-gh issue view <number> --repo ChandlerHardy/<project> --json title,body --jq '{title: .title, body: .body}'
 
-# Trigger implementation on OCI
-ssh oci "cd /mnt/block_volume/repos/<project> && claude -p --dangerously-skip-permissions --max-turns 40 'Implement this GitHub issue, create a branch, commit, push, and open a PR.
+1. Get issue details:
+   ```bash
+   gh issue view <number> --repo ChandlerHardy/<project> --json title,body
+   ```
 
-Issue #<number>: <title>
-<body>
+2. Find the local repo path. Project name → path mapping:
+   - gnomestead-web → `~/workspaces/gnomestead/gnomestead-web`
+   - gnomestead / gnomestead-ios → `~/workspaces/gnomestead/gnomestead-ios`
+   - Others → `~/repos/<project>`
 
-Instructions:
-- Create branch: heartbeat/$(date +%Y-%m-%d)-<slugified-title>
-- Use MCP tools to understand the codebase before editing
-- Implement the change with minimal scope
-- Commit with descriptive message
-- Push and create PR with Closes #<number> in the body'" 2>&1
-```
+3. `cd` to the repo, create a branch, implement the change, commit, push, and create a PR:
+   - Branch: `heartbeat/YYYY-MM-DD-<slugified-title>`
+   - Use your MCP tools and full workflow to implement properly
+   - PR body should include `Closes #<number>`
 
 **Quick wins (default):** `/heartbeat implement gnomestead` or `/heartbeat implement gnomestead quick-wins`
-```bash
-# Find quick-win issues
-gh issue list --repo ChandlerHardy/<project> --state open --label "heartbeat,quick-win" --json number,title,body --jq '.[:2]'
 
-# Implement each (same as above, one at a time, max 2)
-```
+1. Find quick-win issues:
+   ```bash
+   gh issue list --repo ChandlerHardy/<project> --state open --label "heartbeat,quick-win" --json number,title,body --jq '.[:2]'
+   ```
+
+2. Implement each one locally (same as by-issue-number flow, one at a time, max 2).
 
 When no mode is specified, default to quick-wins.
 
