@@ -8,6 +8,22 @@ user-invocable: true
 
 Run heartbeat operations from your Mac terminal session. All heavy work runs on OCI via SSH.
 
+## Project Name Mapping
+
+Users may say short/informal names. Map to the correct OCI path and GitHub repo:
+
+| User says | OCI path | GitHub repo |
+|-----------|----------|-------------|
+| gnomestead, gnomestead-ios, gnomestead backend | `/mnt/block_volume/repos/gnomestead-ios` | `ChandlerHardy/gnomestead` |
+| gnomestead-web, gnomestead frontend | `/mnt/block_volume/repos/gnomestead-web` | `ChandlerHardy/gnomestead-web` |
+| crooked-finger, crooked finger | `/mnt/block_volume/repos/crooked-finger` | `ChandlerHardy/crooked-finger` |
+| portfolio-website, portfolio, website | `/mnt/block_volume/repos/portfolio-website` | `ChandlerHardy/portfolio-website` |
+| elucidate-chess, elucidate, chess | `/mnt/block_volume/repos/elucidate-chess` | `ChandlerHardy/elucidate-chess` |
+| greenline | `/mnt/block_volume/repos/greenline` | `ChandlerHardy/greenline` |
+| snapcal | `/mnt/block_volume/repos/snapcal` | `ChandlerHardy/snapcal` |
+
+**Important:** The gnomestead backend GitHub repo is `ChandlerHardy/gnomestead` but the OCI directory is `gnomestead-ios`. Always use the correct mapping.
+
 ## Commands
 
 Parse the user's intent from the arguments:
