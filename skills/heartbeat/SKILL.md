@@ -130,8 +130,23 @@ ssh oci "cd /mnt/block_volume/repos && git clone git@github.com:<github-repo>.gi
 # Then update heartbeat.json via jq
 ```
 
-### Default (no args)
-Show status.
+### Default (no args or "help")
+Show the command menu, then status:
+
+```
+Heartbeat Commands:
+  /heartbeat status                     — open PRs and backlog issues
+  /heartbeat discover [project]         — run discovery scan
+  /heartbeat interview <project>        — vision interview → update product context
+  /heartbeat implement <project>        — implement quick-wins
+  /heartbeat implement <project> #N     — implement specific issue
+  /heartbeat build <project> <proposal> — deep implementation
+  /heartbeat merge                      — merge all approved PRs
+  /heartbeat projects                   — list tracked projects
+  /heartbeat add-project <name> <repo>  — add new project
+```
+
+Then show status output.
 
 ## Argument Parsing
 
