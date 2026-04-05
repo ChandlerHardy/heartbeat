@@ -64,9 +64,10 @@ Run an interactive vision interview to refine a project's product-context.md.
    ssh oci "cd /mnt/block_volume/repos/<project> && git add docs/product-context.md && git commit -m 'Update product context from vision interview' && git push origin main"
    ```
 
-### `implement <project> #<issue>`
-Trigger OCI claude to implement a specific heartbeat issue.
+### `implement <project> [quick-wins | #<issue>]`
+Trigger OCI implementation. Two modes:
 
+**By issue number:** `/heartbeat implement gnomestead #15`
 ```bash
 # Get issue details
 gh issue view <number> --repo ChandlerHardy/<project> --json title,body --jq '{title: .title, body: .body}'
@@ -84,6 +85,16 @@ Instructions:
 - Commit with descriptive message
 - Push and create PR with Closes #<number> in the body'" 2>&1
 ```
+
+**Quick wins (default):** `/heartbeat implement gnomestead` or `/heartbeat implement gnomestead quick-wins`
+```bash
+# Find quick-win issues
+gh issue list --repo ChandlerHardy/<project> --state open --label "heartbeat,quick-win" --json number,title,body --jq '.[:2]'
+
+# Implement each (same as above, one at a time, max 2)
+```
+
+When no mode is specified, default to quick-wins.
 
 ### `merge`
 Merge all approved heartbeat PRs.
@@ -128,6 +139,7 @@ Show status.
 - "discover" or "run" or "scan" → `discover`
 - "interview" + project name → `interview <project>`
 - "implement" + project + issue → `implement <project> #<issue>`
+- "implement" + project (+ "quick-wins" or nothing) → `implement <project> quick-wins`
 - "build" + project + proposal → `build <project> <proposal>`
 - "merge" or "merge all" → `merge`
 - "projects" or "list" → `projects`
