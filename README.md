@@ -27,11 +27,30 @@ Available from both Discord (`/heartbeat <cmd>`) and local Claude Code (`/heartb
 | `status` | Show open PRs and backlog issues across all projects |
 | `discover [project]` | Run discovery scan (all projects or one) |
 | `interview <project>` | Interactive vision interview → updates product-context.md |
-| `implement <project> #<issue>` | Trigger OCI to implement a specific GitHub issue |
+| `implement <project>` | Implement quick-win issues on OCI |
+| `implement <project> #N` | Implement a specific issue on OCI |
 | `build <project> <proposal>` | Deep implementation for larger proposals |
 | `merge` | Merge all approved heartbeat PRs |
 | `projects` | List all tracked projects |
-| `add-project <name> <repo>` | Add a new GitHub repo to heartbeat |
+| `add-project <name> <repo>` | Add a new project (clone, config, mapping, product context) |
+
+All `implement` and `build` commands dispatch to OCI — they keep running after you close your laptop.
+
+## Adding a New Project
+
+Use `/heartbeat add-project <name> <github-repo>` or manually:
+
+1. **Clone on OCI + update config:**
+   ```bash
+   ssh oci "cd /mnt/block_volume/repos && git clone git@github.com:ChandlerHardy/<repo>.git <name>"
+   ssh oci "jq '.projects += [{\"name\": \"<name>\", \"path\": \"/mnt/block_volume/repos/<name>\", \"stale_days\": 14}]' ~/etc/heartbeat.json > /tmp/hb.json && mv /tmp/hb.json ~/etc/heartbeat.json"
+   ```
+
+2. **If GitHub repo name ≠ OCI dir name** (like `gnomestead` → `gnomestead-ios`), update `REPO_NAME_MAP` in `code-reviewer/app.py` and deploy.
+
+3. **Update skill mapping** — add a row to the name mapping table in `skills/heartbeat/SKILL.md`.
+
+4. **Create product context** — run `/heartbeat interview <name>` or write `docs/product-context.md` manually.
 
 ## Architecture
 
@@ -61,7 +80,7 @@ Reviews (APPROVE/REQUEST_CHANGES) posted by ch-code-reviewer GitHub App
 | `systemd/code-reviewer.service` | Persistent bot service | OCI systemd |
 
 **Not in this repo (OCI-only, has secrets):**
-- `~/heartbeat-bot/bot.py` — Discord bot (476 lines, token in systemd env)
+- `~/heartbeat-bot/bot.py` — Discord bot (slash commands, token in systemd env)
 - `~/etc/heartbeat.json` — project config with Discord webhook URL
 - `~/code-reviewer/ch-code-reviewer.pem` — GitHub App private key
 - `~/code-reviewer/webhook-secret.txt` — GitHub webhook secret
@@ -70,11 +89,23 @@ Reviews (APPROVE/REQUEST_CHANGES) posted by ch-code-reviewer GitHub App
 
 Each project has a `docs/product-context.md` that tells the discovery agent what the product is, who it's for, and what would advance it. This is what makes heartbeat propose *features*, not just code fixes.
 
-Update it manually or via `/heartbeat interview <project>` — an interactive Socratic interview that refines the vision.
+Update via `/heartbeat interview <project>` — an interactive Socratic interview (5-7 questions about vision, users, goals) that refines the product context. The next discovery run picks up the updated context automatically.
 
 **Projects with product context:**
 - crooked-finger, portfolio-website, gnomestead-web, gnomestead-ios
 - elucidate-chess (uses `docs/ELUCIDATE_VISION.md` instead)
+
+## Project Name Mapping
+
+| Name | OCI path | GitHub repo |
+|------|----------|-------------|
+| gnomestead / gnomestead-ios | `gnomestead-ios` | `ChandlerHardy/gnomestead` |
+| gnomestead-web | `gnomestead-web` | `ChandlerHardy/gnomestead-web` |
+| crooked-finger | `crooked-finger` | `ChandlerHardy/crooked-finger` |
+| portfolio-website | `portfolio-website` | `ChandlerHardy/portfolio-website` |
+| elucidate-chess | `elucidate-chess` | `ChandlerHardy/elucidate-chess` |
+| greenline | `greenline` | `ChandlerHardy/greenline` |
+| snapcal | `snapcal` | `ChandlerHardy/snapcal` |
 
 ## Review Cycle
 
@@ -105,7 +136,8 @@ All `claude -p` sessions have access to:
 - Max 3 auto-fix attempts per PR
 - Skips stale repos (no commits in 14 days)
 - Idempotent (won't re-create existing branches)
-- `--max-turns` on all claude invocations
+- `--max-turns` on all claude invocations (25-60 depending on task)
+- All invocations use `claude -p --dangerously-skip-permissions`
 
 ## Deploy
 
@@ -114,14 +146,3 @@ All `claude -p` sessions have access to:
 ```
 
 Secrets must be configured manually on OCI (not in this repo).
-
-## Tracked Projects
-
-Configured in `~/etc/heartbeat.json` on OCI:
-- crooked-finger
-- elucidate-chess
-- greenline
-- gnomestead-web
-- gnomestead-ios
-- portfolio-website
-- snapcal

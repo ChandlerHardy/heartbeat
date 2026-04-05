@@ -147,12 +147,40 @@ ssh oci "jq -r '.projects[] | \"\(.name) — \(.path)\"' ~/etc/heartbeat.json"
 ```
 
 ### `add-project <name> <github-repo>`
-Clone a GitHub repo to OCI and add it to heartbeat config.
+Add a new project to the heartbeat system. Handles all three registration points:
 
+**Step 1: Clone on OCI and add to heartbeat.json**
 ```bash
-ssh oci "cd /mnt/block_volume/repos && git clone git@github.com:<github-repo>.git <name>"
-# Then update heartbeat.json via jq
+# Clone repo
+ssh oci "cd /mnt/block_volume/repos && git clone git@github.com:<github-repo>.git <local-dir-name>"
+
+# Add to heartbeat.json
+ssh oci "jq '.projects += [{\"name\": \"<name>\", \"path\": \"/mnt/block_volume/repos/<local-dir-name>\", \"stale_days\": 14}]' ~/etc/heartbeat.json > /tmp/hb.json && mv /tmp/hb.json ~/etc/heartbeat.json"
 ```
+
+**Step 2: Add to REPO_NAME_MAP in code-reviewer (if GitHub name != OCI dir name)**
+If the GitHub repo name differs from the local directory name (like gnomestead → gnomestead-ios), update the REPO_NAME_MAP dict in `code-reviewer/app.py` and deploy:
+```python
+REPO_NAME_MAP = {
+    "gnomestead": "gnomestead-ios",
+    "<github-name>": "<local-dir-name>",  # add this
+}
+```
+Then: `scp code-reviewer/app.py oci:~/code-reviewer/app.py && ssh oci "sudo systemctl restart code-reviewer"`
+
+**Step 3: Update the skill name mapping table**
+Add a row to the "Project Name Mapping" table at the top of this file, commit, and push:
+```bash
+cd ~/repos/heartbeat && git add -A && git commit -m "Add <name> to heartbeat" && git push origin main
+```
+
+**Step 4: Create product context**
+```bash
+ssh oci "mkdir -p /mnt/block_volume/repos/<local-dir-name>/docs"
+```
+Then suggest running `/heartbeat interview <name>` to populate `docs/product-context.md`.
+
+Report all steps taken and prompt for the vision interview.
 
 ### Default (no args or "help")
 Show the command menu, then status:
