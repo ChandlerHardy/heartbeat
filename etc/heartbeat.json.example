@@ -1,0 +1,11 @@
+{
+  "projects": [
+    {
+      "name": "my-project",
+      "path": "/mnt/block_volume/repos/my-project",
+      "stale_days": 14
+    }
+  ],
+  "max_quick_wins_per_project": 2,
+  "discord_webhook": "https://discord.com/api/webhooks/YOUR_WEBHOOK_URL"
+}

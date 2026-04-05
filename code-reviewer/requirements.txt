@@ -1,0 +1,4 @@
+flask
+PyJWT
+requests
+cryptography

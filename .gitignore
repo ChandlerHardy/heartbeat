@@ -1,0 +1,12 @@
+# Secrets
+*.pem
+webhook-secret.txt
+etc/heartbeat.json
+
+# Python
+__pycache__/
+venv/
+*.pyc
+
+# Temp
+/tmp/

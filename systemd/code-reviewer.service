@@ -1,0 +1,15 @@
+[Unit]
+Description=ch-code-reviewer GitHub App webhook handler
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/code-reviewer
+ExecStart=/home/ubuntu/code-reviewer/venv/bin/python /home/ubuntu/code-reviewer/app.py
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
