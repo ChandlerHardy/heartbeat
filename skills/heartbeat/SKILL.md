@@ -96,6 +96,29 @@ for repo in ChandlerHardy/crooked-finger ChandlerHardy/portfolio-website Chandle
 done
 ```
 
+### `build <project> <proposal>`
+Deep implementation — full autonomous agent for a larger proposal (not just quick wins).
+Same as Discord `/heartbeat build`. Runs on OCI with extended timeout.
+
+```bash
+ssh oci "cd /mnt/block_volume/repos/<project> && claude -p --dangerously-skip-permissions --max-turns 60 '<proposal details + implementation instructions>'" 2>&1
+```
+
+### `projects`
+List all projects in the heartbeat config.
+
+```bash
+ssh oci "jq -r '.projects[] | \"\(.name) — \(.path)\"' ~/etc/heartbeat.json"
+```
+
+### `add-project <name> <github-repo>`
+Clone a GitHub repo to OCI and add it to heartbeat config.
+
+```bash
+ssh oci "cd /mnt/block_volume/repos && git clone git@github.com:<github-repo>.git <name>"
+# Then update heartbeat.json via jq
+```
+
 ### Default (no args)
 Show status.
 
@@ -105,5 +128,8 @@ Show status.
 - "discover" or "run" or "scan" → `discover`
 - "interview" + project name → `interview <project>`
 - "implement" + project + issue → `implement <project> #<issue>`
+- "build" + project + proposal → `build <project> <proposal>`
 - "merge" or "merge all" → `merge`
+- "projects" or "list" → `projects`
+- "add" or "add-project" → `add-project`
 - Project name alone → `discover <project>`
