@@ -91,6 +91,12 @@ Implement directly using subagents. **Never dispatch to OCI for interactive sess
 
 **Important:** One issue per subagent. Use worktree isolation for parallel work on the same repo.
 
+**Subagent selection:**
+- `general-purpose` — quick wins, single-file fixes, config changes, dead code removal. Fast, low overhead.
+- `implementer` — features needing tests, multi-file changes, anything benefiting from TDD. Thorough but slower.
+
+Default to `general-purpose` for quick-wins and tech-debt. Use `implementer` for features and anything the code reviewer is likely to flag for missing tests.
+
 ### `merge`
 Merge all approved heartbeat PRs.
 
