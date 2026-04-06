@@ -41,9 +41,39 @@ get_github_repo() {
 
 ensure_labels() {
   local repo="$1"
-  for label in heartbeat quick-win feature tech-debt dx; do
+  for label in heartbeat quick-win feature tech-debt dx discovered ready-to-implement; do
     gh label create "$label" --repo "$repo" --force 2>/dev/null || true
   done
+}
+
+# Ensure repo is on main/master with clean working tree
+ensure_clean_state() {
+  local dir="$1"
+  cd "$dir"
+  local current_branch
+  current_branch=$(git branch --show-current 2>/dev/null)
+  if [ "$current_branch" != "main" ] && [ "$current_branch" != "master" ]; then
+    log "  Resetting to main/master (was on $current_branch)"
+    git checkout main 2>/dev/null || git checkout master 2>/dev/null
+  fi
+  git reset --hard HEAD 2>/dev/null
+  git clean -fd 2>/dev/null
+}
+
+# Detect the right build check command for a project
+detect_build_cmd() {
+  local dir="$1"
+  if [ -f "$dir/tsconfig.json" ]; then
+    echo "npx tsc --noEmit"
+  elif [ -f "$dir/package.json" ] && grep -q '"build"' "$dir/package.json" 2>/dev/null; then
+    echo "npm run build"
+  elif [ -f "$dir/go.mod" ]; then
+    echo "go build ./..."
+  elif [ -f "$dir/Package.swift" ]; then
+    echo "swift build"
+  else
+    echo ""
+  fi
 }
 
 create_issue_if_new() {
@@ -162,21 +192,28 @@ write_prompt() {
   echo "$file"
 }
 
-# Run claude -p with file-based prompts (no shell quoting issues)
+# Run claude -p with file-based prompts, timeout, and error capture
 run_claude() {
   local dir="$1"
   local prompt_file="$2"
   local sys_prompt_file="${3:-}"
   local max_turns="${4:-25}"
-  local extra_flags="${5:-}"
+  local timeout_secs="${5:-600}"
 
-  local cmd="cat '${prompt_file}' | claude -p --dangerously-skip-permissions --max-turns ${max_turns} ${extra_flags}"
+  local cmd="cat '${prompt_file}' | claude -p --dangerously-skip-permissions --max-turns ${max_turns}"
 
   if [ -n "$sys_prompt_file" ]; then
     cmd="${cmd} --append-system-prompt \"\$(cat '${sys_prompt_file}')\""
   fi
 
-  bash -l -c "cd '$dir' && $cmd"
+  timeout "${timeout_secs}" bash -l -c "cd '$dir' && $cmd" 2>/dev/null
+  local exit_code=$?
+  if [ "$exit_code" -eq 124 ]; then
+    log "    TIMEOUT after ${timeout_secs}s"
+    echo "TIMEOUT"
+    return 1
+  fi
+  return $exit_code
 }
 
 run_discovery() {
@@ -270,13 +307,17 @@ For feature proposals, think about what would make this product MORE USEFUL to i
 Generic suggestions that ignore the actual product or code are worthless.")
 
   # Claude writes findings to $findings_file via Write/bash tool.
-  # Capture stdout too in case it outputs JSON there instead.
-  run_claude "$dir" "$discovery_prompt" "$discovery_system" 30 > "$raw_file" 2>/dev/null || true
+  # Capture stdout as fallback. 10 min timeout for discovery.
+  local attempt
+  for attempt in 1 2; do
+    run_claude "$dir" "$discovery_prompt" "$discovery_system" 30 600 > "$raw_file" 2>/dev/null || true
 
-  # Check if Claude wrote the file directly (preferred path)
-  if jq -e '.findings' "$findings_file" > /dev/null 2>&1; then
-    log "  Findings file written directly by Claude"
-  else
+    # Check if Claude wrote the file directly (preferred path)
+    if jq -e '.findings' "$findings_file" > /dev/null 2>&1; then
+      log "  Findings file written directly by Claude"
+      break
+    fi
+
     # Fallback: parse stdout for JSON
     local raw_text
     raw_text=$(cat "$raw_file" 2>/dev/null)
@@ -288,10 +329,29 @@ Generic suggestions that ignore the actual product or code are worthless.")
 
     if echo "$unwrapped" | jq -e '.findings' > /dev/null 2>&1; then
       echo "$unwrapped" | jq '.' > "$findings_file"
+      break
+    fi
+
+    if [ "$attempt" -eq 1 ]; then
+      log "  Discovery attempt 1 failed — retrying with simpler prompt"
+      # Rewrite with a simpler prompt for retry
+      discovery_prompt=$(write_prompt "${name}-discovery-retry" "Scan the '$name' project codebase. Find 3-5 improvements: bugs, dead code, missing tests, or small features.
+
+Write valid JSON to ${findings_file} with this schema:
+{\"project\": \"$name\", \"findings\": [{\"title\": \"...\", \"category\": \"quick-win|feature|tech-debt|dx\", \"effort\": \"30min|1hr|2hr\", \"impact\": \"low|medium|high\", \"files\": [\"...\"], \"what\": \"...\", \"why\": \"...\"}]}
+
+Check git log to avoid proposing work already in progress. Do NOT duplicate these open issues:
+${EXISTING_TITLES}")
     else
-      log "  Discovery failed — could not parse JSON output"
+      log "  Discovery failed after 2 attempts"
       echo '{"findings":[]}' > "$findings_file"
     fi
+  done
+
+  # Validate findings have required fields, strip malformed entries
+  if jq -e '.findings' "$findings_file" > /dev/null 2>&1; then
+    jq '{project: .project, findings: [.findings[] | select(.title and .category and .what and .why)]}' "$findings_file" > "${findings_file}.tmp" 2>/dev/null \
+      && mv "${findings_file}.tmp" "$findings_file"
   fi
 
   cp "$findings_file" "docs/proposals/${TODAY}-heartbeat.json"
@@ -300,6 +360,25 @@ Generic suggestions that ignore the actual product or code are worthless.")
   git push --quiet origin HEAD 2>/dev/null || true
 
   echo "$findings_file"
+}
+
+# Check if a finding is eligible for overnight auto-implementation
+is_auto_eligible() {
+  local category="$1"
+  local effort="$2"
+  local files="$3"
+
+  # Must be quick-win
+  [ "$category" != "quick-win" ] && return 1
+
+  # Single file only — comma means multiple files
+  echo "$files" | grep -q "," && return 1
+
+  # Effort must be ≤1hr
+  case "$effort" in
+    30min|1hr) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 implement_quick_win() {
@@ -324,44 +403,41 @@ implement_quick_win() {
   git checkout -b "$branch" 2>/dev/null
 
   local impl_prompt
-  impl_prompt=$(write_prompt "impl-${slug}" "Implement this change, then commit with a descriptive message.
+  impl_prompt=$(write_prompt "impl-${slug}" "Implement this quick-win change, then commit.
 
 Title: $title
-Files: $files
+File: $files
 What: $what
 Why: $why
 
-Instructions:
-1. BEFORE editing, use MCP tools to understand the code:
-   - Use jcodemunch to find related symbols and understand file structure
-   - Use context7 to check framework docs for correct API usage
-   - Read surrounding files to match existing conventions
-2. Make the change with minimal scope
-3. Run existing tests if they exist — if any fail, revert and write SKIP to stdout
-4. Commit with message format: fix: <title> (or feat: / chore: as appropriate)
-5. If this is bigger than a quick win, write SKIP to stdout and exit without changes")
+Rules:
+1. Read the file and surrounding code before editing. Understand the conventions.
+2. Minimal change only — single file, low risk.
+3. Run existing tests if they exist. If any fail, revert and write SKIP to stdout.
+4. If this turns out to be bigger than expected, write SKIP to stdout and exit without changes.
+5. Commit with message: fix: <title> (or feat: / chore: as appropriate)")
 
   local impl_system
-  impl_system=$(write_prompt "impl-${slug}-sys" "You are an autonomous code implementer. You have MCP tools — USE THEM:
-- jcodemunch: search_symbols, get_file_outline, find_references, get_file_tree
-- context7: resolve-library-id + query-docs for framework documentation
-- codebase-memory-mcp: search_code, get_architecture
+  impl_system=$(write_prompt "impl-${slug}-sys" "You are an autonomous code implementer for a quick-win fix.
 RULES:
-- ALWAYS search the codebase before editing. Never guess at types or signatures.
-- Run existing tests before AND after changes. If any test fails, revert and write SKIP.
-- Validate at system boundaries (user input, API endpoints). Trust internal code.
-- Do not add error handling for impossible scenarios.
+- Read the codebase before editing. Never guess at types or signatures.
+- Run tests before AND after changes. If any fail, revert and write SKIP.
 - Do not refactor surrounding code. Minimal change only.
-- After committing, verify with a quick build check if possible (e.g. npx tsc --noEmit).")
+- If this is more complex than a quick-win, write SKIP immediately.")
 
+  # 5 minute timeout for quick-win implementation
   local output
-  output=$(run_claude "$dir" "$impl_prompt" "$impl_system" 40 2>/dev/null)
+  output=$(run_claude "$dir" "$impl_prompt" "$impl_system" 20 300)
+  local claude_exit=$?
 
-  if echo "$output" | grep -qi "SKIP"; then
-    log "    Claude SKIPped — reverting branch"
+  if [ "$claude_exit" -ne 0 ] || echo "$output" | grep -qi "SKIP\|TIMEOUT"; then
+    local reason="more complex than expected"
+    [ "$claude_exit" -eq 124 ] && reason="timed out (5 min)"
+    echo "$output" | grep -qi "TIMEOUT" && reason="timed out (5 min)"
+    log "    SKIP — $reason"
     git checkout main 2>/dev/null || git checkout master 2>/dev/null
     git branch -D "$branch" 2>/dev/null
-    echo "SKIPPED"
+    echo "SKIPPED:$reason"
     return
   fi
 
@@ -371,8 +447,23 @@ RULES:
     log "    No commits made — reverting branch"
     git checkout main 2>/dev/null || git checkout master 2>/dev/null
     git branch -D "$branch" 2>/dev/null
-    echo "SKIPPED"
+    echo "SKIPPED:no commits produced"
     return
+  fi
+
+  # Build validation — run project-specific build check before pushing
+  local build_cmd
+  build_cmd=$(detect_build_cmd "$dir")
+  if [ -n "$build_cmd" ]; then
+    log "    Running build check: $build_cmd"
+    if ! timeout 120 bash -c "cd '$dir' && $build_cmd" > /dev/null 2>&1; then
+      log "    BUILD FAILED — reverting"
+      git checkout main 2>/dev/null || git checkout master 2>/dev/null
+      git branch -D "$branch" 2>/dev/null
+      echo "SKIPPED:build failed ($build_cmd)"
+      return
+    fi
+    log "    Build passed"
   fi
 
   git push origin "$branch" --quiet 2>/dev/null
@@ -448,7 +539,7 @@ for i in $(seq 0 $((PROJECT_COUNT - 1))); do
     continue
   fi
 
-  cd "$PATH_DIR"
+  ensure_clean_state "$PATH_DIR"
 
   git pull --quiet origin main 2>/dev/null || git pull --quiet origin master 2>/dev/null || true
 
@@ -504,12 +595,13 @@ for i in $(seq 0 $((PROJECT_COUNT - 1))); do
     WHAT=$(jq -r ".findings[$j].what" "$FINDINGS_FILE" 2>/dev/null || echo "")
     WHY=$(jq -r ".findings[$j].why" "$FINDINGS_FILE" 2>/dev/null || echo "")
 
-    if [ "$CATEGORY" = "quick-win" ] && [ "$QW_COUNT" -lt "$MAX_QW" ]; then
+    if is_auto_eligible "$CATEGORY" "$EFFORT" "$FILES" && [ "$QW_COUNT" -lt "$MAX_QW" ]; then
       ISSUE_NUM=$(create_issue_if_new "$GITHUB_REPO" "$TITLE" "$CATEGORY" "$EFFORT" "$IMPACT" "$FILES" "$WHAT" "$WHY") || {
         RUN_ERRORS=$(echo "$RUN_ERRORS" | jq -c --arg e "create_issue_if_new failed for: $TITLE" '. + [$e]')
         continue
       }
       log "  Implementing quick-win: $TITLE (issue #$ISSUE_NUM)"
+      ensure_clean_state "$PATH_DIR"
       RESULT=$(implement_quick_win "$PATH_DIR" "$TITLE" "$FILES" "$WHAT" "$WHY" "$ISSUE_NUM") || {
         RUN_ERRORS=$(echo "$RUN_ERRORS" | jq -c --arg e "implement_quick_win failed for: $TITLE" '. + [$e]')
         RESULT="FAILED"
@@ -525,14 +617,21 @@ for i in $(seq 0 $((PROJECT_COUNT - 1))); do
         PROJECT_MSG="${PROJECT_MSG}> ⏭️ **Already done**: ${TITLE}\n"
         RUN_SKIPPED=$((RUN_SKIPPED + 1))
       else
-        PROJECT_MSG="${PROJECT_MSG}> ⏭️ **Skipped**: ${TITLE} (more complex than expected)\n"
+        # Extract reason after SKIPPED: prefix
+        local skip_reason="${RESULT#SKIPPED:}"
+        [ "$skip_reason" = "$RESULT" ] && skip_reason="unknown"
+        PROJECT_MSG="${PROJECT_MSG}> ❌ **Skipped**: ${TITLE} (${skip_reason})\n"
         RUN_SKIPPED=$((RUN_SKIPPED + 1))
+        RUN_ERRORS=$(echo "$RUN_ERRORS" | jq -c --arg e "quick-win skipped: $TITLE — $skip_reason" '. + [$e]')
       fi
     else
+      # Not auto-eligible — create issue for interactive session to pick up
       ISSUE_NUM=$(create_issue_if_new "$GITHUB_REPO" "$TITLE" "$CATEGORY" "$EFFORT" "$IMPACT" "$FILES" "$WHAT" "$WHY") || {
         RUN_ERRORS=$(echo "$RUN_ERRORS" | jq -c --arg e "create_issue_if_new failed for: $TITLE" '. + [$e]')
         continue
       }
+      # Tag for morning triage
+      gh issue edit "$ISSUE_NUM" --repo "$GITHUB_REPO" --add-label "ready-to-implement" 2>/dev/null || true
       PROJECT_MSG="${PROJECT_MSG}> 📋 **${TITLE}** [${CATEGORY}, ${IMPACT} impact, ~${EFFORT}] — issue #${ISSUE_NUM}\n> ${WHAT}\n"
     fi
   done
@@ -543,6 +642,10 @@ for i in $(seq 0 $((PROJECT_COUNT - 1))); do
   log_run "$NAME" "$RUN_FINDINGS" "$RUN_IMPLEMENTED" "$RUN_SKIPPED" "$RUN_PRS" "$RUN_ERRORS" "$HISTORY_FILE"
 
 done
+
+# Send final summary to Discord
+TOTAL_SUMMARY=$(summarize_history "$HISTORY_FILE" 1)
+send_discord "**Summary:** ${TOTAL_SUMMARY}\nDashboard: <https://github.com/users/ChandlerHardy/projects/1>"
 
 echo -e "# Heartbeat Report — ${TODAY}\n\n${SUMMARY}" > "$HOME/heartbeat-reports/${TODAY}.md"
 
