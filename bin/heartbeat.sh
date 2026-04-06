@@ -13,6 +13,15 @@ TMPDIR="/tmp/heartbeat-${TODAY}"
 mkdir -p "$TMPDIR"
 mkdir -p "$HOME/heartbeat-reports"
 
+# Parse --project flag to filter to a single project
+FILTER_PROJECT=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --project) FILTER_PROJECT="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
 log() { echo "$LOG_PREFIX $1" >&2; }
 
 slugify() {
@@ -168,7 +177,10 @@ Use your MCP tools BEFORE making suggestions:
 
 Categorize each finding as: quick-win (<1hr, low risk) | feature | tech-debt | dx
 
-Output ONLY valid JSON (no markdown fences, no explanation):
+CRITICAL: You MUST write your findings as valid JSON to the file: ${findings_file}
+Use the Write tool or bash to write the file. Do NOT output JSON to stdout — write it to the file.
+
+The JSON schema:
 {
   \"project\": \"$name\",
   \"findings\": [
@@ -201,13 +213,29 @@ ALWAYS investigate the codebase AND read the product context before proposing.
 For feature proposals, think about what would make this product MORE USEFUL to its target users.
 Generic suggestions that ignore the actual product or code are worthless.")
 
-  run_claude "$dir" "$discovery_prompt" "$discovery_system" 30 "--output-format json" > "$raw_file" 2>/dev/null || true
+  # Claude writes findings to $findings_file via Write/bash tool.
+  # Capture stdout too in case it outputs JSON there instead.
+  run_claude "$dir" "$discovery_prompt" "$discovery_system" 30 > "$raw_file" 2>/dev/null || true
 
-  jq -r '.result' "$raw_file" > "$findings_file" 2>/dev/null || true
+  # Check if Claude wrote the file directly (preferred path)
+  if jq -e '.findings' "$findings_file" > /dev/null 2>&1; then
+    log "  Findings file written directly by Claude"
+  else
+    # Fallback: parse stdout for JSON
+    local raw_text
+    raw_text=$(cat "$raw_file" 2>/dev/null)
 
-  if ! jq -e '.findings' "$findings_file" > /dev/null 2>&1; then
-    log "  Discovery failed — could not parse JSON output"
-    echo '{"findings":[]}' > "$findings_file"
+    # If --output-format json was used, unwrap .result
+    local unwrapped
+    unwrapped=$(echo "$raw_text" | jq -r '.result // empty' 2>/dev/null)
+    [ -z "$unwrapped" ] && unwrapped="$raw_text"
+
+    if echo "$unwrapped" | jq -e '.findings' > /dev/null 2>&1; then
+      echo "$unwrapped" | jq '.' > "$findings_file"
+    else
+      log "  Discovery failed — could not parse JSON output"
+      echo '{"findings":[]}' > "$findings_file"
+    fi
   fi
 
   cp "$findings_file" "docs/proposals/${TODAY}-heartbeat.json"
@@ -328,6 +356,11 @@ for i in $(seq 0 $((PROJECT_COUNT - 1))); do
   NAME=$(jq -r ".projects[$i].name" "$CONFIG")
   PATH_DIR=$(jq -r ".projects[$i].path" "$CONFIG")
   STALE_DAYS=$(jq -r ".projects[$i].stale_days" "$CONFIG")
+
+  # Skip if --project was specified and this isn't the target
+  if [ -n "$FILTER_PROJECT" ] && [ "$NAME" != "$FILTER_PROJECT" ]; then
+    continue
+  fi
 
   log "Processing: $NAME"
 
