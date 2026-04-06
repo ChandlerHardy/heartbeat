@@ -83,11 +83,59 @@ ISSUEBODY
   issue_number=$(gh issue create --repo "$repo" \
     --title "[heartbeat] $title" \
     --body "$issue_body" \
-    --label "heartbeat,$category" \
+    --label "heartbeat,$category,discovered" \
     2>/dev/null | grep -oE '[0-9]+$')
 
   log "    Created issue #$issue_number: $title"
+
+  # Add to project board with "Discovered" status
+  add_to_project "repos/$repo/issues/$issue_number" "$STATUS_DISCOVERED"
+
   echo "$issue_number"
+}
+
+PROJECT_BOARD_ID="PVT_kwHOAVEBTs4BT23z"
+PROJECT_STATUS_FIELD_ID="PVTSSF_lAHOAVEBTs4BT23zzhBC39Y"
+# Status option IDs from the Heartbeat Dashboard project board
+STATUS_DISCOVERED="30d3a08c"
+STATUS_TRIAGED="4b2b540d"
+STATUS_IMPLEMENTED="da2d3b98"
+STATUS_MERGED="76df93ef"
+STATUS_REJECTED="dab08eb6"
+
+add_to_project() {
+  local issue_or_pr_url="$1"
+  local status_option_id="$2"
+
+  # Get the node ID from the issue/PR URL
+  local node_id
+  node_id=$(gh api "$issue_or_pr_url" --jq '.node_id' 2>/dev/null)
+  if [ -z "$node_id" ] || [ "$node_id" = "null" ]; then
+    log "    Warning: could not get node_id for $issue_or_pr_url"
+    return
+  fi
+
+  # Add item to project board
+  local item_id
+  item_id=$(gh api graphql -f query='mutation($projectId: ID!, $contentId: ID!) {
+    addProjectV2ItemById(input: {projectId: $projectId, contentId: $contentId}) {
+      item { id }
+    }
+  }' -f projectId="$PROJECT_BOARD_ID" -f contentId="$node_id" --jq '.data.addProjectV2ItemById.item.id' 2>/dev/null)
+
+  if [ -z "$item_id" ] || [ "$item_id" = "null" ]; then
+    log "    Warning: could not add to project board"
+    return
+  fi
+
+  # Set status
+  gh api graphql -f query='mutation($projectId: ID!, $itemId: ID!, $fieldId: ID!, $optionId: String!) {
+    updateProjectV2ItemFieldValue(input: {projectId: $projectId, itemId: $itemId, fieldId: $fieldId, value: {singleSelectOptionId: $optionId}}) {
+      projectV2Item { id }
+    }
+  }' -f projectId="$PROJECT_BOARD_ID" -f itemId="$item_id" -f fieldId="$PROJECT_STATUS_FIELD_ID" -f optionId="$status_option_id" > /dev/null 2>&1
+
+  log "    Added to project board (status: $status_option_id)"
 }
 
 send_discord() {
@@ -329,7 +377,8 @@ RULES:
 
   git push origin "$branch" --quiet 2>/dev/null
 
-  gh pr create \
+  local pr_url
+  pr_url=$(gh pr create \
     --title "heartbeat: $title" \
     --body "$(cat <<PRBODY
 ## Heartbeat Auto-Implementation
@@ -346,7 +395,19 @@ Closes #$issue_num
 PRBODY
 )" \
     --base main \
-    --head "$branch" 2>/dev/null || log "    PR creation failed (may already exist)"
+    --head "$branch" 2>/dev/null) || log "    PR creation failed (may already exist)"
+
+  # Update issue status to "Implemented" on project board
+  local repo
+  repo=$(get_github_repo "$dir")
+  add_to_project "repos/$repo/issues/$issue_num" "$STATUS_IMPLEMENTED"
+
+  # Also add the PR itself to the board
+  if [ -n "$pr_url" ]; then
+    local pr_num
+    pr_num=$(echo "$pr_url" | grep -oE '[0-9]+$')
+    add_to_project "repos/$repo/pulls/$pr_num" "$STATUS_IMPLEMENTED"
+  fi
 
   git checkout main 2>/dev/null || git checkout master 2>/dev/null
   log "    Pushed branch + PR: $branch"

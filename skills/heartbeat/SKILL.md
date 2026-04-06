@@ -8,6 +8,19 @@ user-invocable: true
 
 All interactive work runs locally via subagents. OCI is reserved for the nightly cron bot and Discord integration.
 
+## Dashboard
+
+**GitHub Projects board:** https://github.com/users/ChandlerHardy/projects/1
+
+Issues and PRs are auto-added to the board with status tracking:
+- **Discovered** — found by automation, not yet triaged
+- **Triaged** — reviewed, pending action
+- **Implemented** — code written, PR created
+- **Merged** — merged to main
+- **Rejected** — not pursuing
+
+Labels: `heartbeat`, `discovered`, `implemented`, `rejected`, `ai-digest`, `server-health`, `standup-notes`
+
 ## Project Name Mapping
 
 | User says | Local path | OCI name | GitHub repo |
@@ -40,14 +53,16 @@ ssh oci "~/bin/heartbeat.sh --project <name>" 2>&1
 If `--project` isn't supported yet, run the full heartbeat and filter output.
 
 ### `status`
-Show open PRs and issues across all heartbeat-tracked projects.
+Show open PRs and issues across all heartbeat-tracked projects. Mention the dashboard link at the end.
 
 ```bash
-for repo in ChandlerHardy/crooked-finger ChandlerHardy/portfolio-website ChandlerHardy/gnomestead-web ChandlerHardy/gnomestead; do
+for repo in ChandlerHardy/crooked-finger ChandlerHardy/portfolio-website ChandlerHardy/gnomestead-web ChandlerHardy/gnomestead ChandlerHardy/heartbeat; do
   echo "=== $(echo $repo | cut -d/ -f2) ==="
   gh pr list --repo $repo --state open --search "heartbeat" --json number,title,reviewDecision --jq '.[] | "#\(.number) \(.reviewDecision) \(.title)"'
   gh issue list --repo $repo --state open --label heartbeat --json number,title --jq '.[] | "#\(.number) \(.title)"'
 done
+echo ""
+echo "Dashboard: https://github.com/users/ChandlerHardy/projects/1"
 ```
 
 ### `interview <project>`
