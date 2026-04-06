@@ -11,6 +11,7 @@ MAX_QW=$(jq -r '.max_quick_wins_per_project' "$CONFIG")
 PROJECT_COUNT=$(jq '.projects | length' "$CONFIG")
 TMPDIR="/tmp/heartbeat-${TODAY}"
 mkdir -p "$TMPDIR"
+mkdir -p "$HOME/heartbeat-reports"
 
 # Parse --project flag to filter to a single project
 FILTER_PROJECT=""

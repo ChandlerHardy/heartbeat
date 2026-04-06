@@ -7,6 +7,7 @@ DISCORD_WEBHOOK=$(jq -r '.discord_webhook' "$CONFIG")
 PROJECT_COUNT=$(jq '.projects | length' "$CONFIG")
 WEEK_START=$(date -d "7 days ago" +%Y-%m-%d)
 TODAY=$(date +%Y-%m-%d)
+mkdir -p "$HOME/heartbeat-reports"
 
 get_github_repo() {
   local dir="$1"
