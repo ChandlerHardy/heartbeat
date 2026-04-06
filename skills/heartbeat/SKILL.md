@@ -100,7 +100,7 @@ Issue #<number>: $TITLE
 $BODY
 
 Instructions:
-- Create branch: heartbeat/\$(date +%Y-%m-%d)-<slugified-title>
+- CRITICAL: Run git checkout -b heartbeat/\$(date +%Y-%m-%d)-<slugified-title> BEFORE making any changes. NEVER commit to main.
 - Use MCP tools to understand the codebase before editing
 - Implement the change with minimal scope
 - Commit with descriptive message
@@ -119,6 +119,8 @@ gh issue list --repo ChandlerHardy/<project> --state open --label "heartbeat,qui
 ```
 
 When no mode is specified, default to quick-wins.
+
+**Important: One issue per dispatch.** Never batch multiple issues into a single `claude -p` prompt. The agent may commit to main or mix changes across branches. Always dispatch one issue at a time (sequentially or in parallel SSH sessions).
 
 ### `merge`
 Merge all approved heartbeat PRs.
@@ -182,6 +184,24 @@ Then suggest running `/heartbeat interview <name>` to populate `docs/product-con
 
 Report all steps taken and prompt for the vision interview.
 
+### `burn [project] [--until N%]`
+Autonomous discover → implement → merge loop. **Interactive session only** — not for OCI bot/cron.
+
+Loop until session usage hits `--until` (default 80%):
+1. Check usage via claude-in-chrome (`claude.ai/settings/usage` tab must be open)
+2. Run discovery: `ssh oci "~/bin/heartbeat.sh --project <name>"`
+3. Merge any approved PRs
+4. Dispatch implementations for new issues (one per `claude -p`, staggered 10-15s)
+5. Wait for completions, merge approved PRs
+6. Check usage → if under target, loop to step 2
+
+Rules:
+- One issue per OCI dispatch — never batch
+- Clean OCI working tree between rounds (`git checkout -- . && git checkout main && git pull --rebase`)
+- If discovery returns 0 findings, move to next project or stop
+- If no project specified, rotate through all active projects
+- Print running merge count and usage after each round
+
 ### Default (no args or "help")
 Show the command menu, then status:
 
@@ -193,6 +213,7 @@ Heartbeat Commands:
   /heartbeat implement <project>        — implement quick-wins
   /heartbeat implement <project> #N     — implement specific issue
   /heartbeat build <project> <proposal> — deep implementation
+  /heartbeat burn [project] [--until N%] — autonomous loop until usage target
   /heartbeat merge                      — merge all approved PRs
   /heartbeat projects                   — list tracked projects
   /heartbeat add-project <name> <repo>  — add new project
@@ -208,6 +229,7 @@ Then show status output.
 - "implement" + project + issue → `implement <project> #<issue>`
 - "implement" + project (+ "quick-wins" or nothing) → `implement <project> quick-wins`
 - "build" + project + proposal → `build <project> <proposal>`
+- "burn" + optional project + optional --until → `burn`
 - "merge" or "merge all" → `merge`
 - "projects" or "list" → `projects`
 - "add" or "add-project" → `add-project`
