@@ -13,6 +13,8 @@ from pathlib import Path
 
 import jwt
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
@@ -29,6 +31,19 @@ REPO_NAME_MAP = {
     "gnomestead": "gnomestead-ios",
 }
 LOG_PREFIX = "[code-reviewer]"
+
+
+def _github_session():
+    """Create a requests Session with retry/backoff for transient GitHub errors."""
+    session = requests.Session()
+    retry = Retry(
+        total=3,
+        backoff_factor=1,
+        status_forcelist=[502, 503, 504],
+        allowed_methods=["GET", "POST"],
+    )
+    session.mount("https://", HTTPAdapter(max_retries=retry))
+    return session
 
 
 def log(msg):
@@ -66,7 +81,8 @@ def generate_jwt():
 
 def get_installation_token(installation_id):
     token = generate_jwt()
-    resp = requests.post(
+    session = _github_session()
+    resp = session.post(
         f"https://api.github.com/app/installations/{installation_id}/access_tokens",
         headers={
             "Authorization": f"Bearer {token}",
@@ -78,7 +94,8 @@ def get_installation_token(installation_id):
 
 
 def get_pr_diff(owner, repo, pr_number, token):
-    resp = requests.get(
+    session = _github_session()
+    resp = session.get(
         f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}",
         headers={
             "Authorization": f"token {token}",
@@ -99,7 +116,8 @@ def parse_verdict(review_text):
 def post_review(owner, repo, pr_number, body, token):
     """Post a formal PR review (APPROVE or REQUEST_CHANGES)."""
     verdict = parse_verdict(body)
-    resp = requests.post(
+    session = _github_session()
+    resp = session.post(
         f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/reviews",
         headers={
             "Authorization": f"token {token}",
@@ -114,7 +132,8 @@ def post_review(owner, repo, pr_number, body, token):
 
 def post_comment(owner, repo, pr_number, body, token):
     """Post a regular issue comment (for fix attempt tracking)."""
-    requests.post(
+    session = _github_session()
+    session.post(
         f"https://api.github.com/repos/{owner}/{repo}/issues/{pr_number}/comments",
         headers={
             "Authorization": f"token {token}",
@@ -126,7 +145,8 @@ def post_comment(owner, repo, pr_number, body, token):
 
 def get_fix_attempt_count(owner, repo, pr_number, token):
     """Count [auto-fix] comments on the PR to track attempts."""
-    resp = requests.get(
+    session = _github_session()
+    resp = session.get(
         f"https://api.github.com/repos/{owner}/{repo}/issues/{pr_number}/comments",
         headers={
             "Authorization": f"token {token}",
