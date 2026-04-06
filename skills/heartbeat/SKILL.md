@@ -214,6 +214,7 @@ Heartbeat Commands:
   /heartbeat implement <project> #N     — implement specific issue
   /heartbeat build <project> <proposal> — deep implementation
   /heartbeat burn [project] [--until N%] — autonomous loop until usage target
+  /heartbeat cleanup [project]          — delete stale heartbeat branches
   /heartbeat merge                      — merge all approved PRs
   /heartbeat projects                   — list tracked projects
   /heartbeat add-project <name> <repo>  — add new project
@@ -230,6 +231,7 @@ Then show status output.
 - "implement" + project (+ "quick-wins" or nothing) → `implement <project> quick-wins`
 - "build" + project + proposal → `build <project> <proposal>`
 - "burn" + optional project + optional --until → `burn`
+- "cleanup" or "clean" + optional project → `cleanup`
 - "merge" or "merge all" → `merge`
 - "projects" or "list" → `projects`
 - "add" or "add-project" → `add-project`
