@@ -1,0 +1,68 @@
+{
+  "project": "heartbeat",
+  "findings": [
+    {
+      "title": "Discord webhook is injectable via Python triple-quote string",
+      "category": "quick-win",
+      "effort": "30min",
+      "impact": "high",
+      "files": ["heartbeat.sh", "bin/heartbeat.sh", "bin/heartbeat-weekly.sh"],
+      "what": "The send_discord() function interpolates $message directly into a Python triple-quoted string (\"\"\"${message}\"\"\"). If any finding title/body contains triple quotes or backslashes, it breaks the Python code — or worse, injects arbitrary Python. Replace the inline Python heredoc with a proper approach: pass the message via a temp file or stdin pipe to a small Python script that reads from stdin, so the message content never touches shell interpolation or Python string literals.",
+      "why": "Discovery findings come from AI-generated text that can contain any characters. A finding with triple quotes in its title would break the Discord notification for the entire run, silently swallowing all subsequent project reports. This is both a reliability bug and a potential injection vector."
+    },
+    {
+      "title": "Duplicate heartbeat.sh — bin/ and root are diverging",
+      "category": "tech-debt",
+      "effort": "20min",
+      "impact": "medium",
+      "files": ["heartbeat.sh", "bin/heartbeat.sh"],
+      "what": "There are two copies of the main heartbeat script: heartbeat.sh (root, 441 lines — the newer version with --project flag and robust JSON fallback) and bin/heartbeat.sh (408 lines — the older version still using --output-format json and jq .result parsing). The cron/skill both call ~/bin/heartbeat.sh, meaning the production path uses the older, buggier version. Delete the root heartbeat.sh and keep only bin/heartbeat.sh (updated to the latest logic), or make the root file a symlink. Update install.sh accordingly.",
+      "why": "The two files have silently diverged after the fixes in commits 98c612c and 9cb61dc. The bin/ version still uses the old --output-format json approach that was already fixed in the root version. This means discovery in production may still fail to parse findings correctly."
+    },
+    {
+      "title": "Missing heartbeat-reports directory causes crash on first run",
+      "category": "quick-win",
+      "effort": "10min",
+      "impact": "medium",
+      "files": ["heartbeat.sh", "bin/heartbeat.sh"],
+      "what": "Line 436 writes to $HOME/heartbeat-reports/${TODAY}.md but the directory is never created. Add 'mkdir -p \"$HOME/heartbeat-reports\"' near the top of the script (next to the TMPDIR mkdir). Same issue in bin/heartbeat-weekly.sh line 70.",
+      "why": "On a fresh install or after a cleanup, the heartbeat run completes all discovery and implementation work successfully but then crashes at the very last line trying to write the report file, making it look like the entire run failed."
+    },
+    {
+      "title": "Structured run logging and history dashboard",
+      "category": "feature",
+      "effort": "3h",
+      "impact": "high",
+      "files": ["heartbeat.sh", "bin/heartbeat.sh", "bin/heartbeat-history.sh (new)", "skills/heartbeat/SKILL.md"],
+      "what": "Add structured JSON logging for each heartbeat run: timestamp, project, findings count, quick-wins attempted/succeeded/skipped, PRs created, errors. Append each run to $HOME/heartbeat-reports/history.jsonl. Add a '/heartbeat history [project]' command that summarizes recent runs — e.g., 'Last 7 runs: 23 findings, 14 implemented, 9 PRs merged, 0 failures'. This gives visibility into whether heartbeat is actually working well over time or silently failing.",
+      "why": "Right now there's no way to know if heartbeat runs are succeeding or failing without manually checking Discord or SSH-ing into the server and reading logs. A structured history lets you answer 'is heartbeat working?' and 'what has it accomplished this week?' in seconds. The weekly digest only shows GitHub state, not run-level success/failure metrics."
+    },
+    {
+      "title": "Implement retry with backoff for GitHub API calls",
+      "category": "quick-win",
+      "effort": "45min",
+      "impact": "medium",
+      "files": ["code-reviewer/app.py"],
+      "what": "All GitHub API calls in code-reviewer/app.py (get_pr_diff, post_review, post_comment, get_fix_attempt_count, get_installation_token) use bare requests.get/post with no retry logic. GitHub's API regularly returns 502/503 during high load. Add a small retry wrapper (3 attempts, exponential backoff) using urllib3.util.retry or a simple loop. The requests library supports this natively via HTTPAdapter with Retry.",
+      "why": "A transient GitHub 502 during the review flow means the entire review-fix cycle silently fails for that PR. Since heartbeat PRs are meant to be autonomous, a failed review means the PR sits unreviewed until someone manually notices. This is especially impactful because the fix_pr flow chains multiple API calls — any one failing breaks the whole chain."
+    },
+    {
+      "title": "Stale branch cleanup command",
+      "category": "feature",
+      "effort": "2h",
+      "impact": "medium",
+      "files": ["bin/heartbeat-cleanup.sh (new)", "skills/heartbeat/SKILL.md"],
+      "what": "Add a '/heartbeat cleanup [project]' command that finds and deletes stale heartbeat branches — merged branches still on remote, branches whose PRs were closed without merge, and local branches left behind from failed implementations. For each project: list remote branches matching 'heartbeat/*', check if their PR is merged/closed, delete the remote branch if so. Also clean up any local heartbeat/* branches that don't have open PRs. Report what was cleaned.",
+      "why": "Every heartbeat run creates branches like heartbeat/2026-04-06-fix-something. Over weeks, these accumulate — especially from skipped implementations where the branch was pushed but the PR was closed. The weekly digest doesn't track branch cleanup, so repos gradually accumulate dozens of stale heartbeat/* branches that clutter git branch listings and confuse developers."
+    },
+    {
+      "title": "Per-project discovery cooldown to avoid duplicate findings",
+      "category": "feature",
+      "effort": "2h",
+      "impact": "high",
+      "files": ["heartbeat.sh", "bin/heartbeat.sh"],
+      "what": "Before running discovery on a project, check if there are already open heartbeat issues for that project. If there are more than N (configurable, default 5) open issues, skip discovery for that project and log 'Skipping discovery — N open issues already in backlog'. Also, pass existing open issue titles to the discovery prompt so the AI doesn't re-propose work that's already tracked. Add a 'backlog_threshold' field to heartbeat.json per-project config.",
+      "why": "Currently, if heartbeat runs daily but quick-wins aren't being merged (e.g., during a busy week), it will keep proposing similar or identical findings. The title-matching dedup in create_issue_if_new only catches exact matches — semantically similar proposals get duplicated. This wastes Claude API tokens on redundant discovery and creates issue noise."
+    }
+  ]
+}
