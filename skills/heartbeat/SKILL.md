@@ -1,28 +1,27 @@
 ---
 name: heartbeat
-description: "Run heartbeat commands from your local session. Triggers discovery, implementation, interviews, and status checks on OCI. Use for: heartbeat, run heartbeat, discover, heartbeat status, heartbeat interview, implement proposal."
+description: "Run heartbeat commands locally. Discovery, implementation, interviews, and status checks. OCI is only used for the nightly cron and Discord bot. Use for: heartbeat, run heartbeat, discover, heartbeat status, heartbeat interview, implement proposal."
 user-invocable: true
 ---
 
-# Heartbeat — Local Control
+# Heartbeat — Local-First
 
-Run heartbeat operations from your Mac terminal session. All heavy work runs on OCI via SSH.
+All interactive work runs locally via subagents. OCI is reserved for the nightly cron bot and Discord integration.
 
 ## Project Name Mapping
 
-Users may say short/informal names. Map to the correct OCI path and GitHub repo:
+| User says | Local path | OCI name | GitHub repo |
+|-----------|-----------|----------|-------------|
+| gnomestead, gnomestead-ios, gnomestead backend | `~/workspaces/gnomestead/gnomestead-ios` | `gnomestead-ios` | `ChandlerHardy/gnomestead` |
+| gnomestead-web, gnomestead frontend | `~/workspaces/gnomestead/gnomestead-web` | `gnomestead-web` | `ChandlerHardy/gnomestead-web` |
+| crooked-finger, crooked finger | `~/repos/crooked-finger` | `crooked-finger` | `ChandlerHardy/crooked-finger` |
+| portfolio-website, portfolio, website | `~/repos/portfolio-website` | `portfolio-website` | `ChandlerHardy/portfolio-website` |
+| elucidate-chess, elucidate, chess | `~/repos/elucidate-chess` | `elucidate-chess` | `ChandlerHardy/elucidate-chess` |
+| greenline | `~/repos/greenline` | `greenline` | `ChandlerHardy/greenline` |
+| snapcal | `~/repos/snapcal` | `snapcal` | `ChandlerHardy/snapcal` |
+| heartbeat | `~/repos/heartbeat` | `heartbeat` | `ChandlerHardy/heartbeat` |
 
-| User says | OCI path | GitHub repo |
-|-----------|----------|-------------|
-| gnomestead, gnomestead-ios, gnomestead backend | `/mnt/block_volume/repos/gnomestead-ios` | `ChandlerHardy/gnomestead` |
-| gnomestead-web, gnomestead frontend | `/mnt/block_volume/repos/gnomestead-web` | `ChandlerHardy/gnomestead-web` |
-| crooked-finger, crooked finger | `/mnt/block_volume/repos/crooked-finger` | `ChandlerHardy/crooked-finger` |
-| portfolio-website, portfolio, website | `/mnt/block_volume/repos/portfolio-website` | `ChandlerHardy/portfolio-website` |
-| elucidate-chess, elucidate, chess | `/mnt/block_volume/repos/elucidate-chess` | `ChandlerHardy/elucidate-chess` |
-| greenline | `/mnt/block_volume/repos/greenline` | `ChandlerHardy/greenline` |
-| snapcal | `/mnt/block_volume/repos/snapcal` | `ChandlerHardy/snapcal` |
-
-**Important:** The gnomestead backend GitHub repo is `ChandlerHardy/gnomestead` but the OCI directory is `gnomestead-ios`. Always use the correct mapping.
+**Note:** gnomestead backend GitHub repo is `ChandlerHardy/gnomestead` but the directory is `gnomestead-ios`.
 
 ## Commands
 
@@ -54,9 +53,9 @@ done
 ### `interview <project>`
 Run an interactive vision interview to refine a project's product-context.md.
 
-1. Read the current product context from OCI:
+1. Read the current product context from the local repo:
    ```bash
-   ssh oci "cat /mnt/block_volume/repos/<project>/docs/product-context.md 2>/dev/null"
+   cat <local-path>/docs/product-context.md 2>/dev/null
    ```
 
 2. Run a Socratic interview with the user. Ask 5-7 questions:
@@ -70,57 +69,27 @@ Run an interactive vision interview to refine a project's product-context.md.
 3. After the interview, synthesize the answers into an updated product-context.md.
    Show the user the updated context and ask for approval.
 
-4. On approval, write to OCI:
+4. On approval, write locally, commit, and push:
    ```bash
-   # Write updated context
-   ssh oci "cat > /mnt/block_volume/repos/<project>/docs/product-context.md << 'EOF'
-   <updated content>
-   EOF"
-   # Commit
-   ssh oci "cd /mnt/block_volume/repos/<project> && git add docs/product-context.md && git commit -m 'Update product context from vision interview' && git push origin main"
+   cd <local-path> && git add docs/product-context.md && git commit -m 'Update product context from vision interview' && git push origin main
    ```
 
 ### `implement <project> [quick-wins | #<issue>]`
-Trigger OCI implementation. Two modes:
-
-**Always dispatches to OCI** so it keeps running after you close the laptop. The full build → review → fix cycle runs autonomously on the server.
+Implement directly using subagents. **Never dispatch to OCI for interactive sessions.**
 
 **By issue number:** `/heartbeat implement gnomestead #15`
+1. Get issue details: `gh issue view <number> --repo ChandlerHardy/<project>`
+2. Launch an implementer subagent (with `isolation: "worktree"` for the local repo):
+   - Read existing code to understand patterns
+   - Create branch: `heartbeat/$(date +%Y-%m-%d)-<slugified-title>`
+   - Implement with minimal scope
+   - Commit, push, create PR with `Closes #<number>`
 
-```bash
-# Get issue details
-ISSUE=$(gh issue view <number> --repo ChandlerHardy/<project> --json title,body --jq '.')
-TITLE=$(echo "$ISSUE" | jq -r '.title')
-BODY=$(echo "$ISSUE" | jq -r '.body')
+**Quick wins (default):** `/heartbeat implement gnomestead`
+- Find issues: `gh issue list --repo ChandlerHardy/<project> --state open --label "heartbeat,quick-win"`
+- Implement up to 2 in parallel, one subagent per issue, using `isolation: "worktree"`
 
-# Dispatch to OCI (runs in background, survives disconnect)
-ssh oci "nohup bash -l -c 'cd /mnt/block_volume/repos/<local-name> && echo \"Implement this GitHub issue, create a branch, commit, push, and open a PR.
-
-Issue #<number>: $TITLE
-$BODY
-
-Instructions:
-- CRITICAL: Run git checkout -b heartbeat/\$(date +%Y-%m-%d)-<slugified-title> BEFORE making any changes. NEVER commit to main.
-- Use MCP tools to understand the codebase before editing
-- Implement the change with minimal scope
-- Commit with descriptive message
-- Push and create PR with Closes #<number> in the body\" | claude -p --dangerously-skip-permissions --max-turns 40' > /tmp/heartbeat-implement-<number>.log 2>&1 &"
-```
-
-Report: "Dispatched to OCI. The build → review → fix cycle will run autonomously. Check progress with `/heartbeat status` or `ssh oci 'tail -f /tmp/heartbeat-implement-<number>.log'`."
-
-**Quick wins (default):** `/heartbeat implement gnomestead` or `/heartbeat implement gnomestead quick-wins`
-
-```bash
-# Find quick-win issues
-gh issue list --repo ChandlerHardy/<project> --state open --label "heartbeat,quick-win" --json number,title --jq '.[:2]'
-
-# Dispatch each to OCI (same as by-issue flow, one at a time, max 2)
-```
-
-When no mode is specified, default to quick-wins.
-
-**Important: One issue per dispatch.** Never batch multiple issues into a single `claude -p` prompt. The agent may commit to main or mix changes across branches. Always dispatch one issue at a time (sequentially or in parallel SSH sessions).
+**Important:** One issue per subagent. Use worktree isolation for parallel work on the same repo.
 
 ### `merge`
 Merge all approved heartbeat PRs.
@@ -134,12 +103,9 @@ done
 ```
 
 ### `build <project> <proposal>`
-Deep implementation — full autonomous agent for a larger proposal (not just quick wins).
-Same as Discord `/heartbeat build`. Runs on OCI with extended timeout.
+Deep implementation via subagent. For larger proposals.
 
-```bash
-ssh oci "cd /mnt/block_volume/repos/<project> && claude -p --dangerously-skip-permissions --max-turns 60 '<proposal details + implementation instructions>'" 2>&1
-```
+Launch an implementer subagent with the proposal details, working from the local repo with `isolation: "worktree"`. Give it thorough context about the codebase and the proposal.
 
 ### `projects`
 List all projects in the heartbeat config.
@@ -187,22 +153,17 @@ Report all steps taken and prompt for the vision interview.
 ### `burn [project] [--until N%]`
 Autonomous discover → implement → merge loop. **Interactive session only** — not for OCI bot/cron.
 
-**Implementation is direct** — use subagents in worktrees, not OCI dispatch. This avoids double usage (both this session and OCI count against the same Max plan) and eliminates the polling/retry loop.
-
 Loop until session usage hits `--until` (default 80%):
 1. Check usage via claude-in-chrome (`claude.ai/settings/usage` tab must be open)
-2. Run discovery on OCI: `ssh oci "~/bin/heartbeat.sh --project <name>"` (discovery only — OCI has the repos and MCP tools for exploration)
+2. Run discovery on OCI: `ssh oci "~/bin/heartbeat.sh --project <oci-name>"`
 3. Merge any approved PRs
-4. Implement new issues directly using subagents in isolated worktrees (Agent tool with `isolation: "worktree"`)
-   - Clone the OCI repo locally if not already present, or work from the local workspace copy
-   - Launch 2-3 parallel subagents for independent issues
-   - Each agent: checkout branch, implement, commit, push, create PR
+4. Implement new issues via subagents with `isolation: "worktree"` (2-3 parallel)
 5. Merge approved PRs after code reviewer runs
 6. Check usage → if under target, loop to step 2
 
 Rules:
-- Use subagents with `isolation: "worktree"` for parallel implementation — NOT OCI `claude -p`
-- Discovery still runs on OCI (repos + MCP tools live there)
+- Implementation is always local via subagents — never OCI `claude -p`
+- Discovery still runs on OCI (it has MCP tools for exploration)
 - If discovery returns 0 findings, move to next project or stop
 - If no project specified, rotate through all active projects
 - Print running merge count and usage after each round
