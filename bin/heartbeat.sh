@@ -13,6 +13,11 @@ PROJECT_COUNT=$(jq '.projects | length' "$CONFIG")
 TMPDIR="/tmp/heartbeat-${TODAY}"
 mkdir -p "$TMPDIR"
 mkdir -p "$HOME/heartbeat-reports"
+HISTORY_FILE="$HOME/heartbeat-reports/history.jsonl"
+
+# Source shared functions (log_run, summarize_history)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/heartbeat-lib.sh"
 
 # Parse --project flag to filter to a single project
 FILTER_PROJECT=""
@@ -367,9 +372,18 @@ for i in $(seq 0 $((PROJECT_COUNT - 1))); do
 
   log "Processing: $NAME"
 
+  # Run-level counters for structured logging
+  RUN_FINDINGS=0
+  RUN_IMPLEMENTED=0
+  RUN_SKIPPED=0
+  RUN_PRS=0
+  RUN_ERRORS="[]"
+
   if [ ! -d "$PATH_DIR/.git" ]; then
     log "  SKIP — not a git repo: $PATH_DIR"
     SUMMARY="${SUMMARY}**${NAME}** — skipped (not found)\n"
+    RUN_ERRORS=$(echo "$RUN_ERRORS" | jq -c --arg e "not a git repo: $PATH_DIR" '. + [$e]')
+    log_run "$NAME" "$RUN_FINDINGS" "$RUN_IMPLEMENTED" "$RUN_SKIPPED" "$RUN_PRS" "$RUN_ERRORS" "$HISTORY_FILE"
     continue
   fi
 
@@ -381,6 +395,7 @@ for i in $(seq 0 $((PROJECT_COUNT - 1))); do
   if [ -z "$RECENT" ]; then
     log "  SKIP — no commits in $STALE_DAYS days"
     SUMMARY="${SUMMARY}**${NAME}** — skipped (no activity in ${STALE_DAYS} days)\n"
+    log_run "$NAME" "$RUN_FINDINGS" "$RUN_IMPLEMENTED" "$RUN_SKIPPED" "$RUN_PRS" "$RUN_ERRORS" "$HISTORY_FILE"
     continue
   fi
 
@@ -394,6 +409,7 @@ for i in $(seq 0 $((PROJECT_COUNT - 1))); do
   if [ "$OPEN_HEARTBEAT_ISSUES" -gt "$BACKLOG_THRESHOLD" ]; then
     log "  SKIP discovery — $OPEN_HEARTBEAT_ISSUES open heartbeat issues (threshold: $BACKLOG_THRESHOLD)"
     SUMMARY="${SUMMARY}**${NAME}** — skipped discovery (backlog: ${OPEN_HEARTBEAT_ISSUES}/${BACKLOG_THRESHOLD})\n"
+    log_run "$NAME" "$RUN_FINDINGS" "$RUN_IMPLEMENTED" "$RUN_SKIPPED" "$RUN_PRS" "$RUN_ERRORS" "$HISTORY_FILE"
     continue
   fi
 
@@ -406,8 +422,11 @@ for i in $(seq 0 $((PROJECT_COUNT - 1))); do
   FINDING_COUNT=$(jq '.findings | length' "$FINDINGS_FILE" 2>/dev/null || echo "0")
   log "  Found $FINDING_COUNT opportunities"
 
+  RUN_FINDINGS=$FINDING_COUNT
+
   if [ "$FINDING_COUNT" = "0" ]; then
     SUMMARY="${SUMMARY}**${NAME}** — no findings\n"
+    log_run "$NAME" "$RUN_FINDINGS" "$RUN_IMPLEMENTED" "$RUN_SKIPPED" "$RUN_PRS" "$RUN_ERRORS" "$HISTORY_FILE"
     continue
   fi
 
@@ -425,27 +444,42 @@ for i in $(seq 0 $((PROJECT_COUNT - 1))); do
     WHY=$(jq -r ".findings[$j].why" "$FINDINGS_FILE" 2>/dev/null || echo "")
 
     if [ "$CATEGORY" = "quick-win" ] && [ "$QW_COUNT" -lt "$MAX_QW" ]; then
-      ISSUE_NUM=$(create_issue_if_new "$GITHUB_REPO" "$TITLE" "$CATEGORY" "$EFFORT" "$IMPACT" "$FILES" "$WHAT" "$WHY")
+      ISSUE_NUM=$(create_issue_if_new "$GITHUB_REPO" "$TITLE" "$CATEGORY" "$EFFORT" "$IMPACT" "$FILES" "$WHAT" "$WHY") || {
+        RUN_ERRORS=$(echo "$RUN_ERRORS" | jq -c --arg e "create_issue_if_new failed for: $TITLE" '. + [$e]')
+        continue
+      }
       log "  Implementing quick-win: $TITLE (issue #$ISSUE_NUM)"
-      RESULT=$(implement_quick_win "$PATH_DIR" "$TITLE" "$FILES" "$WHAT" "$WHY" "$ISSUE_NUM")
+      RESULT=$(implement_quick_win "$PATH_DIR" "$TITLE" "$FILES" "$WHAT" "$WHY" "$ISSUE_NUM") || {
+        RUN_ERRORS=$(echo "$RUN_ERRORS" | jq -c --arg e "implement_quick_win failed for: $TITLE" '. + [$e]')
+        RESULT="FAILED"
+      }
 
       if [ "$RESULT" = "IMPLEMENTED" ]; then
         SLUG=$(slugify "$TITLE")
         PROJECT_MSG="${PROJECT_MSG}> ✅ **Implemented**: ${TITLE}\n> Branch: \`heartbeat/${TODAY}-${SLUG}\` — PR created\n"
         QW_COUNT=$((QW_COUNT + 1))
+        RUN_IMPLEMENTED=$((RUN_IMPLEMENTED + 1))
+        RUN_PRS=$((RUN_PRS + 1))
       elif [ "$RESULT" = "EXISTS" ]; then
         PROJECT_MSG="${PROJECT_MSG}> ⏭️ **Already done**: ${TITLE}\n"
+        RUN_SKIPPED=$((RUN_SKIPPED + 1))
       else
         PROJECT_MSG="${PROJECT_MSG}> ⏭️ **Skipped**: ${TITLE} (more complex than expected)\n"
+        RUN_SKIPPED=$((RUN_SKIPPED + 1))
       fi
     else
-      ISSUE_NUM=$(create_issue_if_new "$GITHUB_REPO" "$TITLE" "$CATEGORY" "$EFFORT" "$IMPACT" "$FILES" "$WHAT" "$WHY")
+      ISSUE_NUM=$(create_issue_if_new "$GITHUB_REPO" "$TITLE" "$CATEGORY" "$EFFORT" "$IMPACT" "$FILES" "$WHAT" "$WHY") || {
+        RUN_ERRORS=$(echo "$RUN_ERRORS" | jq -c --arg e "create_issue_if_new failed for: $TITLE" '. + [$e]')
+        continue
+      }
       PROJECT_MSG="${PROJECT_MSG}> 📋 **${TITLE}** [${CATEGORY}, ${IMPACT} impact, ~${EFFORT}] — issue #${ISSUE_NUM}\n> ${WHAT}\n"
     fi
   done
 
   send_discord "$(echo -e "$PROJECT_MSG")"
   SUMMARY="${SUMMARY}${NAME}: ${FINDING_COUNT} findings\n"
+
+  log_run "$NAME" "$RUN_FINDINGS" "$RUN_IMPLEMENTED" "$RUN_SKIPPED" "$RUN_PRS" "$RUN_ERRORS" "$HISTORY_FILE"
 
 done
 
