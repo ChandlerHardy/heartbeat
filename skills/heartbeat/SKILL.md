@@ -187,17 +187,22 @@ Report all steps taken and prompt for the vision interview.
 ### `burn [project] [--until N%]`
 Autonomous discover → implement → merge loop. **Interactive session only** — not for OCI bot/cron.
 
+**Implementation is direct** — use subagents in worktrees, not OCI dispatch. This avoids double usage (both this session and OCI count against the same Max plan) and eliminates the polling/retry loop.
+
 Loop until session usage hits `--until` (default 80%):
 1. Check usage via claude-in-chrome (`claude.ai/settings/usage` tab must be open)
-2. Run discovery: `ssh oci "~/bin/heartbeat.sh --project <name>"`
+2. Run discovery on OCI: `ssh oci "~/bin/heartbeat.sh --project <name>"` (discovery only — OCI has the repos and MCP tools for exploration)
 3. Merge any approved PRs
-4. Dispatch implementations for new issues (one per `claude -p`, staggered 10-15s)
-5. Wait for completions, merge approved PRs
+4. Implement new issues directly using subagents in isolated worktrees (Agent tool with `isolation: "worktree"`)
+   - Clone the OCI repo locally if not already present, or work from the local workspace copy
+   - Launch 2-3 parallel subagents for independent issues
+   - Each agent: checkout branch, implement, commit, push, create PR
+5. Merge approved PRs after code reviewer runs
 6. Check usage → if under target, loop to step 2
 
 Rules:
-- One issue per OCI dispatch — never batch
-- Clean OCI working tree between rounds (`git checkout -- . && git checkout main && git pull --rebase`)
+- Use subagents with `isolation: "worktree"` for parallel implementation — NOT OCI `claude -p`
+- Discovery still runs on OCI (repos + MCP tools live there)
 - If discovery returns 0 findings, move to next project or stop
 - If no project specified, rotate through all active projects
 - Print running merge count and usage after each round
