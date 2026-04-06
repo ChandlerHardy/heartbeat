@@ -8,6 +8,7 @@ TODAY=$(date +%Y-%m-%d)
 LOG_PREFIX="[heartbeat $TODAY]"
 DISCORD_WEBHOOK=$(jq -r '.discord_webhook' "$CONFIG")
 MAX_QW=$(jq -r '.max_quick_wins_per_project' "$CONFIG")
+BACKLOG_THRESHOLD=$(jq -r '.backlog_threshold // 5' "$CONFIG")
 PROJECT_COUNT=$(jq '.projects | length' "$CONFIG")
 TMPDIR="/tmp/heartbeat-${TODAY}"
 mkdir -p "$TMPDIR"
@@ -202,7 +203,9 @@ Rules:
 - quick-win means: single file, low risk, obvious improvement
 - feature means: new capability that advances the product (may need multiple files)
 - Check git log and branches to avoid proposing work already in progress
-- 5-7 findings total, mix of both phases, prioritized by impact")
+- 5-7 findings total, mix of both phases, prioritized by impact
+- Do NOT propose anything that duplicates these existing open issues:
+${EXISTING_TITLES}")
 
   local discovery_system
   discovery_system=$(write_prompt "${name}-discovery-sys" "You are a product engineer, not just a code scanner. You have MCP tools — use them:
@@ -385,6 +388,18 @@ for i in $(seq 0 $((PROJECT_COUNT - 1))); do
 
   GITHUB_REPO=$(get_github_repo "$PATH_DIR")
   ensure_labels "$GITHUB_REPO"
+
+  # === BACKLOG CHECK: skip discovery if too many open heartbeat issues ===
+  OPEN_HEARTBEAT_ISSUES=$(gh issue list --repo "$GITHUB_REPO" --label "heartbeat" --state open --json title --jq '. | length' 2>/dev/null || echo "0")
+  if [ "$OPEN_HEARTBEAT_ISSUES" -gt "$BACKLOG_THRESHOLD" ]; then
+    log "  SKIP discovery — $OPEN_HEARTBEAT_ISSUES open heartbeat issues (threshold: $BACKLOG_THRESHOLD)"
+    SUMMARY="${SUMMARY}**${NAME}** — skipped discovery (backlog: ${OPEN_HEARTBEAT_ISSUES}/${BACKLOG_THRESHOLD})\n"
+    continue
+  fi
+
+  # Collect existing heartbeat issue titles to avoid re-proposing tracked work
+  EXISTING_TITLES=$(gh issue list --repo "$GITHUB_REPO" --label "heartbeat" --state open --json title --jq '.[].title' 2>/dev/null || echo "")
+  export EXISTING_TITLES
 
   # === PHASE 1: DISCOVERY ===
   FINDINGS_FILE=$(run_discovery "$NAME" "$PATH_DIR")
