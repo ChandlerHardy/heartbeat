@@ -76,17 +76,17 @@ ISSUEBODY
 
 send_discord() {
   local message="$1"
-  python3 << PYEOF
-import json, urllib.request
-content = """${message}"""
+  printf '%s' "$message" | DISCORD_WEBHOOK="$DISCORD_WEBHOOK" python3 -c '
+import json, sys, os, urllib.request
+content = sys.stdin.read()
 if not content.strip():
     exit(0)
 if len(content) > 1990:
     content = content[:1987] + "..."
 data = json.dumps({"content": content}).encode()
-req = urllib.request.Request("${DISCORD_WEBHOOK}", data=data, headers={"Content-Type": "application/json", "User-Agent": "HeartbeatBot/1.0"})
+req = urllib.request.Request(os.environ["DISCORD_WEBHOOK"], data=data, headers={"Content-Type": "application/json", "User-Agent": "HeartbeatBot/1.0"})
 urllib.request.urlopen(req)
-PYEOF
+'
 }
 
 # Write a prompt to a temp file (avoids shell quoting issues)
