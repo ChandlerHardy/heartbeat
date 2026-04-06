@@ -53,7 +53,7 @@ log_run() { :; }
 summarize_history() { :; }
 
 # Try sourcing the real functions file if it exists
-FUNC_FILE="/Users/chandlerhardy/repos/heartbeat/bin/heartbeat-lib.sh"
+FUNC_FILE="$(cd "$(dirname "$0")/../bin" && pwd)/heartbeat-lib.sh"
 if [ -f "$FUNC_FILE" ]; then
   source "$FUNC_FILE"
 fi

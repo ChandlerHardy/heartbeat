@@ -382,7 +382,7 @@ for i in $(seq 0 $((PROJECT_COUNT - 1))); do
   if [ ! -d "$PATH_DIR/.git" ]; then
     log "  SKIP — not a git repo: $PATH_DIR"
     SUMMARY="${SUMMARY}**${NAME}** — skipped (not found)\n"
-    RUN_ERRORS=$(echo "$RUN_ERRORS" | jq -c '. + ["not a git repo: '"$PATH_DIR"'"]')
+    RUN_ERRORS=$(echo "$RUN_ERRORS" | jq -c --arg e "not a git repo: $PATH_DIR" '. + [$e]')
     log_run "$NAME" "$RUN_FINDINGS" "$RUN_IMPLEMENTED" "$RUN_SKIPPED" "$RUN_PRS" "$RUN_ERRORS" "$HISTORY_FILE"
     continue
   fi
@@ -444,9 +444,15 @@ for i in $(seq 0 $((PROJECT_COUNT - 1))); do
     WHY=$(jq -r ".findings[$j].why" "$FINDINGS_FILE" 2>/dev/null || echo "")
 
     if [ "$CATEGORY" = "quick-win" ] && [ "$QW_COUNT" -lt "$MAX_QW" ]; then
-      ISSUE_NUM=$(create_issue_if_new "$GITHUB_REPO" "$TITLE" "$CATEGORY" "$EFFORT" "$IMPACT" "$FILES" "$WHAT" "$WHY")
+      ISSUE_NUM=$(create_issue_if_new "$GITHUB_REPO" "$TITLE" "$CATEGORY" "$EFFORT" "$IMPACT" "$FILES" "$WHAT" "$WHY") || {
+        RUN_ERRORS=$(echo "$RUN_ERRORS" | jq -c --arg e "create_issue_if_new failed for: $TITLE" '. + [$e]')
+        continue
+      }
       log "  Implementing quick-win: $TITLE (issue #$ISSUE_NUM)"
-      RESULT=$(implement_quick_win "$PATH_DIR" "$TITLE" "$FILES" "$WHAT" "$WHY" "$ISSUE_NUM")
+      RESULT=$(implement_quick_win "$PATH_DIR" "$TITLE" "$FILES" "$WHAT" "$WHY" "$ISSUE_NUM") || {
+        RUN_ERRORS=$(echo "$RUN_ERRORS" | jq -c --arg e "implement_quick_win failed for: $TITLE" '. + [$e]')
+        RESULT="FAILED"
+      }
 
       if [ "$RESULT" = "IMPLEMENTED" ]; then
         SLUG=$(slugify "$TITLE")
@@ -462,7 +468,10 @@ for i in $(seq 0 $((PROJECT_COUNT - 1))); do
         RUN_SKIPPED=$((RUN_SKIPPED + 1))
       fi
     else
-      ISSUE_NUM=$(create_issue_if_new "$GITHUB_REPO" "$TITLE" "$CATEGORY" "$EFFORT" "$IMPACT" "$FILES" "$WHAT" "$WHY")
+      ISSUE_NUM=$(create_issue_if_new "$GITHUB_REPO" "$TITLE" "$CATEGORY" "$EFFORT" "$IMPACT" "$FILES" "$WHAT" "$WHY") || {
+        RUN_ERRORS=$(echo "$RUN_ERRORS" | jq -c --arg e "create_issue_if_new failed for: $TITLE" '. + [$e]')
+        continue
+      }
       PROJECT_MSG="${PROJECT_MSG}> 📋 **${TITLE}** [${CATEGORY}, ${IMPACT} impact, ~${EFFORT}] — issue #${ISSUE_NUM}\n> ${WHAT}\n"
     fi
   done
