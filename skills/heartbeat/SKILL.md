@@ -168,6 +168,40 @@ Rules:
 - If no project specified, rotate through all active projects
 - Print running merge count and usage after each round
 
+### `history [project] [--last N]`
+Show a summary of recent heartbeat runs from the structured log.
+
+```bash
+# Read history from OCI
+HISTORY=$(ssh oci "cat ~/heartbeat-reports/history.jsonl 2>/dev/null")
+```
+
+Then summarize locally. Default: last 7 entries. If `--last N` specified, use N.
+
+**If a project is specified**, filter to only that project's entries:
+```bash
+HISTORY=$(ssh oci "cat ~/heartbeat-reports/history.jsonl 2>/dev/null" | jq -c "select(.project == \"<name>\")")
+```
+
+**Summary format:**
+```
+Last 7 runs: 23 findings, 14 implemented, 9 skipped, 9 PRs created, 0 errors
+```
+
+If there are errors, list the most recent ones:
+```
+Last 7 runs: 23 findings, 14 implemented, 9 skipped, 9 PRs created, 2 errors
+  Errors:
+  - crooked-finger: timeout on test run
+  - gnomestead: not a git repo: /mnt/block_volume/repos/gnomestead-ios
+```
+
+**Detailed mode** (`--detail`): show each run as a row:
+```
+2026-04-06T02:00:00Z  crooked-finger     5 findings  3 impl  1 skip  2 PRs  0 err
+2026-04-06T02:05:00Z  gnomestead-web     3 findings  1 impl  0 skip  1 PRs  0 err
+```
+
 ### Default (no args or "help")
 Show the command menu, then status:
 
@@ -181,6 +215,7 @@ Heartbeat Commands:
   /heartbeat build <project> <proposal> — deep implementation
   /heartbeat burn [project] [--until N%] — autonomous loop until usage target
   /heartbeat cleanup [project]          — delete stale heartbeat branches
+  /heartbeat history [project]          — summarize recent run metrics
   /heartbeat merge                      — merge all approved PRs
   /heartbeat projects                   — list tracked projects
   /heartbeat add-project <name> <repo>  — add new project
@@ -198,6 +233,7 @@ Then show status output.
 - "build" + project + proposal → `build <project> <proposal>`
 - "burn" + optional project + optional --until → `burn`
 - "cleanup" or "clean" + optional project → `cleanup`
+- "history" + optional project + optional --last N → `history`
 - "merge" or "merge all" → `merge`
 - "projects" or "list" → `projects`
 - "add" or "add-project" → `add-project`
