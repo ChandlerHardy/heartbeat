@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 )
 
@@ -68,14 +69,20 @@ func defaultPaths() []string {
 	return out
 }
 
-// RedactedWebhook masks the webhook URL for display.
+// RedactedWebhook returns a display string that confirms a webhook is
+// configured without disclosing any of the URL's path or token. Discord
+// webhook URLs are of the form
+// https://discord.com/api/webhooks/{id}/{token}, and both the ID and token
+// are secrets: exposing even a suffix lets anyone who can reach the dashboard
+// (especially with --host 0.0.0.0) narrow a brute force. Show only the
+// scheme+host and a trailing ellipsis.
 func (c *Config) RedactedWebhook() string {
 	if c.DiscordWebhookURL == "" {
 		return "(not set)"
 	}
-	url := c.DiscordWebhookURL
-	if len(url) > 40 {
-		return url[:25] + "…" + url[len(url)-8:]
+	u, err := url.Parse(c.DiscordWebhookURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "(set)"
 	}
-	return url
+	return fmt.Sprintf("%s://%s/…", u.Scheme, u.Host)
 }

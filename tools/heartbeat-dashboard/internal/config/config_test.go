@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -67,7 +68,9 @@ func TestRedactedWebhook(t *testing.T) {
 		want string
 	}{
 		{"empty", "", "(not set)"},
-		{"short", "https://example.com", "https://example.com"},
+		{"host only", "https://example.com", "https://example.com/…"},
+		{"discord", "https://discord.com/api/webhooks/1234567890/abcdefghij", "https://discord.com/…"},
+		{"unparseable", "not-a-url", "(set)"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -79,13 +82,17 @@ func TestRedactedWebhook(t *testing.T) {
 	}
 }
 
-func TestRedactedWebhook_LongUrlGetsMasked(t *testing.T) {
+func TestRedactedWebhook_DoesNotLeakToken(t *testing.T) {
+	token := "s3cret-webhook-token-xyz"
 	cfg := &Config{
-		DiscordWebhookURL: "https://discord.com/api/webhooks/1234567890/abcdefghijklmnopqrstuvwxyz",
+		DiscordWebhookURL: "https://discord.com/api/webhooks/1234567890/" + token,
 	}
 	redacted := cfg.RedactedWebhook()
-	// Should not contain the middle.
-	if redacted == cfg.DiscordWebhookURL {
-		t.Error("long webhook should be masked")
+	if strings.Contains(redacted, token) {
+		t.Errorf("redacted output leaked token: %q", redacted)
+	}
+	// Should not reveal any suffix of the token either.
+	if len(token) >= 4 && strings.Contains(redacted, token[len(token)-4:]) {
+		t.Errorf("redacted output leaked token suffix: %q", redacted)
 	}
 }

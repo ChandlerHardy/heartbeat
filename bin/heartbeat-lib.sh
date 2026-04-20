@@ -32,16 +32,23 @@ urllib.request.urlopen(req)
 '
 }
 
-# SENESCHAL_TOKEN_HELPER: path to the Python helper that mints a GitHub
-# App installation token for the Seneschal bot. Override via env var for
-# testing.
-SENESCHAL_TOKEN_HELPER="${SENESCHAL_TOKEN_HELPER:-$HOME/seneschal/venv/bin/python $HOME/seneschal/seneschal_token.py}"
+# SENESCHAL_TOKEN_HELPER: command that mints a GitHub App installation token
+# for the Seneschal bot, printing the token to stdout. Set by the operator to
+# a full command line (e.g. "/opt/seneschal/venv/bin/python /opt/seneschal/
+# seneschal_token.py"); unset means "no bot identity, use the operator's gh
+# auth". Heartbeat must not hardcode a path into a sibling repo's deployment
+# layout — seneschal lives in its own repo now and its install location is
+# the operator's choice.
+: "${SENESCHAL_TOKEN_HELPER:=}"
 
 # gh_as_seneschal — run `gh` with a Seneschal installation token for the
-# given repo, falling back to the user's normal gh auth if minting fails
-# (App not installed on that repo, missing PEM, network error). The
-# fallback keeps heartbeat working on repos where Seneschal isn't
-# installed yet.
+# given repo. Behavior depends on SENESCHAL_TOKEN_HELPER:
+#   - unset: run as plain `gh` (operator identity) — normal for repos where
+#     Seneschal isn't installed or deployments that don't use the bot at all.
+#   - set but mint fails (App not installed, PEM missing, network error):
+#     warn to stderr and fall back to `gh`, so the operator notices an
+#     unexpected identity downgrade instead of silently authoring bot-labeled
+#     issues under their personal token.
 #
 # Usage:
 #   gh_as_seneschal owner/repo issue create --repo owner/repo --title "..." ...
@@ -53,8 +60,12 @@ gh_as_seneschal() {
   local repo="$1"
   shift
   local token=""
-  if [ -n "$repo" ]; then
+  if [ -n "$repo" ] && [ -n "$SENESCHAL_TOKEN_HELPER" ]; then
+    # shellcheck disable=SC2086 # helper is an operator-provided command line
     token=$($SENESCHAL_TOKEN_HELPER "$repo" 2>/dev/null || true)
+    if [ -z "$token" ]; then
+      printf 'gh_as_seneschal: SENESCHAL_TOKEN_HELPER set but mint failed for %s; falling back to operator gh auth\n' "$repo" >&2
+    fi
   fi
   if [ -n "$token" ]; then
     GH_TOKEN="$token" gh "$@"
