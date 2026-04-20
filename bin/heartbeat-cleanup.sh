@@ -63,14 +63,14 @@ cleanup_project() {
           log "  Deleted $branch (PR $pr_state)" || \
           log "  Failed to delete $branch"
       fi
-      ((deleted++))
+      deleted=$((deleted + 1))
     elif [[ -z "$pr_state" ]]; then
       # No PR found — branch may be orphaned; skip (safe default)
       log "  Skipped $branch (no PR found)"
-      ((kept++))
+      kept=$((kept + 1))
     else
       log "  Kept $branch (PR $pr_state)"
-      ((kept++))
+      kept=$((kept + 1))
     fi
   done <<< "$branches"
 

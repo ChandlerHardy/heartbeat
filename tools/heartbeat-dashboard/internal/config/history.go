@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"sort"
 	"time"
@@ -61,14 +62,20 @@ func LoadHistory(path string) ([]RunEntry, error) {
 	var out []RunEntry
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1*1024*1024)
+	lineNum := 0
 	for scanner.Scan() {
+		lineNum++
 		line := scanner.Bytes()
 		if len(line) == 0 {
 			continue
 		}
 		var entry RunEntry
 		if err := json.Unmarshal(line, &entry); err != nil {
-			continue // skip bad lines
+			// Surface dropped lines: a SIGKILL during `log_run` append can
+			// truncate a JSONL record, and silently dropping it hides
+			// permanent data loss from every dashboard page. Log and move on.
+			fmt.Fprintf(os.Stderr, "history: %s line %d: skipping malformed record: %v\n", path, lineNum, err)
+			continue
 		}
 		entry.Errors = len(entry.ErrorList)
 		if entry.TimestampRaw != "" {
@@ -77,6 +84,9 @@ func LoadHistory(path string) ([]RunEntry, error) {
 			}
 		}
 		out = append(out, entry)
+	}
+	if err := scanner.Err(); err != nil {
+		return out, fmt.Errorf("history: %s: scan: %w", path, err)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		return out[i].Timestamp.After(out[j].Timestamp)

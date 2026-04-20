@@ -180,8 +180,13 @@ func ParseDir(dir string) ([]Entry, error) {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".jsonl") {
 			continue
 		}
-		fileEntries, err := ParseFile(filepath.Join(dir, e.Name()), projectRaw)
+		path := filepath.Join(dir, e.Name())
+		fileEntries, err := ParseFile(path, projectRaw)
 		if err != nil {
+			// A corrupt or half-written session file silently contributing
+			// zero entries makes burn reports understate token usage with no
+			// indication of which file was dropped. Surface it.
+			fmt.Fprintf(os.Stderr, "claude-burn: skipping session %s: %v\n", path, err)
 			continue
 		}
 		out = append(out, fileEntries...)
@@ -207,8 +212,12 @@ func ParseRoot(root string) ([]Entry, error) {
 		if !e.IsDir() {
 			continue
 		}
-		projectEntries, err := ParseDir(filepath.Join(root, e.Name()))
+		projectDir := filepath.Join(root, e.Name())
+		projectEntries, err := ParseDir(projectDir)
 		if err != nil {
+			// Same rationale as ParseDir: log the project we dropped so the
+			// operator can see an understated total has a named cause.
+			fmt.Fprintf(os.Stderr, "claude-burn: skipping project %s: %v\n", projectDir, err)
 			continue
 		}
 		out = append(out, projectEntries...)

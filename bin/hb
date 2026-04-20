@@ -94,7 +94,7 @@ cmd_runs() {
     die "no history file at $history (runs haven't been logged yet)"
   fi
   echo "=== Last $n runs ==="
-  tail -n "$n" "$history" | jq -r '.timestamp + "  " + .project + "  findings:" + (.findings|tostring) + " impl:" + (.implemented|tostring) + " prs:" + (.prs|tostring)' 2>/dev/null
+  tail -n "$n" "$history" | jq -r '.timestamp + "  " + .project + "  findings:" + (.findings_count|tostring) + " impl:" + (.implemented_count|tostring) + " skip:" + (.skipped_count|tostring) + " prs:" + (.prs_created|tostring)'
 }
 
 cmd_board() {

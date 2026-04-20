@@ -5,7 +5,19 @@ set -euo pipefail
 CONFIG="$HOME/etc/heartbeat.json"
 DISCORD_WEBHOOK=$(jq -r '.discord_webhook' "$CONFIG")
 PROJECT_COUNT=$(jq '.projects | length' "$CONFIG")
-WEEK_START=$(date -d "7 days ago" +%Y-%m-%d)
+
+# Cross-platform "7 days ago" — GNU `date -d` on Linux, BSD `date -v-7d` on
+# macOS. A silent failure here previously turned WEEK_START into "" which
+# made `select(.mergedAt >= "")` match every merged PR ever; fail loudly
+# instead.
+if WEEK_START=$(date -u -d "7 days ago" +%Y-%m-%d 2>/dev/null); then
+  :
+elif WEEK_START=$(date -u -v-7d +%Y-%m-%d 2>/dev/null); then
+  :
+else
+  echo "heartbeat-weekly: neither GNU date -d nor BSD date -v is available" >&2
+  exit 1
+fi
 TODAY=$(date +%Y-%m-%d)
 mkdir -p "$HOME/heartbeat-reports"
 

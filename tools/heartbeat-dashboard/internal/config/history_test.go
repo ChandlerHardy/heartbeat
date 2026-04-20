@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -93,6 +94,42 @@ func TestLoadHistory_EmptyErrorsArray(t *testing.T) {
 	}
 	if runs[0].Errors != 0 {
 		t.Errorf("errors = %d, want 0", runs[0].Errors)
+	}
+}
+
+func TestLoadHistory_MalformedLineSurfaced(t *testing.T) {
+	d := t.TempDir()
+	path := filepath.Join(d, "history.jsonl")
+	// A SIGKILL during log_run can truncate the last line. The reader must
+	// log to stderr so the operator sees permanent data loss rather than an
+	// empty dashboard.
+	content := canonicalLine + "\n" + `{"schema_version":1,"timestamp":"2026-04-14` + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Redirect stderr and capture.
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	origStderr := os.Stderr
+	os.Stderr = w
+	runs, loadErr := LoadHistory(path)
+	w.Close()
+	os.Stderr = origStderr
+
+	buf := make([]byte, 4096)
+	n, _ := r.Read(buf)
+	stderr := string(buf[:n])
+
+	if loadErr != nil {
+		t.Fatalf("load: %v", loadErr)
+	}
+	if len(runs) != 1 {
+		t.Errorf("expected 1 valid run, got %d", len(runs))
+	}
+	if !strings.Contains(stderr, "line 2") || !strings.Contains(stderr, "malformed") {
+		t.Errorf("expected stderr to mention line 2 and 'malformed', got %q", stderr)
 	}
 }
 
