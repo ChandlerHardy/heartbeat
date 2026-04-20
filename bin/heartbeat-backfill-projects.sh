@@ -119,7 +119,7 @@ for repo in "${REPOS[@]}"; do
   fi
 
   # Open heartbeat PRs -> Implemented
-  prs=$(gh pr list --repo "$repo" --state open --search "heartbeat" --json number,title,url --limit 100 2>/dev/null || echo "[]")
+  prs=$(gh pr list --repo "$repo" --state open --label "heartbeat" --json number,title,url --limit 100 2>/dev/null || echo "[]")
   pr_count=$(echo "$prs" | jq 'length')
   if [ "$pr_count" != "0" ]; then
     while read -r item; do

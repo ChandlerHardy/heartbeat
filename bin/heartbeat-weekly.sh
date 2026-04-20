@@ -44,11 +44,13 @@ for i in $(seq 0 $((PROJECT_COUNT - 1))); do
     continue
   fi
 
-  # Count merged PRs this week
-  MERGED=$(gh pr list --repo "$REPO" --state merged --search "heartbeat" --json mergedAt --jq "[.[] | select(.mergedAt >= \"${WEEK_START}\")] | length" 2>/dev/null || echo "0")
-  
-  # Count open PRs
-  OPEN=$(gh pr list --repo "$REPO" --state open --search "heartbeat" --json number --jq 'length' 2>/dev/null || echo "0")
+  # Count merged PRs this week — filter by label, not free-text search, so a
+  # hand-authored PR that happens to mention "heartbeat" in its body doesn't
+  # inflate the count.
+  MERGED=$(gh pr list --repo "$REPO" --state merged --label "heartbeat" --json mergedAt --jq "[.[] | select(.mergedAt >= \"${WEEK_START}\")] | length" 2>/dev/null || echo "0")
+
+  # Count open PRs (same label filter)
+  OPEN=$(gh pr list --repo "$REPO" --state open --label "heartbeat" --json number --jq 'length' 2>/dev/null || echo "0")
   
   # Count open issues
   ISSUES=$(gh issue list --repo "$REPO" --state open --label "heartbeat" --json number --jq 'length' 2>/dev/null || echo "0")

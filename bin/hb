@@ -68,14 +68,14 @@ cmd_status() {
   echo "=== heartbeat status ==="
   echo ""
   jq -r '.projects[] | "\(.name)"' "$CONFIG" | while read -r name; do
-    path=$(jq -r ".projects[] | select(.name == \"$name\") | .path" "$CONFIG")
+    path=$(jq -r --arg n "$name" '.projects[] | select(.name == $n) | .path' "$CONFIG")
     repo=$(git -C "$path" remote get-url origin 2>/dev/null | sed 's|.*github.com[:/]||;s|\.git$||' || echo "")
     if [ -z "$repo" ]; then
       printf "  %-20s (no github remote)\n" "$name"
       continue
     fi
     open_issues=$(gh issue list --repo "$repo" --state open --label heartbeat --json number --jq 'length' 2>/dev/null || echo "?")
-    open_prs=$(gh pr list --repo "$repo" --state open --search "heartbeat" --json number --jq 'length' 2>/dev/null || echo "?")
+    open_prs=$(gh pr list --repo "$repo" --state open --label "heartbeat" --json number --jq 'length' 2>/dev/null || echo "?")
     printf "  %-20s %s open heartbeat issues, %s open PRs\n" "$name" "$open_issues" "$open_prs"
   done
   echo ""

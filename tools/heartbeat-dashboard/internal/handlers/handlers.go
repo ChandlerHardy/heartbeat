@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +19,21 @@ import (
 	"github.com/ChandlerHardy/heartbeat/tools/heartbeat-dashboard/internal/config"
 	"github.com/ChandlerHardy/heartbeat/tools/heartbeat-dashboard/internal/github"
 )
+
+// gitLastCommit returns the timestamp of the HEAD commit in the given repo
+// path. Returns an error if the path isn't a git repo or `git log` fails.
+func gitLastCommit(repoPath string) (time.Time, error) {
+	cmd := exec.Command("git", "-C", repoPath, "log", "-1", "--format=%ct")
+	out, err := cmd.Output()
+	if err != nil {
+		return time.Time{}, err
+	}
+	secs, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return time.Unix(secs, 0), nil
+}
 
 //go:embed templates
 var assets embed.FS
@@ -39,6 +56,11 @@ type Server struct {
 
 	cachedProjects   []projectView
 	cachedProjectsAt time.Time
+
+	// projectsInFlight is non-nil while one goroutine is rebuilding
+	// cachedProjects. Other requests block on the channel instead of firing
+	// their own N-call gh fanout (thundering-herd suppression).
+	projectsInFlight chan struct{}
 }
 
 // New creates a Server with templates parsed.
@@ -150,7 +172,9 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 
 // getProjectViews returns cached project views, rebuilding them if the
 // cache has expired. The buildProjectViews implementation makes N
-// sequential `gh` calls so we cache the result for projectsCacheTTL.
+// sequential `gh` calls so we cache the result for projectsCacheTTL AND
+// coalesce concurrent cold-cache requests — a single goroutine does the
+// rebuild while the rest block on its completion channel (singleflight).
 func (s *Server) getProjectViews() []projectView {
 	s.mu.Lock()
 	if s.cachedProjects != nil && time.Since(s.cachedProjectsAt) < projectsCacheTTL {
@@ -158,17 +182,30 @@ func (s *Server) getProjectViews() []projectView {
 		s.mu.Unlock()
 		return out
 	}
+	if wait := s.projectsInFlight; wait != nil {
+		// Another goroutine is already rebuilding; wait for it, then
+		// read whatever it produced.
+		s.mu.Unlock()
+		<-wait
+		s.mu.Lock()
+		out := s.cachedProjects
+		s.mu.Unlock()
+		return out
+	}
+	// We're the leader. Publish our in-flight channel so followers block,
+	// then release the mutex before the expensive fanout.
+	leader := make(chan struct{})
+	s.projectsInFlight = leader
 	s.mu.Unlock()
 
-	// Build outside the mutex so concurrent /projects requests don't all
-	// serialize behind one another. The first writer wins; later writers
-	// overwrite with equivalent fresh data.
 	views := s.buildProjectViews()
 
 	s.mu.Lock()
 	s.cachedProjects = views
 	s.cachedProjectsAt = time.Now()
+	s.projectsInFlight = nil
 	s.mu.Unlock()
+	close(leader)
 	return views
 }
 
@@ -305,8 +342,12 @@ func (s *Server) buildProjectViews() []projectView {
 			pv.LocalDir = true
 			if _, err := os.Stat(filepath.Join(p.Path, ".git")); err == nil {
 				pv.IsGit = true
-				// Last commit from filesystem mtime as a cheap proxy.
-				pv.LastCommit = info.ModTime()
+				// Last commit from git, not filesystem mtime: `npm install`,
+				// `go build`, and editor saves all touch the dir and would
+				// otherwise make a dormant repo look freshly worked-on.
+				if ts, err := gitLastCommit(p.Path); err == nil {
+					pv.LastCommit = ts
+				}
 				if repo, err := github.RepoFromPath(p.Path); err == nil {
 					pv.GithubRepo = repo
 				}

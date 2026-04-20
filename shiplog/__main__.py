@@ -165,6 +165,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.json:
         payload = {
+            # Bump when any field is renamed, removed, or its type changes so
+            # downstream consumers (cron, n8n, dashboards) can detect drift.
+            "schema_version": 1,
             "window_start": report.window_start.isoformat(),
             "window_end": report.window_end.isoformat(),
             "total_merged": report.total_merged,

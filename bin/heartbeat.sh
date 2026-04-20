@@ -56,11 +56,20 @@ slugify() {
 # get_github_repo and send_discord live in heartbeat-lib.sh so every
 # heartbeat script gets the same implementation.
 
+# Gate label provisioning on a per-repo sentinel so we don't fire 7 `gh label
+# create --force` calls on every project on every run (8 projects × 7 labels
+# = 56 no-op API calls nightly). The sentinel lives under
+# ~/.cache/heartbeat/labels/ keyed by repo slug; delete it to force a reprovision.
 ensure_labels() {
   local repo="$1"
+  local sentinel_dir="$HOME/.cache/heartbeat/labels"
+  local sentinel="$sentinel_dir/${repo//\//_}"
+  [ -f "$sentinel" ] && return 0
+  mkdir -p "$sentinel_dir"
   for label in heartbeat quick-win feature tech-debt dx discovered ready-to-implement; do
     gh label create "$label" --repo "$repo" --force 2>/dev/null || true
   done
+  touch "$sentinel"
 }
 
 # Ensure repo is on main/master with clean working tree
@@ -622,7 +631,7 @@ for i in $(seq 0 $((PROJECT_COUNT - 1))); do
   # Also replace `<` with `‹` so a malicious title cannot emit a literal
   # `</existing_issues>` tag and break out of the data block framing below.
   EXISTING_TITLES=$(gh issue list --repo "$GITHUB_REPO" --label "heartbeat" --state open --json title \
-      --jq '.[].title | gsub("[\u0000-\u001f\u007f]"; " ") | gsub("<"; "‹")' 2>/dev/null \
+      --jq '.[].title // "" | gsub("[\u0000-\u001f\u007f]"; " ") | gsub("<"; "‹")' 2>/dev/null \
     | LC_ALL=C tr -d '\000-\011\013-\037\177' \
     | awk 'NF { printf "  - %.200s\n", $0 }' \
     || echo "")
