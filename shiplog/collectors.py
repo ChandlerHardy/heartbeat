@@ -140,9 +140,18 @@ def fetch_commit_count(repo_path: str, since_iso: str) -> int:
             timeout=15,
         )
         if result.returncode != 0:
+            # Log the exact stderr so a wrong path / not-a-repo / detached
+            # submodule isn't silently reported as "0 commits" the same as
+            # a genuinely-quiet week.
+            print(
+                f"shiplog: fetch_commit_count({repo_path}): git exit {result.returncode}: "
+                f"{result.stderr.strip()}",
+                file=sys.stderr,
+            )
             return 0
         return sum(1 for line in result.stdout.splitlines() if line.strip())
-    except (subprocess.TimeoutExpired, OSError):
+    except (subprocess.TimeoutExpired, OSError) as err:
+        print(f"shiplog: fetch_commit_count({repo_path}): {type(err).__name__}: {err}", file=sys.stderr)
         return 0
 
 

@@ -13,6 +13,11 @@ get_github_repo() {
 # send_discord — post a Discord message. Expects $DISCORD_WEBHOOK in the
 # caller's environment. Truncates to under the 2000-char Discord limit.
 # Previously duplicated verbatim in heartbeat.sh and heartbeat-weekly.sh.
+#
+# The truncation cap here matches shiplog/formatter.py's DISCORD_MAX_CHARS
+# (1900, leaving ~100 chars of headroom for markdown mention expansion).
+# Keep the two values in sync — a mismatched cap means a message that fits
+# one send path gets silently truncated at a different boundary on another.
 send_discord() {
   local message="$1"
   printf '%s' "$message" | DISCORD_WEBHOOK="${DISCORD_WEBHOOK:-}" python3 -c '
@@ -24,8 +29,9 @@ webhook = os.environ.get("DISCORD_WEBHOOK") or ""
 if not webhook:
     sys.stderr.write("send_discord: DISCORD_WEBHOOK not set\n")
     exit(0)
-if len(content) > 1990:
-    content = content[:1987] + "..."
+MAX = 1900
+if len(content) > MAX:
+    content = content[:MAX - 1] + "…"
 data = json.dumps({"content": content}).encode()
 req = urllib.request.Request(webhook, data=data, headers={"Content-Type": "application/json", "User-Agent": "HeartbeatBot/1.0"})
 urllib.request.urlopen(req)

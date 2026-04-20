@@ -198,14 +198,27 @@ func (s *Server) getProjectViews() []projectView {
 	s.projectsInFlight = leader
 	s.mu.Unlock()
 
-	views := s.buildProjectViews()
+	// Wrap publish + close in a defer so a panic inside buildProjectViews
+	// still releases every follower; an un-closed channel would otherwise
+	// hang every subsequent /projects request forever. The earlier
+	// non-defer version would also leak the channel if the scheduler picked
+	// a bad moment. We clear projectsInFlight under the mutex, then close
+	// the channel: by the time a follower observes projectsInFlight == nil
+	// we've already written cachedProjects, so the fresh cache satisfies
+	// the follower's TTL check without a second fanout.
+	var views []projectView
+	defer func() {
+		s.mu.Lock()
+		if views != nil {
+			s.cachedProjects = views
+			s.cachedProjectsAt = time.Now()
+		}
+		s.projectsInFlight = nil
+		s.mu.Unlock()
+		close(leader)
+	}()
 
-	s.mu.Lock()
-	s.cachedProjects = views
-	s.cachedProjectsAt = time.Now()
-	s.projectsInFlight = nil
-	s.mu.Unlock()
-	close(leader)
+	views = s.buildProjectViews()
 	return views
 }
 

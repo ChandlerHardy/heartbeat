@@ -13,6 +13,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
+# Source shared helpers so every bin/* script agrees on get_github_repo and
+# send_discord. Previously hb inlined its own sed-based remote-URL parser —
+# a fourth copy of the shell/Python/Go parser — that drifted silently.
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/heartbeat-lib.sh"
+
 PROJECTS_BOARD_URL="https://github.com/users/ChandlerHardy/projects/1"
 CONFIG="${CONFIG:-$HOME/etc/heartbeat.json}"
 
@@ -69,7 +75,7 @@ cmd_status() {
   echo ""
   jq -r '.projects[] | "\(.name)"' "$CONFIG" | while read -r name; do
     path=$(jq -r --arg n "$name" '.projects[] | select(.name == $n) | .path' "$CONFIG")
-    repo=$(git -C "$path" remote get-url origin 2>/dev/null | sed 's|.*github.com[:/]||;s|\.git$||' || echo "")
+    repo=$(get_github_repo "$path")
     if [ -z "$repo" ]; then
       printf "  %-20s (no github remote)\n" "$name"
       continue
@@ -132,10 +138,12 @@ cmd_burn() {
 
 cmd_discover() {
   # Nightly-style discovery dispatches to the shell script. Accept an
-  # optional project filter that gets passed through.
+  # optional project filter and forward it as --project (heartbeat.sh's CLI
+  # flag; the earlier PROJECT= env var form was not read anywhere and made
+  # `hb discover <name>` silently run against every project).
   local project="${1:-}"
   if [ -n "$project" ]; then
-    PROJECT="$project" exec "$SCRIPT_DIR/heartbeat.sh"
+    exec "$SCRIPT_DIR/heartbeat.sh" --project "$project"
   fi
   exec "$SCRIPT_DIR/heartbeat.sh"
 }
