@@ -9,25 +9,10 @@ WEEK_START=$(date -d "7 days ago" +%Y-%m-%d)
 TODAY=$(date +%Y-%m-%d)
 mkdir -p "$HOME/heartbeat-reports"
 
-get_github_repo() {
-  local dir="$1"
-  git -C "$dir" remote get-url origin 2>/dev/null | sed 's|.*github.com[:/]||;s|\.git$||'
-}
-
-send_discord() {
-  local message="$1"
-  printf '%s' "$message" | DISCORD_WEBHOOK="$DISCORD_WEBHOOK" python3 -c '
-import json, sys, os, urllib.request
-content = sys.stdin.read()
-if not content.strip():
-    exit(0)
-if len(content) > 1990:
-    content = content[:1987] + "..."
-data = json.dumps({"content": content}).encode()
-req = urllib.request.Request(os.environ["DISCORD_WEBHOOK"], data=data, headers={"Content-Type": "application/json", "User-Agent": "HeartbeatBot/1.0"})
-urllib.request.urlopen(req)
-'
-}
+# Source shared helpers (get_github_repo, send_discord).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/heartbeat-lib.sh"
+export DISCORD_WEBHOOK
 
 REPORT="**📊 Heartbeat Weekly Digest** (${WEEK_START} → ${TODAY})\n\n"
 TOTAL_MERGED=0

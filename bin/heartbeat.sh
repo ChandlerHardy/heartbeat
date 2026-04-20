@@ -34,10 +34,8 @@ slugify() {
   echo "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//' | cut -c1-50
 }
 
-get_github_repo() {
-  local dir="$1"
-  git -C "$dir" remote get-url origin 2>/dev/null | sed 's|.*github.com[:/]||;s|\.git$||'
-}
+# get_github_repo and send_discord live in heartbeat-lib.sh so every
+# heartbeat script gets the same implementation.
 
 ensure_labels() {
   local repo="$1"
@@ -109,8 +107,11 @@ $why
 ISSUEBODY
 )
 
+  # Use Seneschal installation token if available so the issue is filed
+  # by Seneschal[bot] instead of the operator's personal account; falls
+  # back to the user's gh auth on repos where the App isn't installed.
   local issue_number
-  issue_number=$(gh issue create --repo "$repo" \
+  issue_number=$(gh_as_seneschal "$repo" issue create --repo "$repo" \
     --title "[heartbeat] $title" \
     --body "$issue_body" \
     --label "heartbeat,$category,discovered" \
@@ -166,21 +167,6 @@ add_to_project() {
   }' -f projectId="$PROJECT_BOARD_ID" -f itemId="$item_id" -f fieldId="$PROJECT_STATUS_FIELD_ID" -f optionId="$status_option_id" > /dev/null 2>&1
 
   log "    Added to project board (status: $status_option_id)"
-}
-
-send_discord() {
-  local message="$1"
-  printf '%s' "$message" | DISCORD_WEBHOOK="$DISCORD_WEBHOOK" python3 -c '
-import json, sys, os, urllib.request
-content = sys.stdin.read()
-if not content.strip():
-    exit(0)
-if len(content) > 1990:
-    content = content[:1987] + "..."
-data = json.dumps({"content": content}).encode()
-req = urllib.request.Request(os.environ["DISCORD_WEBHOOK"], data=data, headers={"Content-Type": "application/json", "User-Agent": "HeartbeatBot/1.0"})
-urllib.request.urlopen(req)
-'
 }
 
 # Write a prompt to a temp file (avoids shell quoting issues)
@@ -468,8 +454,14 @@ RULES:
 
   git push origin "$branch" --quiet 2>/dev/null
 
+  # Resolve the GitHub repo first so the PR can be created via the
+  # Seneschal installation token (filing under Seneschal[bot] instead of
+  # the operator).
+  local repo
+  repo=$(get_github_repo "$dir")
+
   local pr_url
-  pr_url=$(gh pr create \
+  pr_url=$(gh_as_seneschal "$repo" pr create \
     --title "heartbeat: $title" \
     --body "$(cat <<PRBODY
 ## Heartbeat Auto-Implementation
@@ -488,9 +480,8 @@ PRBODY
     --base main \
     --head "$branch" 2>/dev/null) || log "    PR creation failed (may already exist)"
 
-  # Update issue status to "Implemented" on project board
-  local repo
-  repo=$(get_github_repo "$dir")
+  # Update issue status to "Implemented" on project board (uses user auth
+  # because Project mutations need user-scope tokens, not App tokens).
   add_to_project "repos/$repo/issues/$issue_num" "$STATUS_IMPLEMENTED"
 
   # Also add the PR itself to the board
@@ -617,12 +608,14 @@ for i in $(seq 0 $((PROJECT_COUNT - 1))); do
         PROJECT_MSG="${PROJECT_MSG}> ⏭️ **Already done**: ${TITLE}\n"
         RUN_SKIPPED=$((RUN_SKIPPED + 1))
       else
-        # Extract reason after SKIPPED: prefix
-        local skip_reason="${RESULT#SKIPPED:}"
-        [ "$skip_reason" = "$RESULT" ] && skip_reason="unknown"
-        PROJECT_MSG="${PROJECT_MSG}> ❌ **Skipped**: ${TITLE} (${skip_reason})\n"
+        # Extract reason after SKIPPED: prefix. `local` is NOT valid outside
+        # a function, and with `set -e` it would abort the whole run the
+        # first time a quick-win returns SKIPPED — use a plain assignment.
+        SKIP_REASON="${RESULT#SKIPPED:}"
+        [ "$SKIP_REASON" = "$RESULT" ] && SKIP_REASON="unknown"
+        PROJECT_MSG="${PROJECT_MSG}> ❌ **Skipped**: ${TITLE} (${SKIP_REASON})\n"
         RUN_SKIPPED=$((RUN_SKIPPED + 1))
-        RUN_ERRORS=$(echo "$RUN_ERRORS" | jq -c --arg e "quick-win skipped: $TITLE — $skip_reason" '. + [$e]')
+        RUN_ERRORS=$(echo "$RUN_ERRORS" | jq -c --arg e "quick-win skipped: $TITLE — $SKIP_REASON" '. + [$e]')
       fi
     else
       # Not auto-eligible — create issue for interactive session to pick up
@@ -630,8 +623,9 @@ for i in $(seq 0 $((PROJECT_COUNT - 1))); do
         RUN_ERRORS=$(echo "$RUN_ERRORS" | jq -c --arg e "create_issue_if_new failed for: $TITLE" '. + [$e]')
         continue
       }
-      # Tag for morning triage
-      gh issue edit "$ISSUE_NUM" --repo "$GITHUB_REPO" --add-label "ready-to-implement" 2>/dev/null || true
+      # Tag for morning triage. Edit via Seneschal so the audit log
+      # keeps the bot identity consistent with the issue creator.
+      gh_as_seneschal "$GITHUB_REPO" issue edit "$ISSUE_NUM" --repo "$GITHUB_REPO" --add-label "ready-to-implement" 2>/dev/null || true
       PROJECT_MSG="${PROJECT_MSG}> 📋 **${TITLE}** [${CATEGORY}, ${IMPACT} impact, ~${EFFORT}] — issue #${ISSUE_NUM}\n> ${WHAT}\n"
     fi
   done
@@ -647,7 +641,11 @@ done
 TOTAL_SUMMARY=$(summarize_history "$HISTORY_FILE" 1)
 send_discord "**Summary:** ${TOTAL_SUMMARY}\nDashboard: <https://github.com/users/ChandlerHardy/projects/1>"
 
-echo -e "# Heartbeat Report — ${TODAY}\n\n${SUMMARY}" > "$HOME/heartbeat-reports/${TODAY}.md"
+# Atomic write: stage to a temp file and rename, so a crash mid-redirect
+# never leaves the final report path truncated to zero bytes.
+REPORT_TMP=$(mktemp "$HOME/heartbeat-reports/.${TODAY}.md.XXXXXX")
+echo -e "# Heartbeat Report — ${TODAY}\n\n${SUMMARY}" > "$REPORT_TMP"
+mv "$REPORT_TMP" "$HOME/heartbeat-reports/${TODAY}.md"
 
 rm -rf "$TMPDIR"
 

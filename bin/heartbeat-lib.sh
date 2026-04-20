@@ -1,6 +1,67 @@
 #!/bin/bash
 # heartbeat-lib.sh — shared functions for heartbeat scripts
-# Sourced by heartbeat.sh and tests. No side effects on source.
+# Sourced by heartbeat.sh, heartbeat-weekly.sh, heartbeat-cleanup.sh, and
+# tests. No side effects on source.
+
+# get_github_repo — resolve owner/name from a local git clone's origin.
+# Used by every heartbeat script; previously duplicated in three places.
+get_github_repo() {
+  local dir="$1"
+  git -C "$dir" remote get-url origin 2>/dev/null | sed 's|.*github.com[:/]||;s|\.git$||'
+}
+
+# send_discord — post a Discord message. Expects $DISCORD_WEBHOOK in the
+# caller's environment. Truncates to under the 2000-char Discord limit.
+# Previously duplicated verbatim in heartbeat.sh and heartbeat-weekly.sh.
+send_discord() {
+  local message="$1"
+  printf '%s' "$message" | DISCORD_WEBHOOK="${DISCORD_WEBHOOK:-}" python3 -c '
+import json, sys, os, urllib.request
+content = sys.stdin.read()
+if not content.strip():
+    exit(0)
+webhook = os.environ.get("DISCORD_WEBHOOK") or ""
+if not webhook:
+    sys.stderr.write("send_discord: DISCORD_WEBHOOK not set\n")
+    exit(0)
+if len(content) > 1990:
+    content = content[:1987] + "..."
+data = json.dumps({"content": content}).encode()
+req = urllib.request.Request(webhook, data=data, headers={"Content-Type": "application/json", "User-Agent": "HeartbeatBot/1.0"})
+urllib.request.urlopen(req)
+'
+}
+
+# SENESCHAL_TOKEN_HELPER: path to the Python helper that mints a GitHub
+# App installation token for the Seneschal bot. Override via env var for
+# testing.
+SENESCHAL_TOKEN_HELPER="${SENESCHAL_TOKEN_HELPER:-$HOME/seneschal/venv/bin/python $HOME/seneschal/seneschal_token.py}"
+
+# gh_as_seneschal — run `gh` with a Seneschal installation token for the
+# given repo, falling back to the user's normal gh auth if minting fails
+# (App not installed on that repo, missing PEM, network error). The
+# fallback keeps heartbeat working on repos where Seneschal isn't
+# installed yet.
+#
+# Usage:
+#   gh_as_seneschal owner/repo issue create --repo owner/repo --title "..." ...
+#   gh_as_seneschal owner/repo pr create --title "..." ...
+#
+# The repo is passed once for token minting; the rest of the args are
+# forwarded to `gh` unchanged.
+gh_as_seneschal() {
+  local repo="$1"
+  shift
+  local token=""
+  if [ -n "$repo" ]; then
+    token=$($SENESCHAL_TOKEN_HELPER "$repo" 2>/dev/null || true)
+  fi
+  if [ -n "$token" ]; then
+    GH_TOKEN="$token" gh "$@"
+  else
+    gh "$@"
+  fi
+}
 
 # log_run — append a JSON line to the history file
 # Usage: log_run <project> <findings> <implemented> <skipped> <prs> <errors_json> <history_file>
@@ -16,6 +77,9 @@ log_run() {
   local timestamp
   timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
+  # schema_version: bump if any field is renamed or its type changes.
+  # Reader contract: tools/heartbeat-dashboard/internal/config/history.go
+  # and bin/heartbeat-lib.sh::summarize_history must agree on field names.
   local line
   line=$(jq -cn \
     --arg ts "$timestamp" \
@@ -26,6 +90,7 @@ log_run() {
     --argjson prs "$prs_created" \
     --argjson errors "$errors_json" \
     '{
+      schema_version: 1,
       timestamp: $ts,
       project: $proj,
       findings_count: $findings,

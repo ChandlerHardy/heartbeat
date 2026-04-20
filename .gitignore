@@ -10,3 +10,7 @@ venv/
 
 # Temp
 /tmp/
+
+# Local editor/tool state
+.claude/settings.local.json
+.DS_Store

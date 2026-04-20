@@ -1,0 +1,172 @@
+#!/bin/bash
+# hb — unified heartbeat CLI
+#
+# A thin dispatcher that wraps every heartbeat subsystem under one command
+# so you don't have to remember which script does what. Runs locally; does
+# not need Claude Code or the Discord bot to be up.
+#
+# Every subcommand delegates to an existing binary or shell script. If the
+# underlying tool isn't installed, hb points you at the install command.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+PROJECTS_BOARD_URL="https://github.com/users/ChandlerHardy/projects/1"
+CONFIG="${CONFIG:-$HOME/etc/heartbeat.json}"
+
+die() { echo "hb: $*" >&2; exit 1; }
+
+ensure_cmd() {
+  command -v "$1" >/dev/null 2>&1 || die "$1 not found. $2"
+}
+
+cmd_help() {
+  cat <<'EOF'
+hb — unified heartbeat CLI
+
+USAGE
+  hb <command> [args]
+
+INSPECT
+  hb status                     Open PRs and issues across tracked repos
+  hb projects                   List configured projects (heartbeat.json)
+  hb runs [--last N]            Recent heartbeat run history
+  hb board                      Open the GitHub Projects board in a browser
+  hb dashboard [--port N]       Launch local read-only web dashboard
+
+EDIT
+  hb config <list|add|remove>   Safely edit heartbeat.json
+  hb add <name> <path> [days]   Shortcut for `hb config add`
+  hb remove <name>              Shortcut for `hb config remove`
+
+OPERATE
+  hb discover [project]         Run nightly-style discovery on a project
+  hb brainstorm [--focus=X]     Propose NEW project ideas via Claude
+  hb backfill                   Populate the GitHub Projects board
+  hb shiplog [flags]            Weekly retrospective digest (wraps `python3 -m shiplog`)
+  hb burn [flags]               Claude Code usage telemetry (wraps `claude-burn`)
+
+META
+  hb help                       Show this message
+  hb version                    Print version
+
+NOTES
+  - hb delegates to existing scripts; see tools/ for implementations
+  - For Claude-Code-integrated flows (implement, interview, build), use
+    the /heartbeat slash command — those require Claude to be running
+  - CONFIG env var overrides the default heartbeat.json path
+EOF
+}
+
+cmd_status() {
+  ensure_cmd gh "install the GitHub CLI: brew install gh"
+  if [ ! -f "$CONFIG" ]; then
+    die "config not found: $CONFIG"
+  fi
+  echo "=== heartbeat status ==="
+  echo ""
+  jq -r '.projects[] | "\(.name)"' "$CONFIG" | while read -r name; do
+    path=$(jq -r ".projects[] | select(.name == \"$name\") | .path" "$CONFIG")
+    repo=$(git -C "$path" remote get-url origin 2>/dev/null | sed 's|.*github.com[:/]||;s|\.git$||' || echo "")
+    if [ -z "$repo" ]; then
+      printf "  %-20s (no github remote)\n" "$name"
+      continue
+    fi
+    open_issues=$(gh issue list --repo "$repo" --state open --label heartbeat --json number --jq 'length' 2>/dev/null || echo "?")
+    open_prs=$(gh pr list --repo "$repo" --state open --search "heartbeat" --json number --jq 'length' 2>/dev/null || echo "?")
+    printf "  %-20s %s open heartbeat issues, %s open PRs\n" "$name" "$open_issues" "$open_prs"
+  done
+  echo ""
+  echo "Board: $PROJECTS_BOARD_URL"
+}
+
+cmd_projects() { "$SCRIPT_DIR/heartbeat-config.sh" list; }
+
+cmd_runs() {
+  local history="$HOME/heartbeat-reports/history.jsonl"
+  local n=10
+  if [ "${1:-}" = "--last" ] && [ -n "${2:-}" ]; then
+    n="$2"
+  fi
+  if [ ! -f "$history" ]; then
+    die "no history file at $history (runs haven't been logged yet)"
+  fi
+  echo "=== Last $n runs ==="
+  tail -n "$n" "$history" | jq -r '.timestamp + "  " + .project + "  findings:" + (.findings|tostring) + " impl:" + (.implemented|tostring) + " prs:" + (.prs|tostring)' 2>/dev/null
+}
+
+cmd_board() {
+  if command -v open >/dev/null 2>&1; then
+    open "$PROJECTS_BOARD_URL"
+  else
+    echo "$PROJECTS_BOARD_URL"
+  fi
+}
+
+cmd_dashboard() {
+  ensure_cmd heartbeat-dashboard "build it: cd $REPO_ROOT/tools/heartbeat-dashboard && go build -o ~/bin/heartbeat-dashboard ./cmd/heartbeat-dashboard"
+  exec heartbeat-dashboard "$@"
+}
+
+cmd_config() {
+  exec "$SCRIPT_DIR/heartbeat-config.sh" "$@"
+}
+
+cmd_add() { exec "$SCRIPT_DIR/heartbeat-config.sh" add "$@"; }
+cmd_remove() { exec "$SCRIPT_DIR/heartbeat-config.sh" remove "$@"; }
+
+cmd_brainstorm() { exec "$SCRIPT_DIR/heartbeat-brainstorm.sh" "$@"; }
+cmd_backfill() { exec "$SCRIPT_DIR/heartbeat-backfill-projects.sh" "$@"; }
+
+cmd_shiplog() {
+  ensure_cmd python3 "install Python 3"
+  cd "$REPO_ROOT" && exec python3 -m shiplog "$@"
+}
+
+cmd_burn() {
+  ensure_cmd claude-burn "build it: cd $REPO_ROOT/tools/claude-burn && go build -o ~/bin/claude-burn ./cmd/claude-burn"
+  exec claude-burn "$@"
+}
+
+cmd_discover() {
+  # Nightly-style discovery dispatches to the shell script. Accept an
+  # optional project filter that gets passed through.
+  local project="${1:-}"
+  if [ -n "$project" ]; then
+    PROJECT="$project" exec "$SCRIPT_DIR/heartbeat.sh"
+  fi
+  exec "$SCRIPT_DIR/heartbeat.sh"
+}
+
+cmd_version() {
+  echo "hb 0.1.0"
+  echo "repo:  $REPO_ROOT"
+  echo "config: $CONFIG"
+}
+
+main() {
+  local subcmd="${1:-help}"
+  shift || true
+  case "$subcmd" in
+    help|-h|--help)   cmd_help "$@" ;;
+    status)           cmd_status "$@" ;;
+    projects)         cmd_projects "$@" ;;
+    runs)             cmd_runs "$@" ;;
+    board)            cmd_board "$@" ;;
+    dashboard)        cmd_dashboard "$@" ;;
+    config)           cmd_config "$@" ;;
+    add)              cmd_add "$@" ;;
+    remove)           cmd_remove "$@" ;;
+    brainstorm)       cmd_brainstorm "$@" ;;
+    backfill)         cmd_backfill "$@" ;;
+    shiplog)          cmd_shiplog "$@" ;;
+    burn)             cmd_burn "$@" ;;
+    discover)         cmd_discover "$@" ;;
+    version|-v|--version) cmd_version ;;
+    *) die "unknown command: $subcmd (try 'hb help')" ;;
+  esac
+}
+
+main "$@"

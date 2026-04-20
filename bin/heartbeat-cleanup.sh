@@ -21,10 +21,9 @@ done
 
 log() { echo "$LOG_PREFIX $1" >&2; }
 
-get_github_repo() {
-  local dir="$1"
-  git -C "$dir" remote get-url origin 2>/dev/null | sed 's|.*github.com[:/]||;s|\.git$||'
-}
+# Source shared helpers (get_github_repo, send_discord).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/heartbeat-lib.sh"
 
 cleanup_project() {
   local name="$1"
