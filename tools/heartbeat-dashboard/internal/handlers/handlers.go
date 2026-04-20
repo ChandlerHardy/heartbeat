@@ -196,11 +196,18 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 // handleRefresh invalidates the cached history. It requires POST so that
 // crafted GET links (image tags, prefetchers) cannot mutate state, and it
 // only redirects to in-app paths so a malicious Referer cannot turn this
-// into an open-redirect sink.
+// into an open-redirect sink. A same-origin check on Origin/Referer blocks
+// cross-site form POSTs that would otherwise flush caches and force a fanout
+// of gh calls on the next read (rate-budget DoS), which matters when the
+// dashboard is bound to --host 0.0.0.0.
 func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !sameOrigin(r) {
+		http.Error(w, "cross-origin POST rejected", http.StatusForbidden)
 		return
 	}
 	s.mu.Lock()
@@ -212,16 +219,43 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, safeReturnPath(r.Referer()), http.StatusSeeOther)
 }
 
+// sameOrigin returns true when the request's Origin (or Referer as a
+// fallback for browsers that omit Origin on same-origin POST) matches the
+// request's Host. Requests with neither header are rejected — every browser
+// sends at least one on a cross-site form POST.
+func sameOrigin(r *http.Request) bool {
+	check := func(raw string) (bool, bool) {
+		if raw == "" {
+			return false, false
+		}
+		u, err := url.Parse(raw)
+		if err != nil || u.Host == "" {
+			return false, true
+		}
+		return u.Host == r.Host, true
+	}
+	if ok, present := check(r.Header.Get("Origin")); present {
+		return ok
+	}
+	if ok, present := check(r.Header.Get("Referer")); present {
+		return ok
+	}
+	return false
+}
+
 // safeReturnPath returns an absolute, in-app path derived from the Referer
 // header. Anything that isn't a relative path under "/" (including empty,
-// off-host, or scheme-prefixed values) collapses to "/".
+// off-host, or scheme-prefixed values) collapses to "/". Backslashes are
+// rejected because legacy Edge and some mobile webviews normalize `\` to
+// `/`, so `/\evil.com/x` would otherwise render as `//evil.com/x` in the
+// Location header and redirect cross-origin.
 func safeReturnPath(referer string) string {
 	if referer == "" {
 		return "/"
 	}
 	if u, err := url.Parse(referer); err == nil && u.Path != "" && !strings.Contains(u.Path, "://") {
 		// Ignore host/scheme; only use the path portion to keep us in-app.
-		if strings.HasPrefix(u.Path, "/") {
+		if strings.HasPrefix(u.Path, "/") && !strings.ContainsAny(u.Path, `\`) {
 			return u.Path
 		}
 	}

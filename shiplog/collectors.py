@@ -108,7 +108,11 @@ def fetch_open_pr_count(repo: str) -> int:
     ])
     try:
         return len(json.loads(raw))
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as err:
+        # gh occasionally returns a rate-limit HTML body or truncated stdout;
+        # silently substituting zero makes this indistinguishable from a real
+        # empty repo and archives wrong data into the run record. Surface it.
+        print(f"shiplog: fetch_open_pr_count({repo}): non-JSON gh output: {err}", file=sys.stderr)
         return 0
 
 
@@ -121,7 +125,8 @@ def fetch_open_issue_count(repo: str) -> int:
     ])
     try:
         return len(json.loads(raw))
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as err:
+        print(f"shiplog: fetch_open_issue_count({repo}): non-JSON gh output: {err}", file=sys.stderr)
         return 0
 
 

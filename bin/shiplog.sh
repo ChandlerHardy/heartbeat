@@ -42,7 +42,11 @@ fi
 if [[ $SEND_DISCORD -eq 1 ]]; then
   CMD+=(--discord)
 fi
-CMD+=("${EXTRA_ARGS[@]}")
+# Empty-array expansion: under `set -u` on macOS /bin/bash 3.2, a bare
+# "${EXTRA_ARGS[@]}" on an empty array is treated as an unset variable. The
+# ${arr[@]+"${arr[@]}"} idiom expands to nothing when unset and to the
+# quoted elements otherwise. Harmless on bash 4.4+.
+CMD+=(${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"})
 
 cd "$REPO_ROOT"
 "${CMD[@]}"

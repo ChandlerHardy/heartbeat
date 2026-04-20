@@ -22,9 +22,10 @@ scp "$REPO_DIR/bin/heartbeat-weekly.sh" "${HOST}:~/bin/heartbeat-weekly.sh"
 scp "$REPO_DIR/bin/heartbeat-cleanup.sh" "${HOST}:~/bin/heartbeat-cleanup.sh"
 scp "$REPO_DIR/bin/shiplog.sh" "${HOST}:~/bin/shiplog.sh"
 scp "$REPO_DIR/bin/heartbeat-brainstorm.sh" "${HOST}:~/bin/heartbeat-brainstorm.sh"
+scp "$REPO_DIR/bin/heartbeat-backfill-projects.sh" "${HOST}:~/bin/heartbeat-backfill-projects.sh"
 scp "$REPO_DIR/bin/heartbeat-config.sh" "${HOST}:~/bin/heartbeat-config.sh"
 scp "$REPO_DIR/bin/hb" "${HOST}:~/bin/hb"
-ssh "$HOST" "chmod +x ~/bin/heartbeat.sh ~/bin/heartbeat-weekly.sh ~/bin/heartbeat-cleanup.sh ~/bin/shiplog.sh ~/bin/heartbeat-brainstorm.sh ~/bin/heartbeat-config.sh ~/bin/hb"
+ssh "$HOST" "chmod +x ~/bin/heartbeat.sh ~/bin/heartbeat-weekly.sh ~/bin/heartbeat-cleanup.sh ~/bin/shiplog.sh ~/bin/heartbeat-brainstorm.sh ~/bin/heartbeat-backfill-projects.sh ~/bin/heartbeat-config.sh ~/bin/hb"
 
 # ShipLog — Python package deployed to ~/shiplog
 ssh "$HOST" "mkdir -p ~/shiplog"
@@ -36,6 +37,7 @@ done
 ssh "$HOST" "bash -n ~/bin/heartbeat.sh && echo 'heartbeat.sh: OK'"
 ssh "$HOST" "bash -n ~/bin/heartbeat-weekly.sh && echo 'heartbeat-weekly.sh: OK'"
 ssh "$HOST" "bash -n ~/bin/shiplog.sh && echo 'shiplog.sh: OK'"
+ssh "$HOST" "bash -n ~/bin/heartbeat-backfill-projects.sh && echo 'heartbeat-backfill-projects.sh: OK'"
 ssh "$HOST" "python3 -c 'import sys; sys.path.insert(0, \"/home/ubuntu\"); import shiplog; print(\"shiplog import: OK\")' || echo 'shiplog import: FAIL'"
 
 echo ""

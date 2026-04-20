@@ -41,10 +41,22 @@ fi
 TODAY=$(date +%Y-%m-%d)
 mkdir -p "$ARCHIVE_DIR"
 
+# Source shared helpers (send_discord) so the Discord POST below lives in
+# one place across every heartbeat script.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/heartbeat-lib.sh"
+
 # Build the portfolio context: one section per project with name, path,
 # and the first 40 lines of docs/product-context.md if it exists.
 PORTFOLIO=$(mktemp)
-trap 'rm -f "$PORTFOLIO"' EXIT
+SYS_FILE=$(mktemp)
+USR_FILE=$(mktemp)
+# Single cleanup trap — bash traps don't stack, so composing once here
+# prevents a future edit to add another temp file and forgetting that a
+# second `trap` further down would silently replace the first.
+cleanup() { rm -f "$PORTFOLIO" "$SYS_FILE" "$USR_FILE"; }
+trap cleanup EXIT
 
 project_count=$(jq '.projects | length' "$CONFIG")
 {
@@ -99,9 +111,6 @@ Focus the brainstorm on: $FOCUS"
 fi
 
 # Write to temp files to avoid shell quoting pain with claude -p.
-SYS_FILE=$(mktemp)
-USR_FILE=$(mktemp)
-trap 'rm -f "$PORTFOLIO" "$SYS_FILE" "$USR_FILE"' EXIT
 printf '%s' "$SYS_PROMPT" > "$SYS_FILE"
 printf '%s' "$USER_PROMPT" > "$USR_FILE"
 
@@ -145,16 +154,8 @@ if [ $DISCORD -eq 1 ]; then
       count > 2 {exit}
       {print}
     ' | head -c 1800)
-    printf '**🧠 Heartbeat Brainstorm — %s**\n\n%s\n\n📄 Full: %s' "$TODAY" "$PREVIEW" "$OUTPUT_FILE" | \
-      DISCORD_WEBHOOK="$DISCORD_WEBHOOK" python3 -c '
-import json, sys, os, urllib.request
-content = sys.stdin.read()
-if len(content) > 1990:
-    content = content[:1987] + "..."
-data = json.dumps({"content": content}).encode()
-req = urllib.request.Request(os.environ["DISCORD_WEBHOOK"], data=data, headers={"Content-Type": "application/json", "User-Agent": "HeartbeatBrainstorm/1.0"})
-urllib.request.urlopen(req)
-'
+    DISCORD_MSG=$(printf '**🧠 Heartbeat Brainstorm — %s**\n\n%s\n\n📄 Full: %s' "$TODAY" "$PREVIEW" "$OUTPUT_FILE")
+    DISCORD_WEBHOOK="$DISCORD_WEBHOOK" send_discord "$DISCORD_MSG"
     echo "heartbeat-brainstorm: posted preview to Discord" >&2
   fi
 fi

@@ -10,6 +10,11 @@ import (
 	"time"
 )
 
+// CurrentSchemaVersion is the writer/reader contract version. LoadHistory
+// warns to stderr when a record's schema_version is unknown so a silent
+// field-rename by the writer doesn't decode as zero values.
+const CurrentSchemaVersion = 1
+
 // RunEntry is a single heartbeat run record from history.jsonl.
 //
 // The JSON schema is owned by bin/heartbeat-lib.sh's log_run() function:
@@ -77,6 +82,13 @@ func LoadHistory(path string) ([]RunEntry, error) {
 			fmt.Fprintf(os.Stderr, "history: %s line %d: skipping malformed record: %v\n", path, lineNum, err)
 			continue
 		}
+		if entry.SchemaVersion != 0 && entry.SchemaVersion != CurrentSchemaVersion {
+			// Unknown schema version: the writer bumped a shape we don't
+			// understand. Keep the record (fields we know are still readable)
+			// but shout once per line so an operator can investigate.
+			fmt.Fprintf(os.Stderr, "history: %s line %d: unknown schema_version %d (expected %d)\n",
+				path, lineNum, entry.SchemaVersion, CurrentSchemaVersion)
+		}
 		entry.Errors = len(entry.ErrorList)
 		if entry.TimestampRaw != "" {
 			if ts, err := time.Parse(time.RFC3339, entry.TimestampRaw); err == nil {
@@ -99,6 +111,7 @@ type HistorySummary struct {
 	TotalRuns     int
 	TotalFindings int
 	TotalImpl     int
+	TotalSkipped  int
 	TotalPRs      int
 	TotalErrors   int
 	LastRun       time.Time
@@ -111,6 +124,7 @@ func Summarize(runs []RunEntry) HistorySummary {
 	for _, r := range runs {
 		s.TotalFindings += r.Findings
 		s.TotalImpl += r.Implemented
+		s.TotalSkipped += r.Skipped
 		s.TotalPRs += r.PRs
 		s.TotalErrors += r.Errors
 		if r.Timestamp.After(s.LastRun) {

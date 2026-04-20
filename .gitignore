@@ -13,4 +13,5 @@ venv/
 
 # Local editor/tool state
 .claude/settings.local.json
+.claude/plans/
 .DS_Store

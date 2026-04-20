@@ -145,8 +145,8 @@ func TestLoadHistory_MissingFile(t *testing.T) {
 
 func TestSummarize_AggregatesAcrossRuns(t *testing.T) {
 	runs := []RunEntry{
-		{Findings: 5, Implemented: 3, PRs: 2, Errors: 1},
-		{Findings: 7, Implemented: 4, PRs: 1, Errors: 0},
+		{Findings: 5, Implemented: 3, Skipped: 2, PRs: 2, Errors: 1},
+		{Findings: 7, Implemented: 4, Skipped: 3, PRs: 1, Errors: 0},
 	}
 	s := Summarize(runs)
 	if s.TotalRuns != 2 {
@@ -157,6 +157,9 @@ func TestSummarize_AggregatesAcrossRuns(t *testing.T) {
 	}
 	if s.TotalImpl != 7 {
 		t.Errorf("TotalImpl = %d", s.TotalImpl)
+	}
+	if s.TotalSkipped != 5 {
+		t.Errorf("TotalSkipped = %d, want 5", s.TotalSkipped)
 	}
 	if s.TotalPRs != 3 {
 		t.Errorf("TotalPRs = %d", s.TotalPRs)
