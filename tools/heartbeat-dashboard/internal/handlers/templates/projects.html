@@ -1,0 +1,65 @@
+{{template "base" .}}
+{{define "content"}}
+<section class="hero">
+  <h1>Projects</h1>
+  <p class="muted">Configured projects with live GitHub state. Issue and PR counts fetched via <code>gh</code>.</p>
+  <form method="post" action="/api/refresh">
+    <button type="submit" class="refresh">Refresh</button>
+  </form>
+</section>
+
+<table class="projects-table">
+  <thead>
+    <tr>
+      <th>Project</th>
+      <th>Local path</th>
+      <th>Status</th>
+      <th>GitHub</th>
+      <th>Open issues</th>
+      <th>Open PRs</th>
+      <th>Stale after</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{range .Projects}}
+    <tr>
+      <td><strong>{{.Name}}</strong></td>
+      <td><code>{{.Path}}</code></td>
+      <td>
+        {{if .LocalDir}}
+          {{if .IsGit}}
+            <span class="tag ok">git</span>
+          {{else}}
+            <span class="tag warn">no git</span>
+          {{end}}
+        {{else}}
+          <span class="tag err">missing</span>
+        {{end}}
+      </td>
+      <td>
+        {{if .GithubRepo}}
+          <a href="https://github.com/{{.GithubRepo}}" target="_blank">{{.GithubRepo}}</a>
+        {{else}}
+          <span class="muted">-</span>
+        {{end}}
+      </td>
+      <td>
+        {{if .GithubRepo}}
+          <a href="https://github.com/{{.GithubRepo}}/issues?q=is:issue+is:open+label:heartbeat" target="_blank">{{.OpenIssues}}</a>
+        {{else}}
+          -
+        {{end}}
+      </td>
+      <td>
+        {{if .GithubRepo}}
+          <a href="https://github.com/{{.GithubRepo}}/pulls?q=is:pr+is:open+heartbeat" target="_blank">{{.OpenPRs}}</a>
+        {{else}}
+          -
+        {{end}}
+      </td>
+      <td>{{.StaleDays}}d</td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{end}}

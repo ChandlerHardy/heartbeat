@@ -1,0 +1,30 @@
+{{define "base"}}<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>heartbeat dashboard{{with .Active}} - {{.}}{{end}}</title>
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+  <header class="nav">
+    <div class="nav-inner">
+      <a href="/" class="logo">heartbeat<span class="pulse"></span></a>
+      <nav>
+        <a href="/" {{if eq .Active "home"}}class="active"{{end}}>Overview</a>
+        <a href="/projects" {{if eq .Active "projects"}}class="active"{{end}}>Projects</a>
+        <a href="/runs" {{if eq .Active "runs"}}class="active"{{end}}>Runs</a>
+        <a href="/config" {{if eq .Active "config"}}class="active"{{end}}>Config</a>
+      </nav>
+    </div>
+  </header>
+  <main>
+    {{block "content" .}}{{end}}
+  </main>
+  <footer>
+    <span>heartbeat-dashboard v0.1.0</span>
+    <span>config: {{.Config.SourcePath}}</span>
+  </footer>
+</body>
+</html>
+{{end}}

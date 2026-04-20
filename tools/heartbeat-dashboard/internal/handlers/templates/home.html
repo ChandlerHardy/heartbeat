@@ -1,0 +1,91 @@
+{{template "base" .}}
+{{define "content"}}
+<section class="hero">
+  <h1>Overview</h1>
+  <p class="muted">Automation status across {{len .Config.Projects}} tracked project(s)</p>
+</section>
+
+<div class="stat-grid">
+  <div class="stat">
+    <div class="stat-label">Tracked projects</div>
+    <div class="stat-value">{{len .Config.Projects}}</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Recorded runs</div>
+    <div class="stat-value">{{.Summary.TotalRuns}}</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Findings this window</div>
+    <div class="stat-value">{{.Summary.TotalFindings}}</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">PRs created</div>
+    <div class="stat-value">{{.Summary.TotalPRs}}</div>
+  </div>
+  <div class="stat {{if .Summary.TotalErrors}}warn{{end}}">
+    <div class="stat-label">Errors</div>
+    <div class="stat-value">{{.Summary.TotalErrors}}</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Last run</div>
+    <div class="stat-value">{{relativeTime .Summary.LastRun}}</div>
+  </div>
+</div>
+
+<section>
+  <h2>Recent runs</h2>
+  {{if .HistoryExists}}
+  <table>
+    <thead>
+      <tr>
+        <th>When</th>
+        <th>Project</th>
+        <th>Phase</th>
+        <th>Findings</th>
+        <th>Impl</th>
+        <th>PRs</th>
+        <th>Errors</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Runs}}
+      <tr>
+        <td>{{formatTime .Timestamp}}</td>
+        <td>{{.Project}}</td>
+        <td>{{.Phase}}</td>
+        <td>{{.Findings}}</td>
+        <td>{{.Implemented}}</td>
+        <td>{{.PRs}}</td>
+        <td {{if .Errors}}class="err"{{end}}>{{.Errors}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}
+  <p class="muted">No runs recorded yet. The log file is at <code>~/heartbeat-reports/history.jsonl</code> — it populates after the nightly cron runs.</p>
+  {{end}}
+</section>
+
+<section>
+  <h2>Tracked projects</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Path</th>
+        <th>Stale after</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Config.Projects}}
+      <tr>
+        <td>{{.Name}}</td>
+        <td><code>{{.Path}}</code></td>
+        <td>{{.StaleDays}} days</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  <p class="muted">See the Projects tab for live GitHub state.</p>
+</section>
+{{end}}
