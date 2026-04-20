@@ -159,7 +159,8 @@ def fetch_releases(repo: str, since: datetime) -> Tuple[str, ...]:
         return ()
     try:
         data = json.loads(raw)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as err:
+        print(f"shiplog: fetch_releases({repo}): non-JSON gh output: {err}", file=sys.stderr)
         return ()
     out = []
     for item in data:

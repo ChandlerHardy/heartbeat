@@ -19,7 +19,13 @@ HISTORY_FILE="$HOME/heartbeat-reports/history.jsonl"
 # $TMPDIR and $HISTORY_FILE, and the second `git checkout -b` fails silently
 # when the branch already exists. A non-blocking flock exits cleanly if another
 # process already holds it. No-op on systems without flock (macOS default).
-LOCK_FILE="$TMPDIR/heartbeat.lock"
+#
+# Lockfile lives OUTSIDE $TMPDIR because this script's cleanup `rm -rf
+# "$TMPDIR"` unlinks the lockfile while the process still holds its fd —
+# flock on Linux is per-inode, so a concurrent start would create a new
+# inode at the same path and acquire a fresh lock. Persistent path per day
+# avoids that.
+LOCK_FILE="/tmp/heartbeat-${TODAY}.lock"
 if command -v flock >/dev/null 2>&1; then
   exec 9>"$LOCK_FILE"
   if ! flock -n 9; then
@@ -613,8 +619,10 @@ for i in $(seq 0 $((PROJECT_COUNT - 1))); do
   # bullet. Titles are untrusted user input (anyone who can file a
   # `heartbeat`-labeled issue controls this string), so they must also be
   # framed as data in the prompt below.
+  # Also replace `<` with `‹` so a malicious title cannot emit a literal
+  # `</existing_issues>` tag and break out of the data block framing below.
   EXISTING_TITLES=$(gh issue list --repo "$GITHUB_REPO" --label "heartbeat" --state open --json title \
-      --jq '.[].title | gsub("[\u0000-\u001f\u007f]"; " ")' 2>/dev/null \
+      --jq '.[].title | gsub("[\u0000-\u001f\u007f]"; " ") | gsub("<"; "‹")' 2>/dev/null \
     | LC_ALL=C tr -d '\000-\011\013-\037\177' \
     | awk 'NF { printf "  - %.200s\n", $0 }' \
     || echo "")
@@ -637,14 +645,19 @@ for i in $(seq 0 $((PROJECT_COUNT - 1))); do
   PROJECT_MSG="**${NAME}** (${FINDING_COUNT} findings)\n"
   QW_COUNT=0
 
+  # strip_tags neutralizes `<` in a single string so attacker-controlled text
+  # (an issue title the discovery LLM transcribed into its findings JSON)
+  # cannot emit a literal `</finding>` and break out of the impl prompt's
+  # data-block framing in implement_quick_win.
+  strip_tags() { printf '%s' "$1" | tr '<' '‹'; }
   for j in $(seq 0 $((FINDING_COUNT - 1))); do
     CATEGORY=$(jq -r ".findings[$j].category" "$FINDINGS_FILE" 2>/dev/null || echo "unknown")
-    TITLE=$(jq -r ".findings[$j].title" "$FINDINGS_FILE" 2>/dev/null || echo "unknown")
+    TITLE=$(strip_tags "$(jq -r ".findings[$j].title" "$FINDINGS_FILE" 2>/dev/null || echo "unknown")")
     EFFORT=$(jq -r ".findings[$j].effort" "$FINDINGS_FILE" 2>/dev/null || echo "unknown")
     IMPACT=$(jq -r ".findings[$j].impact" "$FINDINGS_FILE" 2>/dev/null || echo "unknown")
-    FILES=$(jq -r ".findings[$j].files | join(\", \")" "$FINDINGS_FILE" 2>/dev/null || echo "")
-    WHAT=$(jq -r ".findings[$j].what" "$FINDINGS_FILE" 2>/dev/null || echo "")
-    WHY=$(jq -r ".findings[$j].why" "$FINDINGS_FILE" 2>/dev/null || echo "")
+    FILES=$(strip_tags "$(jq -r ".findings[$j].files | join(\", \")" "$FINDINGS_FILE" 2>/dev/null || echo "")")
+    WHAT=$(strip_tags "$(jq -r ".findings[$j].what" "$FINDINGS_FILE" 2>/dev/null || echo "")")
+    WHY=$(strip_tags "$(jq -r ".findings[$j].why" "$FINDINGS_FILE" 2>/dev/null || echo "")")
 
     if is_auto_eligible "$CATEGORY" "$EFFORT" "$FILES" && [ "$QW_COUNT" -lt "$MAX_QW" ]; then
       ISSUE_NUM=$(create_issue_if_new "$GITHUB_REPO" "$TITLE" "$CATEGORY" "$EFFORT" "$IMPACT" "$FILES" "$WHAT" "$WHY") || {

@@ -65,6 +65,14 @@ done
 REPORT="${REPORT}\n**Totals**: ${TOTAL_MERGED} merged | ${TOTAL_OPEN} open PRs | ${TOTAL_ISSUES} backlog items"
 
 send_discord "$(echo -e "$REPORT")"
-echo -e "$REPORT" > "$HOME/heartbeat-reports/weekly-${TODAY}.md"
+
+# Atomic archive: write to a temp file in the same directory, then mv. A
+# SIGKILL or full disk mid-write previously left the final path at zero
+# bytes with no retry path (Discord had already succeeded).
+REPORT_DIR="$HOME/heartbeat-reports"
+REPORT_PATH="$REPORT_DIR/weekly-${TODAY}.md"
+REPORT_TMP=$(mktemp "${REPORT_DIR}/.weekly-${TODAY}.XXXXXX")
+echo -e "$REPORT" > "$REPORT_TMP"
+mv "$REPORT_TMP" "$REPORT_PATH"
 
 echo "[heartbeat-weekly] Digest sent" >&2

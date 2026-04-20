@@ -121,14 +121,20 @@ func ParseFile(path string, projectRaw string) ([]Entry, error) {
 	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 
 	var out []Entry
+	lineNum := 0
 	for scanner.Scan() {
+		lineNum++
 		line := scanner.Bytes()
 		if len(line) == 0 {
 			continue
 		}
 		var raw rawLine
 		if err := json.Unmarshal(line, &raw); err != nil {
-			continue // skip malformed lines
+			// A half-written JSONL line silently contributing zero tokens
+			// understates this session in the burn report. Log which line
+			// was dropped so the gap has a name.
+			fmt.Fprintf(os.Stderr, "claude-burn: %s line %d: skipping malformed record: %v\n", path, lineNum, err)
+			continue
 		}
 		if raw.Type != "assistant" || raw.Message == nil || raw.Message.Usage == nil {
 			continue
