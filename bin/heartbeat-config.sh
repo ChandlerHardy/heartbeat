@@ -45,8 +45,13 @@ cmd_add() {
     die "project '$name' already exists (use 'remove $name' first)"
   fi
 
+  # mktemp in the config's own directory so the final `mv` is a same-device
+  # rename (atomic). Default mktemp puts the temp in $TMPDIR which may be a
+  # separate tmpfs mount from $HOME/etc on containers or encrypted homes;
+  # cross-device `mv` degrades to copy+unlink and a crash mid-copy would
+  # leave $CONFIG truncated.
   local tmp
-  tmp=$(mktemp)
+  tmp=$(mktemp "$(dirname "$CONFIG")/.heartbeat.json.XXXXXX")
   jq --arg n "$name" --arg p "$path" --argjson s "$stale" \
     '.projects += [{"name": $n, "path": $p, "stale_days": $s}]' "$CONFIG" > "$tmp"
   mv "$tmp" "$CONFIG"
@@ -63,7 +68,7 @@ cmd_remove() {
   fi
 
   local tmp
-  tmp=$(mktemp)
+  tmp=$(mktemp "$(dirname "$CONFIG")/.heartbeat.json.XXXXXX")
   jq --arg n "$name" '.projects |= map(select(.name != $n))' "$CONFIG" > "$tmp"
   mv "$tmp" "$CONFIG"
   echo "Removed $name"

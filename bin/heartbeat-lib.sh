@@ -10,6 +10,36 @@ get_github_repo() {
   git -C "$dir" remote get-url origin 2>/dev/null | sed 's|.*github.com[:/]||;s|\.git$||'
 }
 
+# sha256_prefix — read stdin, emit the first 8 hex chars of its SHA-256.
+# Portable across OCI Oracle Linux (sha256sum, GNU coreutils) and macOS
+# (shasum, BSD); falls back to openssl which is present almost everywhere.
+# Previously heartbeat.sh hardcoded `shasum -a 256` which silently failed on
+# OCI — `set -euo pipefail` aborted the caller before the sentinel was
+# written, so ensure_labels re-fired 56 gh-label API calls every night.
+sha256_prefix() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print substr($1,1,8)}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print substr($1,1,8)}'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 | awk '{print substr($NF,1,8)}'
+  else
+    echo "sha256_prefix: no sha256 tool (sha256sum/shasum/openssl) available" >&2
+    return 1
+  fi
+}
+
+# sanitize_lt — read stdin, replace every `<` with `‹` (U+2039) on stdout.
+# Used to neutralize closing-tag breakout in prompt data blocks
+# (<existing_issues>, <product_context>, <portfolio>, <finding>). POSIX `tr`
+# is byte-oriented and produces truncated UTF-8 when set2 is multibyte
+# (replaces `<` with only the first byte of `‹`), which breaks on OCI under
+# LC_ALL=C. `sed` passes replacement bytes through verbatim regardless of
+# locale — verified on both macOS and LC_ALL=C Linux.
+sanitize_lt() {
+  sed 's/</‹/g'
+}
+
 # send_discord — post a Discord message. Expects $DISCORD_WEBHOOK in the
 # caller's environment. Truncates to under the 2000-char Discord limit.
 # Previously duplicated verbatim in heartbeat.sh and heartbeat-weekly.sh.

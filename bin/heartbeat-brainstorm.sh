@@ -73,11 +73,11 @@ project_count=$(jq '.projects | length' "$CONFIG")
     echo "## $name"
     echo ""
     if [ -f "$context_file" ]; then
-      head -40 "$context_file" | tr '<' '‹'
+      head -40 "$context_file" | sanitize_lt
     else
       # Fall back to the first 20 lines of README.md if any.
       if [ -f "$path/README.md" ]; then
-        head -20 "$path/README.md" | tr '<' '‹'
+        head -20 "$path/README.md" | sanitize_lt
       else
         echo "_(no product context available)_"
       fi

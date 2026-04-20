@@ -17,8 +17,8 @@ HISTORY_FILE="$HOME/heartbeat-reports/history.jsonl"
 
 # Per-day run lock: two concurrent heartbeat runs on the same day race on
 # $TMPDIR and $HISTORY_FILE, and the second `git checkout -b` fails silently
-# when the branch already exists. A non-blocking flock exits cleanly if another
-# process already holds it. No-op on systems without flock (macOS default).
+# when the branch already exists. A non-blocking flock (Linux) or mkdir
+# (macOS fallback) exits cleanly if another process is already running.
 #
 # Lockfile lives OUTSIDE $TMPDIR because this script's cleanup `rm -rf
 # "$TMPDIR"` unlinks the lockfile while the process still holds its fd —
@@ -26,12 +26,29 @@ HISTORY_FILE="$HOME/heartbeat-reports/history.jsonl"
 # inode at the same path and acquire a fresh lock. Persistent path per day
 # avoids that.
 LOCK_FILE="/tmp/heartbeat-${TODAY}.lock"
+LOCK_DIR="/tmp/heartbeat-${TODAY}.lockd"
 if command -v flock >/dev/null 2>&1; then
   exec 9>"$LOCK_FILE"
   if ! flock -n 9; then
     echo "[heartbeat $TODAY] another heartbeat run is already holding $LOCK_FILE; exiting" >&2
     exit 0
   fi
+else
+  # macOS dev fallback: mkdir is atomic per POSIX, so it doubles as a lock.
+  # A prior run that crashed before the EXIT trap fired may leave the dir
+  # behind — ignore locks older than 12h and clear them. Stale-lock window
+  # is long enough to cover the longest nightly run and short enough that
+  # an overnight crash doesn't block tomorrow's cron.
+  if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    if [ -n "$(find "$LOCK_DIR" -maxdepth 0 -mmin +720 2>/dev/null)" ]; then
+      rm -rf "$LOCK_DIR"
+      mkdir "$LOCK_DIR"
+    else
+      echo "[heartbeat $TODAY] another heartbeat run is holding $LOCK_DIR; exiting" >&2
+      exit 0
+    fi
+  fi
+  trap 'rm -rf "$LOCK_DIR"' EXIT
 fi
 
 # Source shared functions (log_run, summarize_history)
@@ -71,12 +88,17 @@ ensure_labels() {
   [ -z "$repo" ] && return 0
   local labels=(heartbeat quick-win feature tech-debt dx discovered ready-to-implement)
   local labels_hash
-  labels_hash=$(printf '%s\n' "${labels[@]}" | LC_ALL=C sort | shasum -a 256 | awk '{print substr($1,1,8)}')
+  # sha256_prefix (heartbeat-lib.sh) picks sha256sum / shasum / openssl
+  # depending on the host, so this works on OCI Linux and macOS.
+  labels_hash=$(printf '%s\n' "${labels[@]}" | LC_ALL=C sort | sha256_prefix)
   local sentinel_dir="$HOME/.cache/heartbeat/labels"
   local sentinel="$sentinel_dir/${repo//\//_}@${labels_hash}"
   # Create the cache dir with 0700 and use `-f` (not `-e`) so a symlink in
-  # the cache dir doesn't get followed for the sentinel check.
-  mkdir -p -m 700 "$sentinel_dir"
+  # the cache dir doesn't get followed for the sentinel check. `mkdir -m`
+  # only applies at creation; a chmod afterwards covers pre-existing dirs
+  # that were made before this fix shipped (or by an unrelated tool).
+  mkdir -p "$sentinel_dir"
+  chmod 700 "$sentinel_dir" 2>/dev/null || true
   if [ -f "$sentinel" ] && [ ! -L "$sentinel" ]; then
     return 0
   fi
@@ -90,25 +112,33 @@ ensure_labels() {
   # full-auth-failure run must not poison the cache and cause every
   # subsequent heartbeat issue to silently miss its label.
   if [ "$ok" -gt 0 ]; then
-    # rm any stale symlink before writing, so an attacker can't keep the
-    # touch following through a symlink target.
-    rm -f "$sentinel"
-    touch "$sentinel"
+    # Atomic replace via tmpfile + mv: a prior `rm -f; touch` pair had a
+    # TOCTOU window where a co-process running as the same user could race
+    # a symlink into $sentinel between the unlink and the create so `touch`
+    # updated the mtime of an attacker-chosen target. `mv` with an
+    # overwrite target only replaces the directory entry, never follows a
+    # symlink that was already there.
+    local tmp
+    tmp=$(mktemp "$sentinel_dir/.sentinel.XXXXXX")
+    mv -f "$tmp" "$sentinel"
   fi
 }
 
-# Ensure repo is on main/master with clean working tree
+# Ensure repo is on main/master with clean working tree. Uses `git -C` so
+# the caller's CWD is untouched — earlier versions of this function left
+# stray `cd` state behind when they returned, which meant subsequent
+# iterations of the main loop could run against a previous project's tree
+# if any step used a relative path.
 ensure_clean_state() {
   local dir="$1"
-  cd "$dir"
   local current_branch
-  current_branch=$(git branch --show-current 2>/dev/null)
+  current_branch=$(git -C "$dir" branch --show-current 2>/dev/null)
   if [ "$current_branch" != "main" ] && [ "$current_branch" != "master" ]; then
     log "  Resetting to main/master (was on $current_branch)"
-    git checkout main 2>/dev/null || git checkout master 2>/dev/null
+    git -C "$dir" checkout main 2>/dev/null || git -C "$dir" checkout master 2>/dev/null
   fi
-  git reset --hard HEAD 2>/dev/null
-  git clean -fd 2>/dev/null
+  git -C "$dir" reset --hard HEAD 2>/dev/null
+  git -C "$dir" clean -fd 2>/dev/null
 }
 
 # Detect the right build check command for a project
@@ -279,13 +309,13 @@ run_discovery() {
   local product_context=""
   for ctx_file in docs/product-context.md docs/specs/*.md docs/ELUCIDATE_VISION.md docs/CHESS_TRAINER_PROJECT.md; do
     if [ -f "$ctx_file" ]; then
-      product_context="${product_context}\n--- ${ctx_file} ---\n$(head -100 "$ctx_file" | tr '<' '‹')\n"
+      product_context="${product_context}\n--- ${ctx_file} ---\n$(head -100 "$ctx_file" | sanitize_lt)\n"
     fi
   done
   # Fall back to CLAUDE.md and README for product context
   if [ -z "$product_context" ]; then
-    [ -f CLAUDE.md ] && product_context="$(head -50 CLAUDE.md | tr '<' '‹')"
-    [ -f README.md ] && product_context="${product_context}\n$(head -50 README.md | tr '<' '‹')"
+    [ -f CLAUDE.md ] && product_context="$(head -50 CLAUDE.md | sanitize_lt)"
+    [ -f README.md ] && product_context="${product_context}\n$(head -50 README.md | sanitize_lt)"
   fi
 
   local discovery_prompt
@@ -701,7 +731,7 @@ for i in $(seq 0 $((PROJECT_COUNT - 1))); do
   #   2. `\t`, `\r`, and `\n` → space: prevents a title with embedded
   #      newlines from forging extra `Key: value` lines inside the block
   #      (the wrapper uses newlines as field separators).
-  strip_tags() { printf '%s' "$1" | tr '<' '‹' | tr '\t\r\n' '   '; }
+  strip_tags() { printf '%s' "$1" | sanitize_lt | tr '\t\r\n' '   '; }
   for j in $(seq 0 $((FINDING_COUNT - 1))); do
     CATEGORY=$(jq -r ".findings[$j].category" "$FINDINGS_FILE" 2>/dev/null || echo "unknown")
     TITLE=$(strip_tags "$(jq -r ".findings[$j].title" "$FINDINGS_FILE" 2>/dev/null || echo "unknown")")

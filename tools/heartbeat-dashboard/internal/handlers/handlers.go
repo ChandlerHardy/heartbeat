@@ -61,6 +61,13 @@ type Server struct {
 	// cachedProjects. Other requests block on the channel instead of firing
 	// their own N-call gh fanout (thundering-herd suppression).
 	projectsInFlight chan struct{}
+
+	// projectsGen increments every time an external event invalidates the
+	// project cache (currently only /api/refresh). The singleflight leader
+	// captures the generation on entry and skips the cache write on exit if
+	// a refresh landed mid-build, so an operator's explicit refresh isn't
+	// silently overwritten by stale pre-refresh data.
+	projectsGen uint64
 }
 
 // New creates a Server with templates parsed.
@@ -193,23 +200,27 @@ func (s *Server) getProjectViews() []projectView {
 		return out
 	}
 	// We're the leader. Publish our in-flight channel so followers block,
+	// capture the current generation so we can detect a refresh racing us,
 	// then release the mutex before the expensive fanout.
 	leader := make(chan struct{})
 	s.projectsInFlight = leader
+	genAtStart := s.projectsGen
 	s.mu.Unlock()
 
 	// Wrap publish + close in a defer so a panic inside buildProjectViews
 	// still releases every follower; an un-closed channel would otherwise
-	// hang every subsequent /projects request forever. The earlier
-	// non-defer version would also leak the channel if the scheduler picked
-	// a bad moment. We clear projectsInFlight under the mutex, then close
-	// the channel: by the time a follower observes projectsInFlight == nil
-	// we've already written cachedProjects, so the fresh cache satisfies
-	// the follower's TTL check without a second fanout.
+	// hang every subsequent /projects request forever. We clear
+	// projectsInFlight under the mutex, then close the channel: by the
+	// time a follower observes projectsInFlight == nil we've already
+	// written cachedProjects, so the fresh cache satisfies the follower's
+	// TTL check without a second fanout. If handleRefresh landed mid-build
+	// (projectsGen advanced), skip the cache write so the operator's
+	// explicit invalidation isn't silently overwritten with pre-refresh
+	// data.
 	var views []projectView
 	defer func() {
 		s.mu.Lock()
-		if views != nil {
+		if views != nil && s.projectsGen == genAtStart {
 			s.cachedProjects = views
 			s.cachedProjectsAt = time.Now()
 		}
@@ -265,6 +276,9 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	s.cachedRunsAt = time.Time{}
 	s.cachedProjects = nil
 	s.cachedProjectsAt = time.Time{}
+	// Bump the generation so any in-flight singleflight leader knows not
+	// to overwrite this invalidation with its pre-refresh build result.
+	s.projectsGen++
 	s.mu.Unlock()
 	http.Redirect(w, r, safeReturnPath(r.Referer()), http.StatusSeeOther)
 }
