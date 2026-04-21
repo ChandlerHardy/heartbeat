@@ -120,6 +120,12 @@ func ParseFile(path string, projectRaw string) ([]Entry, error) {
 	// Raise the max line size; session JSONL lines can be very large.
 	scanner.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 
+	// DecodeProjectDir walks up to N filesystem-stat candidates per call and
+	// the result depends only on projectRaw. Hoist it out of the hot scanner
+	// loop — previously 5k assistant messages × 6 splits = ~30k stat
+	// syscalls per session on cold disk. Once is enough.
+	projectDir := DecodeProjectDir(projectRaw)
+
 	var out []Entry
 	lineNum := 0
 	for scanner.Scan() {
@@ -150,7 +156,7 @@ func ParseFile(path string, projectRaw string) ([]Entry, error) {
 		}
 		entry := Entry{
 			SessionID:      sessionID,
-			ProjectDir:     DecodeProjectDir(projectRaw),
+			ProjectDir:     projectDir,
 			RawProject:     projectRaw,
 			Timestamp:      ts,
 			Model:          raw.Message.Model,

@@ -16,10 +16,12 @@
 
 set -euo pipefail
 
-PROJECT_BOARD_ID="PVT_kwHOAVEBTs4BT23z"
-PROJECT_STATUS_FIELD_ID="PVTSSF_lAHOAVEBTs4BT23zzhBC39Y"
-STATUS_DISCOVERED="30d3a08c"
-STATUS_IMPLEMENTED="da2d3b98"
+# Source shared helpers, including the project board constants
+# (PROJECT_BOARD_ID, PROJECT_STATUS_FIELD_ID, STATUS_DISCOVERED,
+# STATUS_IMPLEMENTED) which used to be duplicated here.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/heartbeat-lib.sh"
 
 # Project single-select field (added in this PR so you can group by project).
 PROJECT_FIELD_ID="PVTSSF_lAHOAVEBTs4BT23zzhBjJ_A"

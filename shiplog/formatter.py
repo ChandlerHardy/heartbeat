@@ -131,10 +131,10 @@ def format_discord(report: ShipLogReport, max_chars: int = DISCORD_MAX_CHARS) ->
             lines.append(f"  └ +{snapshot.merged_count - 3} more")
 
     out = "\n".join(lines)
-    return _truncate_to_bytes(out, max_chars)
+    return truncate_to_bytes(out, max_chars)
 
 
-def _truncate_to_bytes(s: str, max_bytes: int) -> str:
+def truncate_to_bytes(s: str, max_bytes: int) -> str:
     """Truncate *s* so its UTF-8 encoding is ≤ *max_bytes* bytes.
 
     Python ``str`` length counts Unicode code points, not UTF-8 bytes. A
@@ -142,12 +142,25 @@ def _truncate_to_bytes(s: str, max_bytes: int) -> str:
     (3–4 bytes) can pass a code-point length check yet exceed Discord's
     2000-byte wire limit and be rejected with HTTP 400. Encode first,
     truncate at the byte level, rewind any partial multibyte tail so the
-    result decodes cleanly, then append a one-codepoint ellipsis.
+    result decodes cleanly on a codepoint boundary, then append a
+    one-codepoint ellipsis.
     """
     encoded = s.encode("utf-8")
     if len(encoded) <= max_bytes:
         return s
-    cut = encoded[: max_bytes - 3]  # reserve 3 bytes for the ellipsis
+    # Reserve 3 bytes for the "…" ellipsis (0xE2 0x80 0xA6 in UTF-8).
+    cut = encoded[: max_bytes - 3]
+    # Strip any trailing continuation bytes (10xxxxxx)...
     while cut and (cut[-1] & 0xC0) == 0x80:
         cut = cut[:-1]
-    return cut.decode("utf-8", errors="ignore") + "…"
+    # ...then strip an unaccompanied multibyte leader if the cut landed
+    # mid-codepoint. Any byte ≥ 0x80 after the continuation sweep must be
+    # a leader with its continuations already chopped off.
+    if cut and cut[-1] >= 0x80:
+        cut = cut[:-1]
+    return cut.decode("utf-8") + "…"
+
+
+# Backwards-compat alias for any external caller that imported the
+# underscore-prefixed name while the contract was still considered private.
+_truncate_to_bytes = truncate_to_bytes

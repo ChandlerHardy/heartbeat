@@ -104,11 +104,11 @@ def _atomic_write_text(target: Path, content: str) -> None:
 def _send_discord(webhook: str, content: str) -> None:
     if not webhook or not content.strip():
         return
-    # formatter._truncate_to_bytes owns the byte-level truncation contract;
+    # formatter.truncate_to_bytes owns the byte-level truncation contract;
     # delegate here too instead of re-slicing by codepoint, which would bypass
     # the multibyte-safety the formatter already applies.
-    from .formatter import _truncate_to_bytes
-    data = json.dumps({"content": _truncate_to_bytes(content, DISCORD_MAX_CHARS)}).encode()
+    from .formatter import truncate_to_bytes
+    data = json.dumps({"content": truncate_to_bytes(content, DISCORD_MAX_CHARS)}).encode()
     req = urllib.request.Request(
         webhook,
         data=data,
@@ -201,9 +201,12 @@ def main(argv: list[str] | None = None) -> int:
             Path(args.archive_dir).mkdir(parents=True, exist_ok=True)
             date_str = report.window_end.strftime("%Y-%m-%d")
             archive_path = Path(args.archive_dir) / f"shiplog-{date_str}.md"
-            # Don't clobber a same-day re-run — disambiguate with HHMM.
+            # Don't clobber a same-day re-run. Disambiguate with HHMMSS so
+            # two runs in the same minute don't land on the same path and
+            # silently overwrite each other (the earlier stamp was %H%M and
+            # gave minute-granularity only).
             if archive_path.exists():
-                stamp = report.window_end.strftime("%H%M")
+                stamp = report.window_end.strftime("%H%M%S")
                 archive_path = Path(args.archive_dir) / f"shiplog-{date_str}-{stamp}.md"
             _atomic_write_text(archive_path, md)
             print(f"shiplog: archived to {archive_path}", file=sys.stderr)

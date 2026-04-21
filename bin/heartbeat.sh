@@ -108,10 +108,13 @@ ensure_labels() {
       ok=$((ok + 1))
     fi
   done
-  # Only stamp the sentinel if at least one label actually provisioned; a
-  # full-auth-failure run must not poison the cache and cause every
-  # subsequent heartbeat issue to silently miss its label.
-  if [ "$ok" -gt 0 ]; then
+  # Only stamp the sentinel if EVERY label provisioned successfully. Partial
+  # success (network drop mid-loop, 3 of 7 labels created) used to stamp the
+  # sentinel anyway, which meant subsequent `gh issue create --label ...`
+  # calls referenced labels that didn't exist on the repo — issues got
+  # created without their category label and the dashboard silently
+  # undercounted. The whole-set gate means the next run retries.
+  if [ "$ok" -eq "${#labels[@]}" ]; then
     # Atomic replace via tmpfile + mv: a prior `rm -f; touch` pair had a
     # TOCTOU window where a co-process running as the same user could race
     # a symlink into $sentinel between the unlink and the create so `touch`
@@ -129,8 +132,19 @@ ensure_labels() {
 # stray `cd` state behind when they returned, which meant subsequent
 # iterations of the main loop could run against a previous project's tree
 # if any step used a relative path.
+#
+# Before resetting, stash any uncommitted WIP under a heartbeat-tagged
+# message so a dev-machine nightly run doesn't silently destroy local
+# edits. The operator can recover via `git stash list | grep heartbeat`.
+# Stash is best-effort; failure doesn't block the reset.
 ensure_clean_state() {
   local dir="$1"
+  if ! git -C "$dir" diff --quiet 2>/dev/null || ! git -C "$dir" diff --cached --quiet 2>/dev/null; then
+    local stash_msg="heartbeat: auto-stash before ${TODAY} nightly run"
+    if git -C "$dir" stash push -u -m "$stash_msg" >/dev/null 2>&1; then
+      log "  Stashed uncommitted changes: $stash_msg"
+    fi
+  fi
   local current_branch
   current_branch=$(git -C "$dir" branch --show-current 2>/dev/null)
   if [ "$current_branch" != "main" ] && [ "$current_branch" != "master" ]; then
@@ -219,14 +233,8 @@ ISSUEBODY
   echo "$issue_number"
 }
 
-PROJECT_BOARD_ID="PVT_kwHOAVEBTs4BT23z"
-PROJECT_STATUS_FIELD_ID="PVTSSF_lAHOAVEBTs4BT23zzhBC39Y"
-# Status option IDs from the Heartbeat Dashboard project board
-STATUS_DISCOVERED="30d3a08c"
-STATUS_TRIAGED="4b2b540d"
-STATUS_IMPLEMENTED="da2d3b98"
-STATUS_MERGED="76df93ef"
-STATUS_REJECTED="dab08eb6"
+# Project board constants now live in heartbeat-lib.sh and are already
+# sourced above — no need to redeclare them here.
 
 add_to_project() {
   local issue_or_pr_url="$1"
@@ -767,7 +775,9 @@ for i in $(seq 0 $((PROJECT_COUNT - 1))); do
   #      from forging extra `Key: value` lines inside the block.
   #   3. `@` → `＠`: prevents a crafted title from @-pinging unrelated users
   #      when it lands in an auto-PR title or body on GitHub.
-  strip_tags() { printf '%s' "$1" | sanitize_lt | tr '\t\r\n' '   ' | neutralize_mentions; }
+  #   4. `` ` `` → `｀`: prevents a crafted finding from closing the ```text
+  #      fence wrapping the PR body fields and re-enabling markdown render.
+  strip_tags() { printf '%s' "$1" | sanitize_lt | tr '\t\r\n' '   ' | neutralize_mentions | neutralize_backticks; }
   for j in $(seq 0 $((FINDING_COUNT - 1))); do
     CATEGORY=$(jq -r ".findings[$j].category" "$FINDINGS_FILE" 2>/dev/null || echo "unknown")
     TITLE=$(strip_tags "$(jq -r ".findings[$j].title" "$FINDINGS_FILE" 2>/dev/null || echo "unknown")")
