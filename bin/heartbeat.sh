@@ -17,8 +17,13 @@ HISTORY_FILE="$HOME/heartbeat-reports/history.jsonl"
 
 # Per-day run lock: two concurrent heartbeat runs on the same day race on
 # $TMPDIR and $HISTORY_FILE, and the second `git checkout -b` fails silently
-# when the branch already exists. A non-blocking flock (Linux) or mkdir
-# (macOS fallback) exits cleanly if another process is already running.
+# when the branch already exists. Linux gets flock (kernel-enforced, released
+# automatically on process exit); macOS without flock falls back to a plain
+# mkdir lock with no stale recovery — a crashed overnight run will block
+# tomorrow's cron until the operator manually `rm -rf`s the lockdir. The
+# earlier stale-recovery logic was racy (two processes could both think
+# they'd reclaimed a stale lock) and the right bias for a personal cron is
+# "fail safe" rather than "reclaim automatically."
 #
 # Lockfile lives OUTSIDE $TMPDIR because this script's cleanup `rm -rf
 # "$TMPDIR"` unlinks the lockfile while the process still holds its fd —
@@ -34,19 +39,14 @@ if command -v flock >/dev/null 2>&1; then
     exit 0
   fi
 else
-  # macOS dev fallback: mkdir is atomic per POSIX, so it doubles as a lock.
-  # A prior run that crashed before the EXIT trap fired may leave the dir
-  # behind — ignore locks older than 12h and clear them. Stale-lock window
-  # is long enough to cover the longest nightly run and short enough that
-  # an overnight crash doesn't block tomorrow's cron.
+  # macOS dev fallback. mkdir is atomic per POSIX so this is race-free for
+  # the acquire; if a prior run crashed before its EXIT trap removed the
+  # lockdir, this exits cleanly and the operator clears it manually:
+  #   rm -rf /tmp/heartbeat-$(date +%Y-%m-%d).lockd
   if ! mkdir "$LOCK_DIR" 2>/dev/null; then
-    if [ -n "$(find "$LOCK_DIR" -maxdepth 0 -mmin +720 2>/dev/null)" ]; then
-      rm -rf "$LOCK_DIR"
-      mkdir "$LOCK_DIR"
-    else
-      echo "[heartbeat $TODAY] another heartbeat run is holding $LOCK_DIR; exiting" >&2
-      exit 0
-    fi
+    echo "[heartbeat $TODAY] another heartbeat run is holding $LOCK_DIR; exiting" >&2
+    echo "[heartbeat $TODAY]   (if this is a stale lock from a crashed run, run: rm -rf $LOCK_DIR)" >&2
+    exit 0
   fi
   trap 'rm -rf "$LOCK_DIR"' EXIT
 fi
@@ -167,9 +167,18 @@ create_issue_if_new() {
   local what="$7"
   local why="$8"
 
+  # Dedupe against open heartbeat-labeled issues by exact title match. The
+  # previous implementation spliced `$title` into `gh issue list --search
+  # "in:title $title"` without escaping; a title containing GitHub search
+  # operators (`label:foo`, `state:closed`, `is:pr`) could hijack the query
+  # semantics and return an unrelated issue, making the dedupe return the
+  # wrong number. jq with `--arg` does string compare — no search-syntax
+  # surface.
+  local full_title="[heartbeat] $title"
   local existing
-  existing=$(gh issue list --repo "$repo" --search "in:title $title" --state open --json number --jq '.[0].number' 2>/dev/null)
-  if [ -n "$existing" ] && [ "$existing" != "null" ]; then
+  existing=$(gh issue list --repo "$repo" --label "heartbeat" --state open --json number,title --jq \
+    --arg t "$full_title" '[.[] | select(.title == $t)][0].number // empty' 2>/dev/null)
+  if [ -n "$existing" ]; then
     echo "$existing"
     return
   fi
@@ -463,8 +472,16 @@ ${EXISTING_TITLES}
       && mv "${findings_file}.tmp" "$findings_file"
   fi
 
-  cp "$findings_file" "docs/proposals/${TODAY}-heartbeat.json"
-  git add "docs/proposals/${TODAY}-heartbeat.json" 2>/dev/null
+  # Disambiguate same-day archives: if a proposal file already exists (manual
+  # retry via `hb discover <name>` re-runs same-day after the nightly cron
+  # already archived), append HH-MM-SS so the earlier run's findings aren't
+  # clobbered in-repo. The nightly archive always wins the bare-date name.
+  local proposal_path="docs/proposals/${TODAY}-heartbeat.json"
+  if [ -e "$proposal_path" ]; then
+    proposal_path="docs/proposals/${TODAY}-heartbeat-$(date +%H%M%S).json"
+  fi
+  cp "$findings_file" "$proposal_path"
+  git add "$proposal_path" 2>/dev/null
   git commit -m "heartbeat: discovery findings for $TODAY" --quiet 2>/dev/null || true
   git push --quiet origin HEAD 2>/dev/null || true
 
@@ -595,14 +612,31 @@ RULES:
 
   local pr_url
   # Leave stderr open — same reasoning as issue create above.
+  # `what`, `why`, and `files` are rendered inside ```text fences so GitHub
+  # markdown cannot interpret any embedded !images, auto-links, or issue
+  # references that an attacker-controlled issue title could have carried
+  # through the discovery LLM into the findings JSON. The title already
+  # runs through `strip_tags` (which maps `@` → `＠`) before reaching this
+  # point, so the PR title can't @-mention unrelated users either.
   pr_url=$(gh_as_seneschal "$repo" pr create \
     --title "heartbeat: $title" \
     --body "$(cat <<PRBODY
 ## Heartbeat Auto-Implementation
 
-**What:** $what
-**Why:** $why
-**Files:** $files
+**What:**
+\`\`\`text
+$what
+\`\`\`
+
+**Why:**
+\`\`\`text
+$why
+\`\`\`
+
+**Files:**
+\`\`\`text
+$files
+\`\`\`
 
 ---
 *Automatically discovered and implemented by Heartbeat on $TODAY.*
@@ -724,14 +758,16 @@ for i in $(seq 0 $((PROJECT_COUNT - 1))); do
   PROJECT_MSG="**${NAME}** (${FINDING_COUNT} findings)\n"
   QW_COUNT=0
 
-  # strip_tags neutralizes two prompt-injection primitives before splicing
-  # attacker-controlled strings (issue titles the discovery LLM transcribed
-  # into findings JSON) into the impl prompt's <finding> data block:
+  # strip_tags neutralizes prompt-injection AND markdown-rendering primitives
+  # before splicing attacker-controlled strings (issue titles the discovery
+  # LLM transcribed into findings JSON) into the impl prompt's <finding>
+  # data block AND the auto-PR body/title downstream:
   #   1. `<` → `‹`: prevents a literal `</finding>` closing-tag breakout.
-  #   2. `\t`, `\r`, and `\n` → space: prevents a title with embedded
-  #      newlines from forging extra `Key: value` lines inside the block
-  #      (the wrapper uses newlines as field separators).
-  strip_tags() { printf '%s' "$1" | sanitize_lt | tr '\t\r\n' '   '; }
+  #   2. `\t`, `\r`, `\n` → space: prevents a title with embedded newlines
+  #      from forging extra `Key: value` lines inside the block.
+  #   3. `@` → `＠`: prevents a crafted title from @-pinging unrelated users
+  #      when it lands in an auto-PR title or body on GitHub.
+  strip_tags() { printf '%s' "$1" | sanitize_lt | tr '\t\r\n' '   ' | neutralize_mentions; }
   for j in $(seq 0 $((FINDING_COUNT - 1))); do
     CATEGORY=$(jq -r ".findings[$j].category" "$FINDINGS_FILE" 2>/dev/null || echo "unknown")
     TITLE=$(strip_tags "$(jq -r ".findings[$j].title" "$FINDINGS_FILE" 2>/dev/null || echo "unknown")")

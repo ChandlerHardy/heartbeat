@@ -40,6 +40,16 @@ sanitize_lt() {
   sed 's/</‹/g'
 }
 
+# neutralize_mentions — read stdin, replace `@` (U+0040) with `＠` (U+FF20,
+# fullwidth commercial at) on stdout. Visually indistinguishable at most
+# font sizes but NOT interpreted by GitHub's @-mention parser, so an
+# attacker-controlled issue title can't pipe unwitting users into a
+# notification tsunami via an auto-PR title. Same locale-safety reasoning
+# as sanitize_lt — use sed, not tr.
+neutralize_mentions() {
+  sed 's/@/＠/g'
+}
+
 # send_discord — post a Discord message. Expects $DISCORD_WEBHOOK in the
 # caller's environment. Truncates to under the 2000-char Discord limit.
 # Previously duplicated verbatim in heartbeat.sh and heartbeat-weekly.sh.
@@ -59,9 +69,21 @@ webhook = os.environ.get("DISCORD_WEBHOOK") or ""
 if not webhook:
     sys.stderr.write("send_discord: DISCORD_WEBHOOK not set\n")
     exit(0)
-MAX = 1900
-if len(content) > MAX:
-    content = content[:MAX - 1] + "…"
+# Discord enforces a 2000-character limit on the message content, but the
+# wire payload is UTF-8 bytes — Python str length counts codepoints, so an
+# emoji-heavy message at 1900 codepoints can be ~5700 bytes after encoding
+# and get rejected with a 400. Truncate at the BYTE level, rewinding any
+# partial multibyte tail, so the decoded payload is always valid UTF-8 and
+# always fits the wire limit.
+MAX_BYTES = 1900
+encoded = content.encode("utf-8")
+if len(encoded) > MAX_BYTES:
+    cut = encoded[:MAX_BYTES - 3]  # reserve 3 bytes for the ellipsis
+    # Rewind until cut ends on a valid UTF-8 boundary (no leading-byte
+    # prefix at the tail).
+    while cut and (cut[-1] & 0xC0) == 0x80:
+        cut = cut[:-1]
+    content = cut.decode("utf-8", errors="ignore") + "…"
 data = json.dumps({"content": content}).encode()
 req = urllib.request.Request(webhook, data=data, headers={"Content-Type": "application/json", "User-Agent": "HeartbeatBot/1.0"})
 urllib.request.urlopen(req)
@@ -147,7 +169,20 @@ log_run() {
       errors: $errors
     }')
 
-  echo "$line" >> "$history_file"
+  # Serialize the append: without flock, two concurrent writers on macOS
+  # could interleave mid-line and produce a corrupt JSONL record. With
+  # flock the write is ordered; without it (macOS bare) the script-level
+  # lock is the only protection — use `9>>"$history_file"` so we also hold
+  # an exclusive lock on the file descriptor for the duration of echo.
+  if command -v flock >/dev/null 2>&1; then
+    (
+      exec 8>>"$history_file"
+      flock 8
+      echo "$line" >&8
+    )
+  else
+    echo "$line" >> "$history_file"
+  fi
 }
 
 # summarize_history — read the last N lines of a JSONL file and print a summary

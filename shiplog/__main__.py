@@ -104,7 +104,11 @@ def _atomic_write_text(target: Path, content: str) -> None:
 def _send_discord(webhook: str, content: str) -> None:
     if not webhook or not content.strip():
         return
-    data = json.dumps({"content": content[:DISCORD_MAX_CHARS]}).encode()
+    # formatter._truncate_to_bytes owns the byte-level truncation contract;
+    # delegate here too instead of re-slicing by codepoint, which would bypass
+    # the multibyte-safety the formatter already applies.
+    from .formatter import _truncate_to_bytes
+    data = json.dumps({"content": _truncate_to_bytes(content, DISCORD_MAX_CHARS)}).encode()
     req = urllib.request.Request(
         webhook,
         data=data,

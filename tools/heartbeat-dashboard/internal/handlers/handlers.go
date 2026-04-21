@@ -21,7 +21,9 @@ import (
 )
 
 // gitLastCommit returns the timestamp of the HEAD commit in the given repo
-// path. Returns an error if the path isn't a git repo or `git log` fails.
+// path, normalized to UTC so macOS (local-zone) and OCI (UTC) display the
+// same wall-clock time for the same commit. Returns an error if the path
+// isn't a git repo or `git log` fails.
 func gitLastCommit(repoPath string) (time.Time, error) {
 	cmd := exec.Command("git", "-C", repoPath, "log", "-1", "--format=%ct")
 	out, err := cmd.Output()
@@ -32,7 +34,7 @@ func gitLastCommit(repoPath string) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, err
 	}
-	return time.Unix(secs, 0), nil
+	return time.Unix(secs, 0).UTC(), nil
 }
 
 //go:embed templates
@@ -182,12 +184,36 @@ func (s *Server) handleProjects(w http.ResponseWriter, r *http.Request) {
 // sequential `gh` calls so we cache the result for projectsCacheTTL AND
 // coalesce concurrent cold-cache requests — a single goroutine does the
 // rebuild while the rest block on its completion channel (singleflight).
+//
+// Bounded retry: if a follower wakes to find cachedProjects still nil
+// (leader panicked, or handleRefresh bumped projectsGen so the leader's
+// defer skipped the cache write), it re-enters rather than returning
+// nil — which would have rendered a blank projects page for that whole
+// wave of waiters. The retry cap stops a pathological loop if every
+// leader in a row gets its write skipped.
 func (s *Server) getProjectViews() []projectView {
+	const maxRetries = 3
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if views, done := s.tryGetProjectViews(); done {
+			return views
+		}
+	}
+	// Exhausted retries — serve whatever the last leader wrote (may be nil).
+	s.mu.Lock()
+	out := s.cachedProjects
+	s.mu.Unlock()
+	return out
+}
+
+// tryGetProjectViews runs one acquire-or-follow cycle of getProjectViews.
+// Returns (views, true) when a definitive answer is ready; returns
+// (_, false) when the caller should retry (follower woke to a nil cache).
+func (s *Server) tryGetProjectViews() ([]projectView, bool) {
 	s.mu.Lock()
 	if s.cachedProjects != nil && time.Since(s.cachedProjectsAt) < projectsCacheTTL {
 		out := s.cachedProjects
 		s.mu.Unlock()
-		return out
+		return out, true
 	}
 	if wait := s.projectsInFlight; wait != nil {
 		// Another goroutine is already rebuilding; wait for it, then
@@ -197,7 +223,12 @@ func (s *Server) getProjectViews() []projectView {
 		s.mu.Lock()
 		out := s.cachedProjects
 		s.mu.Unlock()
-		return out
+		if out != nil {
+			return out, true
+		}
+		// Leader skipped the cache write (panic or refresh-bump). Caller
+		// retries as a new leader.
+		return nil, false
 	}
 	// We're the leader. Publish our in-flight channel so followers block,
 	// capture the current generation so we can detect a refresh racing us,
@@ -230,7 +261,7 @@ func (s *Server) getProjectViews() []projectView {
 	}()
 
 	views = s.buildProjectViews()
-	return views
+	return views, true
 }
 
 func (s *Server) handleRuns(w http.ResponseWriter, r *http.Request) {

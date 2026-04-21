@@ -131,6 +131,23 @@ def format_discord(report: ShipLogReport, max_chars: int = DISCORD_MAX_CHARS) ->
             lines.append(f"  └ +{snapshot.merged_count - 3} more")
 
     out = "\n".join(lines)
-    if len(out) > max_chars:
-        out = out[: max_chars - 3] + "…"
-    return out
+    return _truncate_to_bytes(out, max_chars)
+
+
+def _truncate_to_bytes(s: str, max_bytes: int) -> str:
+    """Truncate *s* so its UTF-8 encoding is ≤ *max_bytes* bytes.
+
+    Python ``str`` length counts Unicode code points, not UTF-8 bytes. A
+    Discord digest heavy with emoji (3 bytes per codepoint) or CJK text
+    (3–4 bytes) can pass a code-point length check yet exceed Discord's
+    2000-byte wire limit and be rejected with HTTP 400. Encode first,
+    truncate at the byte level, rewind any partial multibyte tail so the
+    result decodes cleanly, then append a one-codepoint ellipsis.
+    """
+    encoded = s.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return s
+    cut = encoded[: max_bytes - 3]  # reserve 3 bytes for the ellipsis
+    while cut and (cut[-1] & 0xC0) == 0x80:
+        cut = cut[:-1]
+    return cut.decode("utf-8", errors="ignore") + "…"
