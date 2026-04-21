@@ -1,0 +1,55 @@
+{{template "base" .}}
+{{define "content"}}
+<section class="hero">
+  <h1>Config</h1>
+  <p class="muted">Loaded from <code>{{.Config.SourcePath}}</code>. Read-only for now; edit the file directly and refresh.</p>
+</section>
+
+<div class="stat-grid">
+  <div class="stat">
+    <div class="stat-label">Projects</div>
+    <div class="stat-value">{{len .Config.Projects}}</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Max quick wins per run</div>
+    <div class="stat-value">{{.Config.MaxQuickWinsPerRun}}</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Discord webhook</div>
+    <div class="stat-value small">{{.Config.RedactedWebhook}}</div>
+  </div>
+</div>
+
+<section>
+  <h2>Projects</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Path</th>
+        <th>Stale after</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Config.Projects}}
+      <tr>
+        <td>{{.Name}}</td>
+        <td><code>{{.Path}}</code></td>
+        <td>{{.StaleDays}} days</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+</section>
+
+<section>
+  <h2>How to edit</h2>
+  <p class="muted">The dashboard does not write config files — intentional, to avoid corrupting the source of truth. To edit:</p>
+  <ol>
+    <li>Open <code>{{.Config.SourcePath}}</code> in an editor</li>
+    <li>Add or remove a project block in <code>projects[]</code></li>
+    <li>Save, then click <strong>Refresh</strong> on any page</li>
+  </ol>
+  <p class="muted">For OCI: <code>ssh oci vim ~/etc/heartbeat.json</code>, then sync this dashboard against a local copy.</p>
+</section>
+{{end}}

@@ -162,6 +162,37 @@ SUMMARY3=$(summarize_history "$ERR_FILE" 10)
 assert_contains "error count in summary" "3 errors" "$SUMMARY3"
 
 echo ""
+echo "=== Test: gh_as_seneschal is defined ==="
+
+if declare -f gh_as_seneschal > /dev/null; then
+  echo "  PASS: gh_as_seneschal function exists"
+  PASS=$((PASS + 1))
+else
+  echo "  FAIL: gh_as_seneschal function not defined"
+  FAIL=$((FAIL + 1))
+fi
+
+echo ""
+echo "=== Test: gh_as_seneschal falls back to user gh when token helper fails ==="
+
+# Point SENESCHAL_TOKEN_HELPER at a script that always fails so the helper
+# falls back to the user's gh auth path. We stub `gh` to record how it was
+# called.
+SENESCHAL_TOKEN_HELPER="false"
+gh() {
+  if [ -n "${GH_TOKEN:-}" ]; then
+    echo "called-with-token"
+  else
+    echo "called-without-token"
+  fi
+}
+
+GH_TOKEN="" RESULT=$(gh_as_seneschal "owner/repo" issue create --title test)
+assert_eq "fallback path used when minting fails" "called-without-token" "$RESULT"
+
+unset -f gh
+
+echo ""
 echo "================================"
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] && exit 0 || exit 1

@@ -5,29 +5,26 @@ set -euo pipefail
 CONFIG="$HOME/etc/heartbeat.json"
 DISCORD_WEBHOOK=$(jq -r '.discord_webhook' "$CONFIG")
 PROJECT_COUNT=$(jq '.projects | length' "$CONFIG")
-WEEK_START=$(date -d "7 days ago" +%Y-%m-%d)
+
+# Cross-platform "7 days ago" — GNU `date -d` on Linux, BSD `date -v-7d` on
+# macOS. A silent failure here previously turned WEEK_START into "" which
+# made `select(.mergedAt >= "")` match every merged PR ever; fail loudly
+# instead.
+if WEEK_START=$(date -u -d "7 days ago" +%Y-%m-%d 2>/dev/null); then
+  :
+elif WEEK_START=$(date -u -v-7d +%Y-%m-%d 2>/dev/null); then
+  :
+else
+  echo "heartbeat-weekly: neither GNU date -d nor BSD date -v is available" >&2
+  exit 1
+fi
 TODAY=$(date +%Y-%m-%d)
 mkdir -p "$HOME/heartbeat-reports"
 
-get_github_repo() {
-  local dir="$1"
-  git -C "$dir" remote get-url origin 2>/dev/null | sed 's|.*github.com[:/]||;s|\.git$||'
-}
-
-send_discord() {
-  local message="$1"
-  printf '%s' "$message" | DISCORD_WEBHOOK="$DISCORD_WEBHOOK" python3 -c '
-import json, sys, os, urllib.request
-content = sys.stdin.read()
-if not content.strip():
-    exit(0)
-if len(content) > 1990:
-    content = content[:1987] + "..."
-data = json.dumps({"content": content}).encode()
-req = urllib.request.Request(os.environ["DISCORD_WEBHOOK"], data=data, headers={"Content-Type": "application/json", "User-Agent": "HeartbeatBot/1.0"})
-urllib.request.urlopen(req)
-'
-}
+# Source shared helpers (get_github_repo, send_discord).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/heartbeat-lib.sh"
+export DISCORD_WEBHOOK
 
 REPORT="**📊 Heartbeat Weekly Digest** (${WEEK_START} → ${TODAY})\n\n"
 TOTAL_MERGED=0
@@ -47,11 +44,13 @@ for i in $(seq 0 $((PROJECT_COUNT - 1))); do
     continue
   fi
 
-  # Count merged PRs this week
-  MERGED=$(gh pr list --repo "$REPO" --state merged --search "heartbeat" --json mergedAt --jq "[.[] | select(.mergedAt >= \"${WEEK_START}\")] | length" 2>/dev/null || echo "0")
-  
-  # Count open PRs
-  OPEN=$(gh pr list --repo "$REPO" --state open --search "heartbeat" --json number --jq 'length' 2>/dev/null || echo "0")
+  # Count merged PRs this week — filter by label, not free-text search, so a
+  # hand-authored PR that happens to mention "heartbeat" in its body doesn't
+  # inflate the count.
+  MERGED=$(gh pr list --repo "$REPO" --state merged --label "heartbeat" --json mergedAt --jq "[.[] | select(.mergedAt >= \"${WEEK_START}\")] | length" 2>/dev/null || echo "0")
+
+  # Count open PRs (same label filter)
+  OPEN=$(gh pr list --repo "$REPO" --state open --label "heartbeat" --json number --jq 'length' 2>/dev/null || echo "0")
   
   # Count open issues
   ISSUES=$(gh issue list --repo "$REPO" --state open --label "heartbeat" --json number --jq 'length' 2>/dev/null || echo "0")
@@ -68,6 +67,14 @@ done
 REPORT="${REPORT}\n**Totals**: ${TOTAL_MERGED} merged | ${TOTAL_OPEN} open PRs | ${TOTAL_ISSUES} backlog items"
 
 send_discord "$(echo -e "$REPORT")"
-echo -e "$REPORT" > "$HOME/heartbeat-reports/weekly-${TODAY}.md"
+
+# Atomic archive: write to a temp file in the same directory, then mv. A
+# SIGKILL or full disk mid-write previously left the final path at zero
+# bytes with no retry path (Discord had already succeeded).
+REPORT_DIR="$HOME/heartbeat-reports"
+REPORT_PATH="$REPORT_DIR/weekly-${TODAY}.md"
+REPORT_TMP=$(mktemp "${REPORT_DIR}/.weekly-${TODAY}.XXXXXX")
+echo -e "$REPORT" > "$REPORT_TMP"
+mv "$REPORT_TMP" "$REPORT_PATH"
 
 echo "[heartbeat-weekly] Digest sent" >&2

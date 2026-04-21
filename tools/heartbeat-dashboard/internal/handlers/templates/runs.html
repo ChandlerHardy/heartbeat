@@ -1,0 +1,65 @@
+{{template "base" .}}
+{{define "content"}}
+<section class="hero">
+  <h1>Runs</h1>
+  <p class="muted">Heartbeat runs recorded in <code>~/heartbeat-reports/history.jsonl</code>.</p>
+</section>
+
+<div class="stat-grid">
+  <div class="stat">
+    <div class="stat-label">Total</div>
+    <div class="stat-value">{{.Summary.TotalRuns}}</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Findings</div>
+    <div class="stat-value">{{.Summary.TotalFindings}}</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">Implemented</div>
+    <div class="stat-value">{{.Summary.TotalImpl}}</div>
+  </div>
+  <div class="stat">
+    <div class="stat-label">PRs</div>
+    <div class="stat-value">{{.Summary.TotalPRs}}</div>
+  </div>
+  <div class="stat {{if .Summary.TotalErrors}}warn{{end}}">
+    <div class="stat-label">Errors</div>
+    <div class="stat-value">{{.Summary.TotalErrors}}</div>
+  </div>
+</div>
+
+{{if .HistoryExists}}
+<table>
+  <thead>
+    <tr>
+      <th>When</th>
+      <th>Project</th>
+      <th>Phase</th>
+      <th>Findings</th>
+      <th>Impl</th>
+      <th>Skipped</th>
+      <th>PRs</th>
+      <th>Errors</th>
+      <th>Summary</th>
+    </tr>
+  </thead>
+  <tbody>
+    {{range .Runs}}
+    <tr>
+      <td>{{formatTime .Timestamp}}</td>
+      <td>{{.Project}}</td>
+      <td>{{.Phase}}</td>
+      <td>{{.Findings}}</td>
+      <td>{{.Implemented}}</td>
+      <td>{{.Skipped}}</td>
+      <td>{{.PRs}}</td>
+      <td {{if .Errors}}class="err"{{end}}>{{.Errors}}</td>
+      <td class="summary">{{.Summary}}</td>
+    </tr>
+    {{end}}
+  </tbody>
+</table>
+{{else}}
+<p class="muted">No history recorded. Heartbeat writes an entry per run; if the file is empty, the nightly cron may not have run since structured logging was added.</p>
+{{end}}
+{{end}}

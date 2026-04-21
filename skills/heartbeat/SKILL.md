@@ -33,12 +33,8 @@ Labels: `heartbeat`, `discovered`, `implemented`, `rejected`, `ai-digest`, `serv
 | greenline | `~/repos/greenline` | `ChandlerHardy/greenline` |
 | snapcal | `~/repos/snapcal` | `ChandlerHardy/snapcal` |
 | heartbeat | `~/repos/heartbeat` | `ChandlerHardy/heartbeat` |
-| pb-www | `~/workspaces/pla/pla-main/pb-www` | — (work, GitLab) |
-| pb-api | `~/workspaces/pla/pla-main/pb-api` | — (work, GitLab) |
-| pb-ios | `~/workspaces/pla/pla-main/pb-ios` | — (work, GitLab) |
 
 **Note:** gnomestead backend GitHub repo is `ChandlerHardy/gnomestead` but the directory is `gnomestead-ios`.
-**Note:** PLA projects are work repos — discovery only, no issue creation. Output as markdown report.
 
 ## Commands
 
@@ -60,9 +56,7 @@ Run discovery locally via an Explore subagent. Scans the codebase for bugs, tech
 **All projects:**
 Launch parallel Explore subagents, one per active project. Combine results.
 
-**For personal projects (GitHub):** After discovery, create issues with `heartbeat` + category labels and add to the project board with "Discovered" status.
-
-**For work projects (PLA/GitLab):** Discovery and report only. No issue creation, no branches, no modifications. Output markdown to stdout.
+After discovery, create issues with `heartbeat` + category labels and add to the project board with "Discovered" status.
 
 ### `status`
 Show open PRs and issues across all heartbeat-tracked projects. Run locally via `gh`.
@@ -166,14 +160,17 @@ ssh oci "cd /mnt/block_volume/repos && git clone git@github.com:<github-repo>.gi
 ssh oci "jq '.projects += [{\"name\": \"<name>\", \"path\": \"/mnt/block_volume/repos/<local-dir-name>\", \"stale_days\": 14}]' ~/etc/heartbeat.json > /tmp/hb.json && mv /tmp/hb.json ~/etc/heartbeat.json"
 ```
 
-**Step 3: Add to REPO_NAME_MAP in code-reviewer** (if GitHub name != OCI dir name):
+**Step 3: Add to REPO_NAME_MAP in code-reviewer/app.py** (if GitHub name != OCI dir name):
 ```python
 REPO_NAME_MAP = {
     "gnomestead": "gnomestead-ios",
     "<github-name>": "<local-dir-name>",
 }
 ```
-Then: `scp code-reviewer/app.py oci:~/code-reviewer/app.py && ssh oci "sudo systemctl restart code-reviewer"`
+Then redeploy the Seneschal webhook handler:
+```bash
+./install.sh oci    # ships the updated app.py to ~/seneschal/ and restarts seneschal.service
+```
 
 **Step 4: Create product context**
 Suggest running `/heartbeat interview <name>` to populate `docs/product-context.md`.
@@ -224,6 +221,17 @@ If there are errors, list the most recent ones.
 2026-04-06T02:00:00Z  crooked-finger     5 findings  3 impl  1 skip  2 PRs  0 err
 ```
 
+### `brainstorm [--focus <theme>]`
+Runs `bin/heartbeat-brainstorm.sh` to propose ENTIRELY NEW project ideas that complement the existing portfolio (not features for existing projects). Reads each tracked project's `docs/product-context.md` and calls `claude -p` with a system prompt that explicitly bans saturated categories (dev tools "because dev tools are hot", generic SaaS clones) and requires concrete pitches with failure modes.
+
+```bash
+bin/heartbeat-brainstorm.sh                     # all projects, archive
+bin/heartbeat-brainstorm.sh --focus="consumer"  # steer the brainstorm
+bin/heartbeat-brainstorm.sh --discord           # post preview to Discord
+```
+
+Output: `~/heartbeat-reports/brainstorm-YYYY-MM-DD.md`. Intended to run weekly as part of the Sunday cron.
+
 ### Default (no args or "help")
 Show the command menu, then status:
 
@@ -235,12 +243,28 @@ Heartbeat Commands:
   /heartbeat implement <project>        — implement quick-wins
   /heartbeat implement <project> #N     — implement specific issue
   /heartbeat build <project> <proposal> — deep implementation
+  /heartbeat brainstorm                 — propose NEW project ideas (reads all product contexts)
   /heartbeat burn [project] [--until N%] — autonomous loop until usage target
   /heartbeat cleanup [project]          — delete stale heartbeat branches
   /heartbeat history [project]          — summarize recent run metrics
   /heartbeat merge                      — merge all approved PRs
   /heartbeat projects                   — list tracked projects
   /heartbeat add-project <name> <repo>  — add new project
+  /heartbeat dashboard                  — launch local read-only dashboard on :8765
+  /heartbeat config <list|add|remove>   — manage projects in heartbeat.json
+```
+
+### `dashboard`
+Launch the local heartbeat-dashboard web UI on http://127.0.0.1:8765. Binary at `~/bin/heartbeat-dashboard`, builds from `tools/heartbeat-dashboard/`. Read-only; shows projects config, run history from `~/heartbeat-reports/history.jsonl`, and live issue/PR counts via `gh`.
+
+### `config <list|add|remove|show>`
+Edit `heartbeat.json` via `bin/heartbeat-config.sh`:
+
+```bash
+heartbeat-config list                               # tabular project list
+heartbeat-config add gnomestead /path/to/dir 14     # add project
+heartbeat-config remove old-project                 # remove project
+heartbeat-config show                               # raw JSON
 ```
 
 Then show status output.
