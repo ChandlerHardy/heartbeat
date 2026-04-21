@@ -62,10 +62,21 @@ After discovery, create issues with `heartbeat` + category labels and add to the
 Show open PRs and issues across all heartbeat-tracked projects. Run locally via `gh`.
 
 ```bash
+# Filter PRs by `heartbeat/` branch prefix — heartbeat's pr create doesn't
+# apply a label, and `--search "heartbeat"` would match any PR body/comment
+# mentioning the word. Branch prefix is the canonical marker. Issues DO get
+# the heartbeat label (applied by heartbeat.sh::create_issue_if_new), so
+# --label is correct for the issue half.
 for repo in ChandlerHardy/crooked-finger ChandlerHardy/portfolio-website ChandlerHardy/gnomestead-web ChandlerHardy/gnomestead ChandlerHardy/heartbeat ChandlerHardy/elucidate-chess ChandlerHardy/greenline ChandlerHardy/snapcal; do
-  echo "=== $(echo $repo | cut -d/ -f2) ==="
-  gh pr list --repo $repo --state open --search "heartbeat" --json number,title,reviewDecision --jq '.[] | "#\(.number) \(.reviewDecision) \(.title)"'
-  gh issue list --repo $repo --state open --label heartbeat --json number,title --jq '.[] | "#\(.number) \(.title)"'
+  name=$(echo $repo | cut -d/ -f2)
+  prs=$(gh pr list --repo $repo --state open --json number,title,headRefName,reviewDecision \
+    --jq '.[] | select(.headRefName | startswith("heartbeat/")) | "  PR #\(.number) [\(.reviewDecision // "pending")] \(.title)"' 2>/dev/null)
+  issues=$(gh issue list --repo $repo --state open --label heartbeat --json number,title --jq '.[] | "  #\(.number) \(.title)"' 2>/dev/null)
+  if [ -n "$prs" ] || [ -n "$issues" ]; then
+    echo "=== $name ==="
+    [ -n "$prs" ] && echo "$prs"
+    [ -n "$issues" ] && echo "$issues"
+  fi
 done
 echo ""
 echo "Dashboard: https://github.com/users/ChandlerHardy/projects/1"
@@ -122,10 +133,16 @@ Default to `general-purpose` for quick-wins and tech-debt. Use `implementer` for
 Merge all approved heartbeat PRs.
 
 ```bash
+# Same branch-prefix filter as `status` — don't use `--search "heartbeat"`
+# because it matches any PR body/comment mentioning the word. Only APPROVED
+# PRs are merged (reviewDecision is the aggregate; some PRs may have review
+# events that are COMMENT or CHANGES_REQUESTED from seneschal rounds).
 for repo in ChandlerHardy/crooked-finger ChandlerHardy/portfolio-website ChandlerHardy/gnomestead-web ChandlerHardy/gnomestead ChandlerHardy/elucidate-chess ChandlerHardy/greenline ChandlerHardy/snapcal; do
-  gh pr list --repo $repo --state open --search "heartbeat" --json number,reviews --jq '.[] | select(.reviews | map(select(.state == "APPROVED")) | length > 0) | .number' | while read pr; do
-    gh pr merge $pr --repo $repo --merge --delete-branch
-  done
+  gh pr list --repo $repo --state open --json number,headRefName,reviewDecision \
+    --jq '.[] | select((.headRefName | startswith("heartbeat/")) and .reviewDecision == "APPROVED") | .number' \
+    | while read pr; do
+      gh pr merge $pr --repo $repo --merge --delete-branch
+    done
 done
 ```
 
