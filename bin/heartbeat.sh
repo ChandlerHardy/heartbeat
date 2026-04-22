@@ -146,13 +146,29 @@ ensure_clean_state() {
     fi
   fi
   local current_branch
-  current_branch=$(git -C "$dir" branch --show-current 2>/dev/null)
+  current_branch=$(git -C "$dir" branch --show-current 2>/dev/null) || current_branch=""
   if [ "$current_branch" != "main" ] && [ "$current_branch" != "master" ]; then
-    log "  Resetting to main/master (was on $current_branch)"
-    git -C "$dir" checkout main 2>/dev/null || git -C "$dir" checkout master 2>/dev/null
+    # Detect default branch explicitly. Some repos have neither `main` nor
+    # `master` (e.g. a project still on `ralph/<branch>`). The earlier
+    # `checkout main || checkout master` chain returned non-zero when both
+    # failed, and with `set -euo pipefail` at the top of this file that
+    # killed the entire nightly run mid-loop — so subsequent projects never
+    # ran and the final per-day report file at the bottom was never written.
+    local default_branch=""
+    if git -C "$dir" show-ref --verify --quiet refs/heads/main; then
+      default_branch="main"
+    elif git -C "$dir" show-ref --verify --quiet refs/heads/master; then
+      default_branch="master"
+    fi
+    if [ -n "$default_branch" ]; then
+      log "  Resetting to $default_branch (was on $current_branch)"
+      git -C "$dir" checkout "$default_branch" 2>/dev/null || log "    WARNING: checkout $default_branch failed"
+    else
+      log "  WARNING: no main/master branch in $dir — staying on $current_branch"
+    fi
   fi
-  git -C "$dir" reset --hard HEAD 2>/dev/null
-  git -C "$dir" clean -fd 2>/dev/null
+  git -C "$dir" reset --hard HEAD 2>/dev/null || true
+  git -C "$dir" clean -fd 2>/dev/null || true
 }
 
 # Detect the right build check command for a project
