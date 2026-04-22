@@ -524,11 +524,27 @@ is_auto_eligible() {
   # Single file only — comma means multiple files
   echo "$files" | grep -q "," && return 1
 
-  # Effort must be ≤1hr
-  case "$effort" in
-    30min|1hr) return 0 ;;
-    *) return 1 ;;
-  esac
+  # Effort must be ≤60 minutes. LLM-produced values vary — "10min", "15min",
+  # "20min", "30min", "45min", "1hr", "1h", "1 hour" all turn up in practice.
+  # Previous code pattern-matched the two exact literals "30min" and "1hr",
+  # so every other legitimate short effort (10min, 15min, 20min, etc.) was
+  # silently rejected as not auto-eligible, and otherwise-fixable findings
+  # sat in the backlog instead of auto-opening PRs. Normalize to minutes
+  # before the comparison; decimal hours like "1.5hr" fail the integer
+  # regex and get rejected conservatively, which is the correct choice for
+  # "how long will it take" when the answer is "more than an hour."
+  local minutes=0
+  if [[ "$effort" =~ ^([0-9]+)[[:space:]]*(min|mins|minute|minutes)$ ]]; then
+    minutes="${BASH_REMATCH[1]}"
+  elif [[ "$effort" =~ ^([0-9]+)[[:space:]]*(h|hr|hrs|hour|hours)$ ]]; then
+    minutes=$((${BASH_REMATCH[1]} * 60))
+  else
+    # Unrecognized format — reject. Better to miss one auto-eligible finding
+    # than to auto-implement something the LLM couldn't size confidently.
+    return 1
+  fi
+  [ "$minutes" -gt 0 ] && [ "$minutes" -le 60 ] && return 0
+  return 1
 }
 
 implement_quick_win() {
