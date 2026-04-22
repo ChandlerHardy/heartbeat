@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/banner.png" alt="Heartbeat — autonomous discovery and implementation for portfolio projects" width="960">
+</p>
+
 # Heartbeat
 
 Autonomous discovery, implementation scheduling, and weekly digests for personal portfolio projects. Runs on OCI, controllable from Discord or local Claude Code sessions.
