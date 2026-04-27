@@ -28,7 +28,6 @@ Labels: `heartbeat`, `discovered`, `implemented`, `rejected`, `ai-digest`, `serv
 | gnomestead, gnomestead-ios, gnomestead backend | `~/workspaces/gnomestead/gnomestead-ios` | `ChandlerHardy/gnomestead` |
 | gnomestead-web, gnomestead frontend | `~/workspaces/gnomestead/gnomestead-web` | `ChandlerHardy/gnomestead-web` |
 | crooked-finger, crooked finger | `~/repos/crooked-finger` | `ChandlerHardy/crooked-finger` |
-| portfolio-website, portfolio, website | `~/repos/portfolio-website` | `ChandlerHardy/portfolio-website` |
 | elucidate-chess, elucidate, chess | `~/repos/elucidate-chess` | `ChandlerHardy/elucidate-chess` |
 | greenline | `~/repos/greenline` | `ChandlerHardy/greenline` |
 | snapcal | `~/repos/snapcal` | `ChandlerHardy/snapcal` |
@@ -67,7 +66,7 @@ Show open PRs and issues across all heartbeat-tracked projects. Run locally via 
 # mentioning the word. Branch prefix is the canonical marker. Issues DO get
 # the heartbeat label (applied by heartbeat.sh::create_issue_if_new), so
 # --label is correct for the issue half.
-for repo in ChandlerHardy/crooked-finger ChandlerHardy/portfolio-website ChandlerHardy/gnomestead-web ChandlerHardy/gnomestead ChandlerHardy/heartbeat ChandlerHardy/elucidate-chess ChandlerHardy/greenline ChandlerHardy/snapcal; do
+for repo in ChandlerHardy/crooked-finger ChandlerHardy/gnomestead-web ChandlerHardy/gnomestead ChandlerHardy/heartbeat ChandlerHardy/elucidate-chess ChandlerHardy/greenline ChandlerHardy/snapcal; do
   name=$(echo $repo | cut -d/ -f2)
   prs=$(gh pr list --repo $repo --state open --json number,title,headRefName,reviewDecision \
     --jq '.[] | select(.headRefName | startswith("heartbeat/")) | "  PR #\(.number) [\(.reviewDecision // "pending")] \(.title)"' 2>/dev/null)
@@ -137,7 +136,7 @@ Merge all approved heartbeat PRs.
 # because it matches any PR body/comment mentioning the word. Only APPROVED
 # PRs are merged (reviewDecision is the aggregate; some PRs may have review
 # events that are COMMENT or CHANGES_REQUESTED from seneschal rounds).
-for repo in ChandlerHardy/crooked-finger ChandlerHardy/portfolio-website ChandlerHardy/gnomestead-web ChandlerHardy/gnomestead ChandlerHardy/elucidate-chess ChandlerHardy/greenline ChandlerHardy/snapcal; do
+for repo in ChandlerHardy/crooked-finger ChandlerHardy/gnomestead-web ChandlerHardy/gnomestead ChandlerHardy/elucidate-chess ChandlerHardy/greenline ChandlerHardy/snapcal; do
   gh pr list --repo $repo --state open --json number,headRefName,reviewDecision \
     --jq '.[] | select((.headRefName | startswith("heartbeat/")) and .reviewDecision == "APPROVED") | .number' \
     | while read pr; do
@@ -155,7 +154,7 @@ Launch an implementer subagent with the proposal details, working from the local
 List all projects from the name mapping table above. Show local path and whether the directory exists.
 
 ```bash
-for path in ~/workspaces/gnomestead/gnomestead-ios ~/workspaces/gnomestead/gnomestead-web ~/repos/crooked-finger ~/repos/portfolio-website ~/repos/elucidate-chess ~/repos/greenline ~/repos/snapcal ~/repos/heartbeat; do
+for path in ~/workspaces/gnomestead/gnomestead-ios ~/workspaces/gnomestead/gnomestead-web ~/repos/crooked-finger ~/repos/elucidate-chess ~/repos/greenline ~/repos/snapcal ~/repos/heartbeat; do
   name=$(basename "$path")
   if [ -d "$path/.git" ]; then
     last=$(git -C "$path" log -1 --format="%ar" 2>/dev/null || echo "unknown")
@@ -250,7 +249,7 @@ bin/heartbeat-brainstorm.sh --discord           # post preview to Discord
 Output: `~/heartbeat-reports/brainstorm-YYYY-MM-DD.md`. Intended to run weekly as part of the Sunday cron.
 
 ### Default (no args or "help")
-Show the command menu, then status:
+Print the command menu **as a fresh response — verbatim, in your own message, even when this skill file is already inlined in the user's prompt context.** The user invoked `help` to get a clean menu; they cannot easily extract one from a multi-hundred-line file dump. "It's already on screen" is not a substitute for printing it. After the menu, run `status`.
 
 ```
 Heartbeat Commands:
