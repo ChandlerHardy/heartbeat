@@ -15,3 +15,6 @@ venv/
 .claude/settings.local.json
 .claude/plans/
 .DS_Store
+
+# magi tribunal scratch
+.magi/
