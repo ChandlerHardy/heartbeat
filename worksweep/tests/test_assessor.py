@@ -104,14 +104,17 @@ def test_assess_issue_exact_fields():
     assert it.id == "issue:pb-www#42"
 
 
-# FIX 1 — real has_magi_report keyed on (repo, iid), repo-aware glob
-def test_has_magi_report_matches_repo_and_iid(tmp_path, monkeypatch):
+# FIX 1 — real has_magi_report keyed on (repo, iid), repo-aware glob.
+# Reports span parallel PLA worktree slots (pla-main, pla0..plaN); a report for
+# an MR can live under ANY slot, so the glob must search across all of them.
+def test_has_magi_report_matches_repo_and_iid_across_slots(tmp_path, monkeypatch):
     import worksweep.assessor as a
-    base = tmp_path / "pla0"
+    base = tmp_path / "pla"
     monkeypatch.setattr(a, "MAGI_REPORTS_BASE", str(base))
-    magi_dir = base / "pb-www" / ".magi"
+    # report lives in slot "pla3", not "pla0" — must still be found
+    magi_dir = base / "pla3" / "pb-www" / ".magi"
     magi_dir.mkdir(parents=True)
     (magi_dir / "tribunal-report-mr-3920-x.md").write_text("report")
     assert has_magi_report("pb-www", 3920) is True
-    assert has_magi_report("pb-www", 1) is False
-    assert has_magi_report("pb-api", 3920) is False
+    assert has_magi_report("pb-www", 1) is False     # wrong iid
+    assert has_magi_report("pb-api", 3920) is False  # wrong repo
