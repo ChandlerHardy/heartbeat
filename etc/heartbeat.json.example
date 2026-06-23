@@ -7,5 +7,9 @@
     }
   ],
   "max_quick_wins_per_project": 2,
-  "discord_webhook": "https://discord.com/api/webhooks/YOUR_WEBHOOK_URL"
+  "discord_webhook": "https://discord.com/api/webhooks/YOUR_WEBHOOK_URL",
+  "gitlab": {
+    "username": "chandler.hardy",
+    "repos": ["pb-www", "pb-api", "pb-ios"]
+  }
 }
