@@ -28,3 +28,14 @@ def test_digest_includes_executor_and_why():
 def test_digest_capped_to_byte_limit():
     out = format_digest([_wi(i) for i in range(200)])
     assert len(out.encode("utf-8")) <= DISCORD_MAX_CHARS
+
+
+# FIX 10 — multibyte truncation stays byte-safe, decodes cleanly, ends with "..."
+def test_digest_multibyte_truncation_is_byte_safe():
+    items = [_wi(i, why="café 🔭 review needed urgently right now please") for i in range(200)]
+    out = format_digest(items)
+    enc = out.encode("utf-8")
+    assert len(enc) <= DISCORD_MAX_CHARS
+    # decodes without raising (no partial multibyte tail)
+    assert enc.decode("utf-8") == out
+    assert out.endswith("...")

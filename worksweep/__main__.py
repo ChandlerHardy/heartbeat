@@ -6,8 +6,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
+import urllib.error
 import urllib.request
 from typing import Callable, Dict
 
@@ -17,26 +17,38 @@ from .formatter import format_digest
 
 
 def build_digest(collect_fns: Dict[str, Callable], cfg: WorksweepConfig,
-                 has_magi: Callable[[str, str], bool]) -> str:
+                 has_magi: Callable[[str, int], bool]) -> str:
     items = []
     for repo in cfg.repos:
-        for mr in collect_fns["my_mrs"](repo, cfg.username):
-            items += assessor.assess_mr(mr, cfg.username, has_magi)
-        for mr in collect_fns["review_requests"](repo, cfg.username):
-            items += assessor.assess_mr(mr, cfg.username, has_magi)
-        for iss in collect_fns["issues"](repo, cfg.username):
-            items += assessor.assess_issue(iss)
-    for td in collect_fns["todos"]():
-        items += assessor.assess_todo(td)
+        try:
+            for mr in collect_fns["my_mrs"](repo, cfg.username):
+                items += assessor.assess_mr(mr, cfg.username, has_magi)
+            for mr in collect_fns["review_requests"](repo, cfg.username):
+                items += assessor.assess_mr(mr, cfg.username, has_magi)
+            for iss in collect_fns["issues"](repo, cfg.username):
+                items += assessor.assess_issue(iss)
+        except Exception as e:  # one repo's failure must not abort the sweep
+            print(f"worksweep: skipping repo {repo}: {e}", file=sys.stderr)
+            continue
+    try:
+        for td in collect_fns["todos"]():
+            items += assessor.assess_todo(td)
+    except Exception as e:
+        print(f"worksweep: todos collection failed: {e}", file=sys.stderr)
     return format_digest(assessor.dedupe(items))
 
 
 def _post_discord(webhook: str, content: str) -> None:
+    """POST the digest to Discord. Raises RuntimeError on a network failure."""
     data = json.dumps({"content": content}).encode("utf-8")
     req = urllib.request.Request(
         webhook, data=data,
         headers={"Content-Type": "application/json", "User-Agent": "WorksweepBot/1.0"})
-    urllib.request.urlopen(req, timeout=15)
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            resp.read()
+    except (urllib.error.HTTPError, urllib.error.URLError) as e:
+        raise RuntimeError(f"discord post failed: {e}")
 
 
 def main(argv=None) -> int:
@@ -45,7 +57,11 @@ def main(argv=None) -> int:
     ap.add_argument("--discord", action="store_true", help="post digest to Discord")
     args = ap.parse_args(argv)
 
-    cfg = load_config()
+    try:
+        cfg = load_config()
+    except RuntimeError as e:
+        print(f"worksweep: {e}", file=sys.stderr)
+        return 1
     collect_fns = {
         "my_mrs": collectors.collect_my_mrs,
         "review_requests": collectors.collect_review_requests,
@@ -54,13 +70,17 @@ def main(argv=None) -> int:
     }
     digest = build_digest(
         collect_fns, cfg,
-        has_magi=lambda r, s: assessor.has_magi_report(r, s))
+        has_magi=lambda repo, iid: assessor.has_magi_report(repo, iid))
 
     if args.discord and not args.dry_run:
         if not cfg.discord_webhook:
             print("worksweep: no discord_webhook configured", file=sys.stderr)
             return 1
-        _post_discord(cfg.discord_webhook, digest)
+        try:
+            _post_discord(cfg.discord_webhook, digest)
+        except Exception as e:
+            print(f"worksweep: {e}", file=sys.stderr)
+            return 1
     else:
         print(digest)
     return 0

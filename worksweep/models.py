@@ -6,7 +6,8 @@ from dataclasses import dataclass
 
 # A dev-server link in an MR description, per Chandler's MR convention
 # ("Available on" / a *-dev*.performancebeef.com URL).
-_DEV_URL_RE = re.compile(r"https?://[^\s)]*dev\d*[^\s)]*\.performancebeef\.com", re.I)
+_DEV_URL_RE = re.compile(
+    r"https?://[^\s)]*[-.]dev\d*[^\s)]*\.performancebeef\.com", re.I)
 
 
 @dataclass(frozen=True)
