@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Worksweep daily digest (macOS launchd agent).
+
+  Worksweep needs the PLA `glab` auth and the local `.magi` tribunal reports,
+  which live on this Mac — so it runs here, not on the OCI box like shiplog.
+
+  Install:
+    cp etc/com.chandlerhardy.worksweep.plist ~/Library/LaunchAgents/
+    launchctl load -w ~/Library/LaunchAgents/com.chandlerhardy.worksweep.plist
+  Run once now (no waiting for 8 AM):
+    launchctl start com.chandlerhardy.worksweep
+  Uninstall:
+    launchctl unload -w ~/Library/LaunchAgents/com.chandlerhardy.worksweep.plist
+  Logs: ~/heartbeat-reports/worksweep.log (stdout) / worksweep.err (stderr)
+
+  Adjust the Hour/Minute below to change the daily run time.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.chandlerhardy.worksweep</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/chandlerhardy/repos/heartbeat/bin/worksweep.sh</string>
+        <string>--discord</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>8</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- launchd starts with a minimal PATH; include Homebrew (glab) and the
+         pyenv shims (python3) so the script's tools resolve. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/chandlerhardy/.pyenv/shims:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/chandlerhardy</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/chandlerhardy/heartbeat-reports/worksweep.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/chandlerhardy/heartbeat-reports/worksweep.err</string>
+</dict>
+</plist>

@@ -52,6 +52,7 @@ OPERATE
   hb brainstorm [--focus=X]     Propose NEW project ideas via Claude
   hb backfill                   Populate the GitHub Projects board
   hb shiplog [flags]            Weekly retrospective digest (wraps `python3 -m shiplog`)
+  hb worksweep [--discord]      Read-only GitLab digest of MRs/reviews/todos (wraps `python3 -m worksweep`)
   hb burn [flags]               Claude Code usage telemetry (wraps `claude-burn`)
 
 META
@@ -131,6 +132,13 @@ cmd_shiplog() {
   cd "$REPO_ROOT" && exec python3 -m shiplog "$@"
 }
 
+cmd_worksweep() {
+  ensure_cmd python3 "install Python 3"
+  ensure_cmd glab "install glab (https://gitlab.com/gitlab-org/cli)"
+  # Defaults to --dry-run (stdout) when no flag is given; pass --discord to post.
+  cd "$REPO_ROOT" && exec python3 -m worksweep "$@"
+}
+
 cmd_burn() {
   ensure_cmd claude-burn "build it: cd $REPO_ROOT/tools/claude-burn && go build -o ~/bin/claude-burn ./cmd/claude-burn"
   exec claude-burn "$@"
@@ -170,6 +178,7 @@ main() {
     brainstorm)       cmd_brainstorm "$@" ;;
     backfill)         cmd_backfill "$@" ;;
     shiplog)          cmd_shiplog "$@" ;;
+    worksweep)        cmd_worksweep "$@" ;;
     burn)             cmd_burn "$@" ;;
     discover)         cmd_discover "$@" ;;
     version|-v|--version) cmd_version ;;
