@@ -72,3 +72,29 @@ def test_main_returns_1_on_discord_post_failure(monkeypatch):
 
     monkeypatch.setattr(wsmain, "_post_discord", boom)
     assert main(["--discord"]) == 1
+
+
+# HARDENING — webhook host allowlist (reject SSRF/exfil targets)
+def test_validate_webhook_accepts_discord_hosts():
+    wsmain._validate_webhook("https://discord.com/api/webhooks/123/abc")
+    wsmain._validate_webhook("https://canary.discord.com/api/webhooks/1/x")
+    wsmain._validate_webhook("https://discordapp.com/api/webhooks/1/x")
+
+
+def test_validate_webhook_rejects_non_discord_host():
+    import pytest
+    with pytest.raises(RuntimeError):
+        wsmain._validate_webhook("https://evil.example.com/api/webhooks/1/x")
+
+
+def test_validate_webhook_rejects_non_https():
+    import pytest
+    with pytest.raises(RuntimeError):
+        wsmain._validate_webhook("http://discord.com/api/webhooks/1/x")
+
+
+def test_validate_webhook_rejects_lookalike_host():
+    import pytest
+    with pytest.raises(RuntimeError):
+        # discord.com.evil.com must NOT pass a naive substring check
+        wsmain._validate_webhook("https://discord.com.evil.com/api/webhooks/1/x")

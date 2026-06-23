@@ -8,8 +8,14 @@ import argparse
 import json
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Callable, Dict
+
+# Only ever POST the digest to a Discord-owned host. The webhook comes from
+# ~/etc/heartbeat.json (semi-trusted); this allowlist + no-redirect opener stop
+# a tampered/typo'd webhook from exfiltrating the digest elsewhere.
+_ALLOWED_WEBHOOK_HOSTS = ("discord.com", "discordapp.com")
 
 from . import assessor, collectors
 from .config import WorksweepConfig, load_config
@@ -38,14 +44,33 @@ def build_digest(collect_fns: Dict[str, Callable], cfg: WorksweepConfig,
     return format_digest(assessor.dedupe(items))
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse to follow redirects so a 30x can't bounce the POST off-host."""
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def _validate_webhook(webhook: str) -> None:
+    """Raise RuntimeError unless the webhook is an https Discord-host URL."""
+    parts = urllib.parse.urlparse(webhook)
+    if parts.scheme != "https":
+        raise RuntimeError(f"discord webhook must be https, got {parts.scheme!r}")
+    host = (parts.hostname or "").lower()
+    if host not in _ALLOWED_WEBHOOK_HOSTS and not any(
+            host.endswith("." + h) for h in _ALLOWED_WEBHOOK_HOSTS):
+        raise RuntimeError(f"refusing to post to non-Discord host: {host!r}")
+
+
 def _post_discord(webhook: str, content: str) -> None:
-    """POST the digest to Discord. Raises RuntimeError on a network failure."""
+    """POST the digest to Discord. Raises RuntimeError on a bad host or network failure."""
+    _validate_webhook(webhook)
     data = json.dumps({"content": content}).encode("utf-8")
     req = urllib.request.Request(
         webhook, data=data,
         headers={"Content-Type": "application/json", "User-Agent": "WorksweepBot/1.0"})
+    opener = urllib.request.build_opener(_NoRedirect())
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with opener.open(req, timeout=15) as resp:
             resp.read()
     except (urllib.error.HTTPError, urllib.error.URLError) as e:
         raise RuntimeError(f"discord post failed: {e}")
