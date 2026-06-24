@@ -1,8 +1,9 @@
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from worksweep.models import WorkItem  # noqa: E402
+from worksweep.models import WorkItem, QueueRecord  # noqa: E402
 from worksweep.formatter import (  # noqa: E402
     format_digest, format_messages, DISCORD_MAX_CHARS,
+    format_digest_from_records, format_messages_from_records,
 )
 
 
@@ -10,6 +11,10 @@ def _wi(i, executor="magi-review", why="why"):
     return WorkItem(schema_version=1, id=f"x{i}", repo="pb-www", kind="mr",
                     executor=executor, risk="low", why=why,
                     web_url=f"https://gitlab.com/x/-/merge_requests/{i}", sha="abc")
+
+
+def _rec(number, wi):
+    return QueueRecord(number=number, first_seen="t", last_seen="t", item=wi)
 
 
 def test_empty_digest_says_all_clear():
@@ -68,3 +73,33 @@ def test_oversized_single_item_line_truncated_byte_safe():
         enc = m.encode("utf-8")
         assert len(enc) <= DISCORD_MAX_CHARS
         assert enc.decode("utf-8") == m
+
+
+# M2 — render from queue records using the PERSISTED number (not enumerate)
+def test_digest_from_records_uses_persisted_numbers():
+    # records numbered 1 and 3 (number 2 dropped from an earlier sweep) must
+    # render as "1." and "3." — never re-enumerate to "1."/"2."
+    recs = [_rec(1, _wi(10, why="first")), _rec(3, _wi(30, why="third"))]
+    out = format_digest_from_records(recs)
+    assert "1. " in out
+    assert "3. " in out
+    assert "2. " not in out
+
+
+def test_digest_from_records_renders_in_number_order():
+    # records given out of order must still render ascending by number
+    recs = [_rec(3, _wi(30, why="third")), _rec(1, _wi(10, why="first"))]
+    out = format_digest_from_records(recs)
+    assert out.index("1. ") < out.index("3. ")
+
+
+def test_messages_from_records_empty_is_all_clear():
+    msgs = format_messages_from_records([])
+    assert len(msgs) == 1 and "nothing needs you" in msgs[0].lower()
+
+
+def test_messages_from_records_uses_persisted_number():
+    recs = [_rec(7, _wi(42, why="lucky"))]
+    joined = "\n".join(format_messages_from_records(recs))
+    assert "7. " in joined
+    assert "[#42](https://gitlab.com/x/-/merge_requests/42)" in joined

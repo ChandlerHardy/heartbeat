@@ -62,10 +62,12 @@ def test_build_digest_survives_one_repo_failure():
 
 
 # FIX 4 — main() returns 1 when the Discord post fails
-def test_main_returns_1_on_discord_post_failure(monkeypatch):
+def test_main_returns_1_on_discord_post_failure(monkeypatch, tmp_path):
     cfg = WorksweepConfig(repos=(), username="me",
                           discord_webhook="https://discord/hook")
     monkeypatch.setattr(wsmain, "load_config", lambda *a, **k: cfg)
+    monkeypatch.setattr(wsmain, "_queue_path",
+                        lambda: os.path.join(str(tmp_path), "queue.json"))
 
     def boom(webhook, content):
         raise RuntimeError("post failed")
@@ -75,11 +77,13 @@ def test_main_returns_1_on_discord_post_failure(monkeypatch):
 
 
 # Long digest is delivered across multiple Discord messages, none over the cap
-def test_main_discord_posts_multiple_messages_for_long_digest(monkeypatch):
+def test_main_discord_posts_multiple_messages_for_long_digest(monkeypatch, tmp_path):
     cfg = WorksweepConfig(repos=("pb-www",), username="chandler.hardy",
                           discord_webhook="https://discord.com/api/webhooks/1/x")
     many = [_mr(iid=i, description="no link") for i in range(60)]
     monkeypatch.setattr(wsmain, "load_config", lambda *a, **k: cfg)
+    monkeypatch.setattr(wsmain, "_queue_path",
+                        lambda: os.path.join(str(tmp_path), "queue.json"))
     monkeypatch.setattr(wsmain.assessor, "has_magi_report", lambda repo, iid: False)
     monkeypatch.setattr(wsmain.collectors, "collect_my_mrs", lambda repo, user: many)
     monkeypatch.setattr(wsmain.collectors, "collect_review_requests", lambda repo, user: [])
@@ -118,3 +122,35 @@ def test_validate_webhook_rejects_lookalike_host():
     with pytest.raises(RuntimeError):
         # discord.com.evil.com must NOT pass a naive substring check
         wsmain._validate_webhook("https://discord.com.evil.com/api/webhooks/1/x")
+
+
+# M2 — the --discord post path persists the queue and the posted number equals
+# the persisted QueueRecord.number (the load-bearing numbering contract).
+def test_post_persists_queue_and_posted_number_matches_record_number(monkeypatch, tmp_path):
+    from worksweep.queue import load_queue
+    qp = os.path.join(str(tmp_path), "queue.json")
+    cfg = WorksweepConfig(repos=("pb-www",), username="chandler.hardy",
+                          discord_webhook="https://discord.com/api/webhooks/1/x")
+    monkeypatch.setattr(wsmain, "load_config", lambda *a, **k: cfg)
+    monkeypatch.setattr(wsmain, "_queue_path", lambda: qp)
+    monkeypatch.setattr(wsmain.assessor, "has_magi_report", lambda repo, iid: False)
+    # one MR of mine, missing a dev link -> a magi item + a hygiene item
+    monkeypatch.setattr(wsmain.collectors, "collect_my_mrs",
+                        lambda repo, user: [_mr(iid=3890, description="no link")])
+    monkeypatch.setattr(wsmain.collectors, "collect_review_requests", lambda repo, user: [])
+    monkeypatch.setattr(wsmain.collectors, "collect_todos", lambda: [])
+    monkeypatch.setattr(wsmain.collectors, "collect_issues", lambda repo, user: [])
+
+    posted = []
+    monkeypatch.setattr(wsmain, "_post_discord", lambda wh, content: posted.append(content))
+
+    assert main(["--discord"]) == 0
+
+    records = load_queue(qp)
+    assert records, "post path must persist the queue"
+    joined = "\n".join(posted)
+    # every persisted record's number appears in the posted digest as "<n>. "
+    for r in records:
+        assert f"{r.number}. " in joined
+    # and the queue holds the same count of proposed items the digest rendered
+    assert all(r.item.status == "proposed" for r in records)

@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Worksweep approval-intake poller (macOS launchd agent).
+
+  Polls the #worksweep Discord channel every 5 minutes for Chandler's `✅ 1,3`
+  approval replies and flips the matching queued WorkItems proposed -> approved.
+  It only issues a read (GET /channels/{id}/messages) plus, when something was
+  approved, one confirmation POST via the M1 webhook. No executors run here —
+  M2 approval is status-only.
+
+  Needs the same local context as the daily sweep (the ~/.worksweep/queue.json
+  store + ~/etc/heartbeat.json `discord` block), so it runs on this Mac.
+
+  Install:
+    cp etc/com.chandlerhardy.worksweep-intake.plist ~/Library/LaunchAgents/
+    launchctl load -w ~/Library/LaunchAgents/com.chandlerhardy.worksweep-intake.plist
+  Run once now:
+    launchctl start com.chandlerhardy.worksweep-intake
+  Uninstall:
+    launchctl unload -w ~/Library/LaunchAgents/com.chandlerhardy.worksweep-intake.plist
+  Logs: ~/heartbeat-reports/worksweep-intake.log (stdout) / .err (stderr)
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.chandlerhardy.worksweep-intake</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/chandlerhardy/repos/heartbeat/bin/worksweep.sh</string>
+        <string>intake</string>
+    </array>
+
+    <!-- Poll every 5 minutes. -->
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- launchd starts with a minimal PATH; include Homebrew (glab) and the
+         pyenv shims (python3) so the script's tools resolve. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/chandlerhardy/.pyenv/shims:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/chandlerhardy</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/chandlerhardy/heartbeat-reports/worksweep-intake.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/chandlerhardy/heartbeat-reports/worksweep-intake.err</string>
+</dict>
+</plist>
