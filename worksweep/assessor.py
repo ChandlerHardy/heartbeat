@@ -7,13 +7,18 @@ from typing import Callable, List
 
 from .models import Issue, MergeRequest, Todo, WorkItem
 
-MAGI_REPORTS_BASE = os.path.expanduser("~/workspaces/pla/pla0")
+MAGI_REPORTS_BASE = os.path.expanduser("~/workspaces/pla")
 
 
 def _report_glob(repo: str, iid: int) -> str:
-    """Glob pattern for a repo+iid tribunal report. Repo-aware (multi-repo)."""
+    """Glob pattern for a repo+iid tribunal report.
+
+    PLA work spans parallel worktree slots (pla-main, pla0..plaN) under
+    MAGI_REPORTS_BASE, and a tribunal report for an MR can live under any slot,
+    so the `*` matches every slot. Repo-aware (multi-repo).
+    """
     return os.path.join(
-        MAGI_REPORTS_BASE, repo, ".magi", f"tribunal-report-mr-{iid}-*.md")
+        MAGI_REPORTS_BASE, "*", repo, ".magi", f"tribunal-report-mr-{iid}-*.md")
 
 
 def has_magi_report(repo: str, iid: int) -> bool:

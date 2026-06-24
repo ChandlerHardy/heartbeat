@@ -19,11 +19,12 @@ _ALLOWED_WEBHOOK_HOSTS = ("discord.com", "discordapp.com")
 
 from . import assessor, collectors
 from .config import WorksweepConfig, load_config
-from .formatter import format_digest
+from .formatter import format_digest, format_messages
 
 
-def build_digest(collect_fns: Dict[str, Callable], cfg: WorksweepConfig,
-                 has_magi: Callable[[str, int], bool]) -> str:
+def collect_and_assess(collect_fns: Dict[str, Callable], cfg: WorksweepConfig,
+                       has_magi: Callable[[str, int], bool]) -> list:
+    """Collect signals -> assess -> dedupe. Returns the WorkItem list."""
     items = []
     for repo in cfg.repos:
         try:
@@ -41,7 +42,13 @@ def build_digest(collect_fns: Dict[str, Callable], cfg: WorksweepConfig,
             items += assessor.assess_todo(td)
     except Exception as e:
         print(f"worksweep: todos collection failed: {e}", file=sys.stderr)
-    return format_digest(assessor.dedupe(items))
+    return assessor.dedupe(items)
+
+
+def build_digest(collect_fns: Dict[str, Callable], cfg: WorksweepConfig,
+                 has_magi: Callable[[str, int], bool]) -> str:
+    """Full digest as a single string (stdout view)."""
+    return format_digest(collect_and_assess(collect_fns, cfg, has_magi))
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -93,7 +100,7 @@ def main(argv=None) -> int:
         "todos": collectors.collect_todos,
         "issues": collectors.collect_issues,
     }
-    digest = build_digest(
+    items = collect_and_assess(
         collect_fns, cfg,
         has_magi=lambda repo, iid: assessor.has_magi_report(repo, iid))
 
@@ -102,12 +109,13 @@ def main(argv=None) -> int:
             print("worksweep: no discord_webhook configured", file=sys.stderr)
             return 1
         try:
-            _post_discord(cfg.discord_webhook, digest)
+            for message in format_messages(items):
+                _post_discord(cfg.discord_webhook, message)
         except Exception as e:
             print(f"worksweep: {e}", file=sys.stderr)
             return 1
     else:
-        print(digest)
+        print(format_digest(items))
     return 0
 
 

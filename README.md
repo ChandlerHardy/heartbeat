@@ -88,11 +88,13 @@ Reviews posted by seneschal-cr[bot] in response to a `/seneschal review`
 | `bin/heartbeat.sh` | Daily discovery + quick-win implementation | OCI cron, 2 AM CDT |
 | `bin/heartbeat-weekly.sh` | Weekly heartbeat-only digest to Discord | OCI cron, Sunday 9 AM CDT |
 | `bin/shiplog.sh` | Full weekly "what I shipped" digest (all PRs) | OCI cron, Sunday 9 AM CDT |
+| `bin/worksweep.sh` | Read-only GitLab digest of MRs/reviews/todos/issues needing attention | Mac launchd, daily (needs local `glab` auth + `.magi` reports) |
 | `bin/heartbeat-brainstorm.sh` | Propose NEW project ideas via Claude (reads all product contexts) | OCI or Mac |
 | `bin/heartbeat-config.sh` | Add/remove projects in `heartbeat.json` safely | Any host with `jq` |
 | `bin/heartbeat-backfill-projects.sh` | Populate the GH Projects board from existing issues/PRs | Mac (needs `gh` with `project` scope) |
 | `code-reviewer/` | Seneschal GitHub App webhook: pre-review analysis + Claude review; runs ONLY on `/seneschal review` comments or manual CLI trigger | OCI `~/seneschal/`, systemd `seneschal` |
 | `shiplog/` | ShipLog Python package (called by bin/shiplog.sh) | OCI `~/shiplog` |
+| `worksweep/` | Worksweep Python package — read-only GitLab sensor (called by bin/worksweep.sh) | Mac (PLA `glab` + `.magi` reports live here) |
 | `tools/claude-burn/` | Local Go CLI for Claude Code usage telemetry | Mac `~/bin/claude-burn` |
 | `tools/heartbeat-dashboard/` | Local Go web UI for config + run history (secondary to GH Projects board) | Mac `~/bin/heartbeat-dashboard` |
 | `skills/heartbeat/SKILL.md` | Local Claude Code `/heartbeat` commands | Mac `~/.claude/skills/heartbeat` |
