@@ -1,0 +1,73 @@
+"""Read Discord channel messages via the REST API (stdlib `urllib`).
+
+Webhooks are send-only; reading approval replies needs a bot identity. To keep
+worksweep stdlib-only (no discord.py / websocket gateway) the poller issues a
+single read — `GET /channels/{id}/messages` — with `Authorization: Bot {token}`,
+mirroring __main__._post_discord's urllib discipline.
+
+`parse_messages` is pure and unit-tested (tolerates malformed / partial JSON,
+like collectors._loads_list). `fetch_messages` is the thin, untested I/O wrapper.
+"""
+from __future__ import annotations
+
+import json
+import sys
+import urllib.request
+from typing import List, Optional
+
+from .models import DiscordMessage
+
+_API_BASE = "https://discord.com/api/v10"
+_USER_AGENT = "WorksweepBot/1.0 (worksweep intake poller)"
+
+
+def parse_messages(raw_json: str) -> List[DiscordMessage]:
+    """Map a Discord messages JSON array onto DiscordMessage.
+
+    Malformed JSON or a non-list payload -> []. A message missing `author`
+    yields author_id="" (so it can never match the configured user id); missing
+    content -> "".
+    """
+    try:
+        data = json.loads(raw_json)
+    except json.JSONDecodeError as e:
+        print(f"worksweep: parse_messages decode failed: {e}", file=sys.stderr)
+        return []
+    if not isinstance(data, list):
+        print(f"worksweep: parse_messages expected a list, got "
+              f"{type(data).__name__}", file=sys.stderr)
+        return []
+    out: List[DiscordMessage] = []
+    for m in data:
+        try:
+            author = m.get("author") or {}
+            out.append(DiscordMessage(
+                id=str(m.get("id", "")),
+                author_id=str(author.get("id", "")),
+                content=m.get("content") or "",
+                timestamp=m.get("timestamp", ""),
+            ))
+        except (AttributeError, TypeError) as e:
+            print(f"worksweep: parse_messages skipping bad row: {e}",
+                  file=sys.stderr)
+    return out
+
+
+def fetch_messages(channel_id: str, bot_token: str,
+                   after: Optional[str] = None, limit: int = 50,
+                   timeout: int = 15) -> List[DiscordMessage]:
+    """GET the latest channel messages (read-only). Thin I/O wrapper — untested.
+
+    `after` is a Discord message snowflake id (not a timestamp); the poller
+    passes the last-seen message id so each poll reads only newer messages.
+    """
+    url = f"{_API_BASE}/channels/{channel_id}/messages?limit={int(limit)}"
+    if after:
+        url += f"&after={after}"
+    req = urllib.request.Request(url, headers={
+        "Authorization": f"Bot {bot_token}",
+        "User-Agent": _USER_AGENT,
+    })
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        body = resp.read().decode("utf-8")
+    return parse_messages(body)
