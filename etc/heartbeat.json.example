@@ -10,6 +10,15 @@
   "discord_webhook": "https://discord.com/api/webhooks/YOUR_WEBHOOK_URL",
   "gitlab": {
     "username": "chandler.hardy",
-    "repos": ["pb-www", "pb-api", "pb-ios"]
+    "repos": [
+      "pb-www",
+      "pb-api",
+      "pb-ios"
+    ]
+  },
+  "discord": {
+    "bot_token": "BOT_TOKEN",
+    "channel_id": "DISCORD_CHANNEL_ID",
+    "user_id": "DISCORD_USER_ID"
   }
 }

@@ -10,8 +10,11 @@ status changes.
 """
 from __future__ import annotations
 
+import dataclasses
 import re
-from typing import Set
+from typing import List, Set, Tuple
+
+from .models import DiscordMessage, QueueRecord
 
 # Require an approval marker: the ✅ emoji or the word "approve" (any case).
 # Without it, numbers in the message are ignored.
@@ -49,3 +52,35 @@ def parse_approval(text: str) -> Set[int]:
             continue          # absurd span -> ignore this token (keep the rest)
         out.update(range(lo, hi + 1))
     return out
+
+
+def apply_approvals(records: List[QueueRecord], messages: List[DiscordMessage],
+                    user_id: str, now: str) -> Tuple[List[QueueRecord], Set[int]]:
+    """Flip queue records the configured user approved, proposed -> approved.
+
+    Author gate: only messages whose author_id == user_id contribute numbers (a
+    colleague typing `✅ 1` is ignored). The union of those messages' parsed
+    numbers is matched against record numbers; each matching record currently
+    `proposed` becomes `approved` (last_seen bumped to `now`).
+
+    Returns (updated_records, newly_approved_numbers). Already-`approved` records
+    stay approved but are NOT in the returned set, so a confirmation message
+    names only freshly flipped items. Numbers with no matching record are no-ops.
+    """
+    approved_numbers: Set[int] = set()
+    if user_id:
+        for m in messages:
+            if m.author_id == user_id:
+                approved_numbers |= parse_approval(m.content)
+
+    out: List[QueueRecord] = []
+    newly: Set[int] = set()
+    for r in records:
+        if r.number in approved_numbers and r.item.status == "proposed":
+            out.append(QueueRecord(
+                number=r.number, first_seen=r.first_seen, last_seen=now,
+                item=dataclasses.replace(r.item, status="approved")))
+            newly.add(r.number)
+        else:
+            out.append(r)
+    return out, newly
