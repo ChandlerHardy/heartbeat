@@ -74,6 +74,26 @@ def test_main_returns_1_on_discord_post_failure(monkeypatch):
     assert main(["--discord"]) == 1
 
 
+# Long digest is delivered across multiple Discord messages, none over the cap
+def test_main_discord_posts_multiple_messages_for_long_digest(monkeypatch):
+    cfg = WorksweepConfig(repos=("pb-www",), username="chandler.hardy",
+                          discord_webhook="https://discord.com/api/webhooks/1/x")
+    many = [_mr(iid=i, description="no link") for i in range(60)]
+    monkeypatch.setattr(wsmain, "load_config", lambda *a, **k: cfg)
+    monkeypatch.setattr(wsmain.assessor, "has_magi_report", lambda repo, iid: False)
+    monkeypatch.setattr(wsmain.collectors, "collect_my_mrs", lambda repo, user: many)
+    monkeypatch.setattr(wsmain.collectors, "collect_review_requests", lambda repo, user: [])
+    monkeypatch.setattr(wsmain.collectors, "collect_todos", lambda: [])
+    monkeypatch.setattr(wsmain.collectors, "collect_issues", lambda repo, user: [])
+
+    posted = []
+    monkeypatch.setattr(wsmain, "_post_discord", lambda wh, content: posted.append(content))
+    assert main(["--discord"]) == 0
+    assert len(posted) > 1  # 60 MRs -> 120 items -> spans multiple messages
+    for m in posted:
+        assert len(m.encode("utf-8")) <= 1900
+
+
 # HARDENING — webhook host allowlist (reject SSRF/exfil targets)
 def test_validate_webhook_accepts_discord_hosts():
     wsmain._validate_webhook("https://discord.com/api/webhooks/123/abc")
