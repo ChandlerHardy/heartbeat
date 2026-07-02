@@ -8,6 +8,10 @@ user-invocable: true
 
 All interactive heartbeat work runs in the current session using local tools and subagents. OCI is only for the unattended nightly cron and Discord bot — never SSH to OCI from interactive commands.
 
+> **Current status (2026-07):** the nightly `heartbeat.sh` cron and `heartbeat-bot.service` on OCI
+> are **disabled** — only the weekly GitHub digest (`heartbeat-weekly.sh`, Sun 14:05 UTC) runs.
+> Re-enable steps are in MEMORY.md § Scheduled Tasks. Interactive commands below are unaffected.
+
 ## Dashboard
 
 **GitHub Projects board:** https://github.com/users/ChandlerHardy/projects/1
@@ -176,16 +180,17 @@ ssh oci "cd /mnt/block_volume/repos && git clone git@github.com:<github-repo>.gi
 ssh oci "jq '.projects += [{\"name\": \"<name>\", \"path\": \"/mnt/block_volume/repos/<local-dir-name>\", \"stale_days\": 14}]' ~/etc/heartbeat.json > /tmp/hb.json && mv /tmp/hb.json ~/etc/heartbeat.json"
 ```
 
-**Step 3: Add to REPO_NAME_MAP in code-reviewer/app.py** (if GitHub name != OCI dir name):
+**Step 3: Add to REPO_NAME_MAP in `~/repos/seneschal/app.py`** (if GitHub name != OCI dir name —
+Seneschal was extracted from this repo into its own; the map no longer lives here):
 ```python
 REPO_NAME_MAP = {
     "gnomestead": "gnomestead-ios",
     "<github-name>": "<local-dir-name>",
 }
 ```
-Then redeploy the Seneschal webhook handler:
+Then redeploy the Seneschal webhook handler from ITS repo:
 ```bash
-./install.sh oci    # ships the updated app.py to ~/seneschal/ and restarts seneschal.service
+cd ~/repos/seneschal && ./install.sh oci    # ships app.py to OCI and restarts seneschal.service
 ```
 
 **Step 4: Create product context**
