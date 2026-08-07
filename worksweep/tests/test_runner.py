@@ -91,19 +91,34 @@ def test_lock_holder_pid_unparseable_content_returns_none(tmp_path):
 
 
 def test_acquire_lock_tolerates_vanishing_lock_file(tmp_path):
-    """Lock file deleted between FileExistsError and pid-read should retry and succeed."""
+    """Lock file deleted between FileExistsError and pid-read: acquire_lock retries and succeeds.
+
+    Simulates: attempt 1's O_EXCL fails (file exists), helper deletes it and returns None,
+    loop continues without os.remove, attempt 2's O_EXCL succeeds.
+    """
     p = str(tmp_path / "runner.lock")
+    # Create the lock file first so attempt 1's O_EXCL fails
+    with open(p, "w") as f:
+        f.write("12345")
+
     call_count = [0]
 
     def mock_lock_holder_pid(path):
         call_count[0] += 1
-        if call_count[0] == 1:
-            # First call: simulate vanishing lock (None means file gone)
-            return None
-        # Second call (retry): file still gone
+        assert path == p
+        # Simulate the race: holder released between FileExistsError and read
+        os.remove(p)
         return None
 
     with patch("worksweep.runner._lock_holder_pid", side_effect=mock_lock_holder_pid):
-        # First O_EXCL succeeds (no lock exists yet after vanish)
-        assert acquire_lock(p) is True
+        # Attempt 1: O_EXCL fails (file exists), calls helper which deletes it and returns None.
+        # Loop continues (no os.remove call). Attempt 2: O_EXCL succeeds.
+        result = acquire_lock(p)
+
+    assert result is True
+    assert call_count[0] == 1
+    # Lock file now exists with our pid
+    assert os.path.exists(p)
+    with open(p) as f:
+        assert int(f.read().strip()) == os.getpid()
     release_lock(p)
