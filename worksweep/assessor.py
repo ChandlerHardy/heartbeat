@@ -31,36 +31,91 @@ def has_magi_report(repo: str, iid: int) -> bool:
     return bool(glob(_report_glob(repo, iid)))
 
 
-def assess_mr(mr: MergeRequest, username: str,
-              has_magi: Callable[[str, int], bool]) -> List[WorkItem]:
+# States in which GitLab still expects MY review. "" = state unknown (be loud,
+# not silent: unknown renders as actionable rather than vanishing).
+REVIEW_ACTIONABLE_STATES = ("UNREVIEWED", "REVIEW_STARTED", "UNAPPROVED", "")
+
+
+def assess_review_request(mr: MergeRequest, username: str) -> List[WorkItem]:
+    """A review-requested MR is actionable only while GitLab says my review
+    state is outstanding. Reviewed/requested-changes/approved -> no item (the
+    sensor's resolutions() closes any existing one)."""
+    if username not in mr.reviewers:
+        return []
+    if mr.my_review_state not in REVIEW_ACTIONABLE_STATES:
+        return []
+    why = "review requested"
+    if mr.ci_status not in ("unknown", ""):
+        ready = "CI green" if mr.ci_status == "success" else f"CI {mr.ci_status}"
+        why = f"review requested ({ready})"
+    if mr.is_draft:
+        why += " (draft)"
+    return [WorkItem(
+        schema_version=1, id=f"review:{mr.repo}!{mr.iid}",
+        repo=mr.repo, kind="review_request", executor="magi-review",
+        risk="low", why=why, web_url=mr.web_url, sha=mr.sha)]
+
+
+def resolutions(review_mrs: List[MergeRequest], username: str) -> dict:
+    """ids the sensor says are settled: review items where my state is a
+    waiting-on-author state. reconcile() flips matching queue records done."""
+    out = {}
+    for mr in review_mrs:
+        if username in mr.reviewers and mr.my_review_state not in REVIEW_ACTIONABLE_STATES:
+            out[f"review:{mr.repo}!{mr.iid}"] = "already-reviewed"
+    return out
+
+
+def assess_own_mr(mr: MergeRequest, username: str,
+                  has_magi: Callable[[str, int, str], bool]) -> List[WorkItem]:
+    if mr.author != username:
+        return []
     items: List[WorkItem] = []
-    mine = mr.author == username
-    if mine:
-        if not has_magi(mr.repo, mr.iid):
-            items.append(WorkItem(
-                schema_version=1, id=f"magi:{mr.repo}!{mr.iid}@{mr.sha}",
-                repo=mr.repo, kind="mr", executor="magi-review", risk="low",
-                why="no magi-review yet", web_url=mr.web_url, sha=mr.sha))
-        if not mr.dev_url_present:
-            items.append(WorkItem(
-                schema_version=1, id=f"hygiene-devurl:{mr.repo}!{mr.iid}",
-                repo=mr.repo, kind="mr", executor="mr-hygiene", risk="low",
-                why="description missing dev-server link", web_url=mr.web_url, sha=mr.sha))
-    elif username in mr.reviewers and not mr.is_draft:
-        # The MR LIST endpoint omits head_pipeline, so ci_status is usually
-        # "unknown" in M1 — only mention CI when we actually have a known value
-        # (avoids implying we fetched pipeline data we did not).
-        if mr.ci_status == "unknown":
-            why = "review requested"
-        else:
-            ready = "CI green" if mr.ci_status == "success" else f"CI {mr.ci_status}"
-            why = f"review requested ({ready})"
+    if not has_magi(mr.repo, mr.iid, mr.sha):
         items.append(WorkItem(
-            schema_version=1, id=f"review:{mr.repo}!{mr.iid}",
-            repo=mr.repo, kind="review_request", executor="review",
-            risk="low", why=why,
-            web_url=mr.web_url, sha=mr.sha))
+            schema_version=1, id=f"magi:{mr.repo}!{mr.iid}@{mr.sha}",
+            repo=mr.repo, kind="mr", executor="magi-review", risk="low",
+            why="no magi-review yet", web_url=mr.web_url, sha=mr.sha))
+    if not mr.dev_url_present:
+        items.append(WorkItem(
+            schema_version=1, id=f"hygiene-devurl:{mr.repo}!{mr.iid}",
+            repo=mr.repo, kind="mr", executor="mr-hygiene", risk="low",
+            why="description missing dev-server link", web_url=mr.web_url, sha=mr.sha))
+    if mr.changes_requested or mr.unresolved_count > 0:
+        n = mr.unresolved_count
+        why = "changes requested" if mr.changes_requested else ""
+        if n:
+            why = (why + ", " if why else "") + f"{n} unresolved thread{'s' if n != 1 else ''}"
+        items.append(WorkItem(
+            schema_version=1, id=f"feedback:{mr.repo}!{mr.iid}",
+            repo=mr.repo, kind="feedback", executor="triage", risk="low",
+            why=why, web_url=mr.web_url, sha=mr.sha))
+    if mr.ci_status == "failed":
+        items.append(WorkItem(
+            schema_version=1, id=f"ci:{mr.repo}!{mr.iid}",
+            repo=mr.repo, kind="ci_red", executor="triage", risk="low",
+            why="head pipeline failed", web_url=mr.web_url, sha=mr.sha))
     return items
+
+
+def assess_mr(mr: MergeRequest, username: str,
+              has_magi: Callable) -> List[WorkItem]:
+    """Back-compat shim over assess_review_request/assess_own_mr for the
+    existing __main__.py entry point (__main__.py rewiring is Task 7).
+
+    `has_magi` may be the old 2-arg (repo, iid) shape __main__.py still
+    passes, or the new 3-arg (repo, iid, sha) shape Task 6's queue-backed
+    implementation will supply — tried 3-arg first, falls back to 2-arg on
+    TypeError so both callers keep working unmodified.
+    """
+    def _has_magi(repo: str, iid: int, sha: str) -> bool:
+        try:
+            return has_magi(repo, iid, sha)
+        except TypeError:
+            return has_magi(repo, iid)
+    if mr.author == username:
+        return assess_own_mr(mr, username, _has_magi)
+    return assess_review_request(mr, username)
 
 
 def assess_todo(todo: Todo) -> List[WorkItem]:

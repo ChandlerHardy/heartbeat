@@ -16,39 +16,45 @@ def _mr(**kw):
 
 def test_mine_without_magi_proposes_magi_review():
     items = assess_mr(_mr(author="chandler.hardy"), "chandler.hardy",
-                      has_magi=lambda r, iid: False)
+                      has_magi=lambda r, i, s: False)
     assert any(i.executor == "magi-review" for i in items)
 
 
 def test_mine_with_magi_does_not_propose_magi_review():
     items = assess_mr(_mr(author="chandler.hardy"), "chandler.hardy",
-                      has_magi=lambda r, iid: True)
+                      has_magi=lambda r, i, s: True)
     assert not any(i.executor == "magi-review" for i in items)
 
 
 def test_missing_dev_url_proposes_hygiene():
     items = assess_mr(_mr(author="chandler.hardy", description="no link"),
-                      "chandler.hardy", has_magi=lambda r, iid: True)
+                      "chandler.hardy", has_magi=lambda r, i, s: True)
     assert any(i.executor == "mr-hygiene" for i in items)
 
 
 def test_present_dev_url_no_hygiene():
     desc = "see https://x-dev4.performancebeef.com/y"
     items = assess_mr(_mr(author="chandler.hardy", description=desc),
-                      "chandler.hardy", has_magi=lambda r, iid: True)
+                      "chandler.hardy", has_magi=lambda r, i, s: True)
     assert not any(i.executor == "mr-hygiene" for i in items)
 
 
 def test_review_request_when_im_reviewer_not_author():
     items = assess_mr(_mr(author="leyang", reviewers=("chandler.hardy",)),
-                      "chandler.hardy", has_magi=lambda r, iid: True)
-    assert any(i.executor == "review" for i in items)
+                      "chandler.hardy", has_magi=lambda r, i, s: True)
+    # v2: review-request items route through the magi-review executor now
+    # (see assess_review_request / REVIEW_ACTIONABLE_STATES in assessor.py).
+    assert any(i.kind == "review_request" and i.executor == "magi-review" for i in items)
 
 
-def test_draft_review_request_is_skipped():
+def test_draft_review_request_is_included_and_tagged():
+    # v2: drafts are no longer skipped -- assess_review_request() includes
+    # them, tagged "(draft)" in why, so the requester still sees the item.
     items = assess_mr(_mr(author="leyang", reviewers=("chandler.hardy",), is_draft=True),
-                      "chandler.hardy", has_magi=lambda r, iid: True)
-    assert not any(i.executor == "review" for i in items)
+                      "chandler.hardy", has_magi=lambda r, i, s: True)
+    review = [i for i in items if i.kind == "review_request"]
+    assert len(review) == 1
+    assert "(draft)" in review[0].why
 
 
 def test_dedupe_by_id():
@@ -63,8 +69,8 @@ def test_dedupe_by_id():
 def test_review_request_unknown_ci_omits_ci_clause():
     items = assess_mr(_mr(author="leyang", reviewers=("chandler.hardy",),
                           ci_status="unknown"),
-                      "chandler.hardy", has_magi=lambda r, iid: True)
-    review = [i for i in items if i.executor == "review"]
+                      "chandler.hardy", has_magi=lambda r, i, s: True)
+    review = [i for i in items if i.kind == "review_request"]
     assert len(review) == 1
     assert review[0].why == "review requested"
     assert "CI" not in review[0].why
@@ -73,8 +79,8 @@ def test_review_request_unknown_ci_omits_ci_clause():
 def test_review_request_success_ci_mentions_green():
     items = assess_mr(_mr(author="leyang", reviewers=("chandler.hardy",),
                           ci_status="success"),
-                      "chandler.hardy", has_magi=lambda r, iid: True)
-    review = [i for i in items if i.executor == "review"]
+                      "chandler.hardy", has_magi=lambda r, i, s: True)
+    review = [i for i in items if i.kind == "review_request"]
     assert len(review) == 1
     assert "CI green" in review[0].why
 
