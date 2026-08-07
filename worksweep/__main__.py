@@ -229,8 +229,9 @@ def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="worksweep")
-    ap.add_argument("command", nargs="?", choices=["intake"],
-                    help="`intake` polls Discord for approval replies")
+    ap.add_argument("command", nargs="?", choices=["intake", "run"],
+                    help="`intake` polls Discord for approval replies; "
+                         "`run` executes one approved magi-review item")
     ap.add_argument("--dry-run", action="store_true", help="print to stdout, no Discord")
     ap.add_argument("--discord", action="store_true", help="post digest to Discord")
     args = ap.parse_args(argv)
@@ -243,6 +244,18 @@ def main(argv=None) -> int:
 
     if args.command == "intake":
         return _run_intake(cfg)
+
+    if args.command == "run":
+        from . import runner as _runner
+        deps = {
+            "load": lambda: load_queue(_queue_path()),
+            "save": lambda records: save_queue(_queue_path(), records),
+            "post": _post_discord,
+            "now": _now,
+            "execute": (lambda item, c: (item.sha, "(dry-run)"))
+                       if args.dry_run else _runner.execute,
+        }
+        return _runner.run_once(cfg, deps)
 
     if args.discord and not args.dry_run and not cfg.discord_webhook:
         print("worksweep: no discord_webhook configured", file=sys.stderr)

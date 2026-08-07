@@ -7,13 +7,22 @@ from __future__ import annotations
 
 import dataclasses
 import datetime
+import glob as _glob
 import os
-from typing import List, Optional, Tuple
+import re
+import subprocess
+import sys
+from typing import Callable, Dict, List, Optional, Tuple
 
-from .models import QueueRecord
+from .models import QueueRecord, WorkItem
 
 STALE_RUNNING_MINUTES = 45
 _ERROR_SUMMARY_MAX = 500
+_LOCK_DEFAULT = os.path.expanduser("~/.worksweep/runner.lock")
+
+
+class RunnerError(RuntimeError):
+    """Executor failure with a human-postable summary."""
 
 
 def _replace(rec: QueueRecord, now: str, **item_changes) -> QueueRecord:
@@ -119,3 +128,116 @@ def release_lock(path: str) -> None:
         os.remove(path)
     except FileNotFoundError:
         pass
+
+
+def _iid_of(item: WorkItem) -> int:
+    m = re.search(r"/merge_requests/(\d+)", item.web_url)
+    if not m:
+        raise RunnerError(f"cannot find MR iid in web_url: {item.web_url!r}")
+    return int(m.group(1))
+
+
+def find_report(checkout: str, iid: int) -> Optional[str]:
+    hits = _glob.glob(os.path.join(checkout, ".magi",
+                                   f"tribunal-report-mr-{iid}-*.md"))
+    return max(hits, key=os.path.getmtime) if hits else None
+
+
+def extract_verdict(report_path: str) -> str:
+    try:
+        with open(report_path) as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return ""
+    out, capturing = [], False
+    for line in lines:
+        if line.startswith("## "):
+            if capturing:
+                break
+            capturing = line.lower().startswith("## verdict")
+            continue
+        if capturing and line.strip():
+            out.append(line)
+        if len(out) >= 12:
+            break
+    return "\n".join(out)
+
+
+def execute(item: WorkItem, cfg,
+            run_subprocess: Callable = subprocess.run) -> Tuple[str, str]:
+    """Fetch + run `claude -p "/magi:magi-review !<iid>"` in the repo checkout.
+    Returns (result_sha, report_path). Raises RunnerError on any failure."""
+    checkout = os.path.join(cfg.checkouts_root, item.repo)
+    if not os.path.isdir(checkout):
+        raise RunnerError(f"no checkout for {item.repo} at {checkout}")
+    iid = _iid_of(item)
+    try:
+        fetch = run_subprocess(["git", "-C", checkout, "fetch", "origin"],
+                               capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        raise RunnerError("git fetch timed out")
+    if fetch.returncode != 0:
+        raise RunnerError(f"git fetch failed: {(fetch.stderr or '').strip()[-300:]}")
+    try:
+        proc = run_subprocess(
+            [cfg.claude_bin, "-p", f"/magi:magi-review !{iid}"],
+            cwd=checkout, capture_output=True, text=True,
+            timeout=cfg.runner_timeout)
+    except subprocess.TimeoutExpired:
+        raise RunnerError(f"magi-review !{iid} exceeded {cfg.runner_timeout}s")
+    if proc.returncode != 0:
+        tail = "\n".join((proc.stderr or proc.stdout or "").splitlines()[-15:])
+        raise RunnerError(f"magi-review !{iid} exited {proc.returncode}: {tail}")
+    report = find_report(checkout, iid) or ""
+    return item.sha, report
+
+
+def run_once(cfg, deps: Dict[str, Callable], lock_path: str = _LOCK_DEFAULT) -> int:
+    """One runner pass: reap stale claims, then run at most one approved item."""
+    if not acquire_lock(lock_path):
+        return 0    # another runner is live — that's fine, not an error
+    try:
+        now = deps["now"]()
+        records = deps["load"]()
+        records, reaped = reap_stale(records, now)
+        if reaped:
+            deps["save"](records)
+            for r in reaped:
+                _post(deps, cfg, f"⚠️ Worksweep runner: reaped stale claim "
+                                 f"#{r.number} ({r.item.repo} {r.item.id})")
+        target = pick_claim(records)
+        if target is None:
+            return 0
+        records = claim(records, target.number, now)
+        deps["save"](records)
+        try:
+            result_sha, report_path = deps["execute"](target.item, cfg)
+        except RunnerError as e:
+            records = fail(records, target.number, str(e), deps["now"]())
+            deps["save"](records)
+            _post(deps, cfg, f"⚠️ Worksweep runner: #{target.number} "
+                             f"magi-review failed — {e}")
+            return 1
+        records = complete(records, target.number, result_sha, report_path,
+                           deps["now"]())
+        deps["save"](records)
+        verdict = extract_verdict(report_path) if report_path else ""
+        msg = (f"🧙 magi-review done — #{target.number} {target.item.repo} "
+               f"<{target.item.web_url}>\n"
+               + (f"```\n{verdict}\n```\n" if verdict else "")
+               + (f"report: `{report_path}`" if report_path
+                  else "(no report file found)"))
+        _post(deps, cfg, msg)
+        return 0
+    finally:
+        release_lock(lock_path)
+
+
+def _post(deps, cfg, content: str) -> None:
+    try:
+        if cfg.discord_webhook:
+            deps["post"](cfg.discord_webhook, content)
+        else:
+            print(content)
+    except Exception as e:
+        print(f"worksweep runner: discord post failed: {e}", file=sys.stderr)

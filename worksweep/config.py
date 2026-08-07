@@ -16,6 +16,12 @@ class WorksweepConfig:
     bot_token: str = ""
     channel_id: str = ""
     discord_user_id: str = ""
+    # M3 runner: parent dir of per-repo clones + the claude binary + the hard
+    # timeout cap for one magi-review executor run. Absent `runner` block ->
+    # checkouts_root="" (execute() then fails fast with a clear RunnerError).
+    checkouts_root: str = ""
+    claude_bin: str = "claude"
+    runner_timeout: int = 1800
 
 
 def load_config(path: str | None = None) -> WorksweepConfig:
@@ -29,6 +35,7 @@ def load_config(path: str | None = None) -> WorksweepConfig:
         raise RuntimeError(f"config is not valid JSON ({path}): {e}")
     gl = data.get("gitlab") or {}
     dc = data.get("discord") or {}
+    rn = data.get("runner") or {}
     return WorksweepConfig(
         repos=tuple(gl.get("repos") or []),
         username=gl.get("username", ""),
@@ -36,4 +43,7 @@ def load_config(path: str | None = None) -> WorksweepConfig:
         bot_token=dc.get("bot_token", ""),
         channel_id=dc.get("channel_id", ""),
         discord_user_id=dc.get("user_id", ""),
+        checkouts_root=rn.get("checkouts_root", ""),
+        claude_bin=rn.get("claude_bin", "claude"),
+        runner_timeout=int(rn.get("timeout_seconds", 1800)),
     )
