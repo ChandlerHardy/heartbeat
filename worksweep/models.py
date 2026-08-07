@@ -52,8 +52,8 @@ class WorkItem:
     schema_version: int
     id: str
     repo: str
-    kind: str       # "mr" | "review_request" | "todo" | "issue"
-    executor: str   # "magi-review" | "mr-hygiene" | "review" | "triage"
+    kind: str       # "mr" | "review_request" | "feedback" | "ci_red" | "todo" | "issue"
+    executor: str   # "magi-review" | "mr-hygiene" | "triage"
     risk: str       # "low" | "medium" | "high"
     why: str
     web_url: str

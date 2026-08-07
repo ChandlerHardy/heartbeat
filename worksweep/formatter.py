@@ -46,11 +46,24 @@ def _numbered(items: List[WorkItem]) -> List[tuple]:
     return list(enumerate(items, 1))
 
 
+# Bytes reserved on every header-bearing message for a "(i/N)" part label,
+# added only once the final message count is known (see below). Comfortably
+# covers up to a 3-digit part count ("(999/999)" is 10 bytes).
+_LABEL_RESERVE = 12
+
+
 def _format_messages_numbered(numbered: List[tuple],
                               max_bytes: int = DISCORD_MAX_CHARS) -> List[str]:
-    """Split a list of (number, WorkItem) pairs into capped messages."""
+    """Split a list of (number, WorkItem) pairs into capped messages.
+
+    Multi-part digests get a "(i/N)" label on each header line so a reader
+    knows a message is a fragment, not the whole sweep. The split itself
+    reserves `_LABEL_RESERVE` bytes of headroom up front so adding the label
+    afterward can never push a message over `max_bytes`.
+    """
     if not numbered:
         return [_ALL_CLEAR]
+    cap = max_bytes - _LABEL_RESERVE
     head = f"{_HEADER} — {len(numbered)} item(s) need you:"
     cont = f"{_HEADER} *(cont.)*"
     msgs: List[str] = []
@@ -60,17 +73,21 @@ def _format_messages_numbered(numbered: List[tuple],
         # continuation header without breaching the cap.
         line = _truncate_bytes(_item_line(n, it), max_bytes - 80)
         candidate = f"{cur}\n{line}"
-        if len(candidate.encode("utf-8")) > max_bytes:
+        if len(candidate.encode("utf-8")) > cap:
             msgs.append(cur)
             cur = f"{cont}\n{line}"
         else:
             cur = candidate
     with_footer = f"{cur}\n\n{_FOOTER}"
-    if len(with_footer.encode("utf-8")) <= max_bytes:
+    if len(with_footer.encode("utf-8")) <= cap:
         msgs.append(with_footer)
     else:
         msgs.append(cur)
         msgs.append(_FOOTER)
+    if len(msgs) > 1:
+        total = len(msgs)
+        msgs = [m.replace(_HEADER, f"{_HEADER} ({i}/{total})", 1) if _HEADER in m else m
+               for i, m in enumerate(msgs, 1)]
     return msgs
 
 

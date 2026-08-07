@@ -99,22 +99,13 @@ def assess_own_mr(mr: MergeRequest, username: str,
 
 
 def assess_mr(mr: MergeRequest, username: str,
-              has_magi: Callable) -> List[WorkItem]:
-    """Back-compat shim over assess_review_request/assess_own_mr for the
-    existing __main__.py entry point (__main__.py rewiring is Task 7).
-
-    `has_magi` may be the old 2-arg (repo, iid) shape __main__.py still
-    passes, or the new 3-arg (repo, iid, sha) shape Task 6's queue-backed
-    implementation will supply — tried 3-arg first, falls back to 2-arg on
-    TypeError so both callers keep working unmodified.
-    """
-    def _has_magi(repo: str, iid: int, sha: str) -> bool:
-        try:
-            return has_magi(repo, iid, sha)
-        except TypeError:
-            return has_magi(repo, iid)
+              has_magi: Callable[[str, int, str], bool]) -> List[WorkItem]:
+    """Shim over assess_review_request/assess_own_mr for callers assessing a
+    single MergeRequest without caring which bucket it's in. `has_magi` is
+    the 3-arg (repo, iid, sha) shape used throughout the queue-backed M3
+    assessor (see has_magi_done)."""
     if mr.author == username:
-        return assess_own_mr(mr, username, _has_magi)
+        return assess_own_mr(mr, username, has_magi)
     return assess_review_request(mr, username)
 
 

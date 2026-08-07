@@ -2,9 +2,14 @@
 
 M1: read-only digest. `--dry-run` prints to stdout; `--discord` posts.
 M2: `--discord`/`--dry-run` reconcile the sweep into a persistent queue and
-render the digest from the queue's stable numbers; the new `intake` subcommand
+render the digest from the queue's stable numbers; the `intake` subcommand
 polls Discord for Chandler's approval replies and flips matched items to
 `approved` (no executors — approval is status-only).
+M3: the sweep runs one GraphQL query (mirroring the GitLab dashboard) instead
+of the old per-repo REST calls; `run_sweep(cfg, deps)` is the dependency-
+injected core so tests never shell out, and `main()` just wires real deps
+(`glab`, Discord, the queue file) around it. Message contract: every sweep
+posts exactly one digest (or 🔍 heartbeat, or ⚠️ error) — never silence.
 """
 from __future__ import annotations
 
@@ -27,10 +32,7 @@ from . import assessor, collectors
 from .approvals import apply_approvals
 from .config import WorksweepConfig, load_config
 from .discord_read import fetch_messages
-from .formatter import (
-    format_digest, format_messages,
-    format_digest_from_records, format_messages_from_records,
-)
+from .formatter import format_messages_from_records
 from .queue import load_queue, reconcile, save_queue
 
 _QUEUE_DEFAULT = os.path.expanduser("~/.worksweep/queue.json")
@@ -70,35 +72,6 @@ def _write_cursor(message_id: str) -> None:
     with open(tmp, "w") as f:
         f.write(message_id)
     os.replace(tmp, path)
-
-
-def collect_and_assess(collect_fns: Dict[str, Callable], cfg: WorksweepConfig,
-                       has_magi: Callable[[str, int], bool]) -> list:
-    """Collect signals -> assess -> dedupe. Returns the WorkItem list."""
-    items = []
-    for repo in cfg.repos:
-        try:
-            for mr in collect_fns["my_mrs"](repo, cfg.username):
-                items += assessor.assess_mr(mr, cfg.username, has_magi)
-            for mr in collect_fns["review_requests"](repo, cfg.username):
-                items += assessor.assess_mr(mr, cfg.username, has_magi)
-            for iss in collect_fns["issues"](repo, cfg.username):
-                items += assessor.assess_issue(iss)
-        except Exception as e:  # one repo's failure must not abort the sweep
-            print(f"worksweep: skipping repo {repo}: {e}", file=sys.stderr)
-            continue
-    try:
-        for td in collect_fns["todos"]():
-            items += assessor.assess_todo(td)
-    except Exception as e:
-        print(f"worksweep: todos collection failed: {e}", file=sys.stderr)
-    return assessor.dedupe(items)
-
-
-def build_digest(collect_fns: Dict[str, Callable], cfg: WorksweepConfig,
-                 has_magi: Callable[[str, int], bool]) -> str:
-    """Full digest as a single string (stdout view)."""
-    return format_digest(collect_and_assess(collect_fns, cfg, has_magi))
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -182,6 +155,78 @@ def _run_intake(cfg: WorksweepConfig) -> int:
     return 0
 
 
+def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
+    """One sweep under the message contract: digest, 🔍 heartbeat, or ⚠️ error —
+    never silence. All I/O arrives via `deps` so tests stay hermetic."""
+    post = deps["post"]
+
+    def _post_all(messages) -> None:
+        if cfg.discord_webhook:
+            for m in messages:
+                post(cfg.discord_webhook, m)
+        else:
+            for m in messages:
+                print(m)
+
+    try:
+        raw = deps["graphql"]()
+        review_mrs, authored = collectors.parse_graphql_sweep(
+            raw, cfg.username, cfg.repos)
+
+        items = []
+        for mr in review_mrs:
+            items += assessor.assess_review_request(mr, cfg.username)
+        records0 = deps["load"]()
+        records0 = assessor.bootstrap_magi_records(
+            records0, authored, deps["now"]())
+        for mr in authored:
+            items += assessor.assess_own_mr(
+                mr, cfg.username,
+                has_magi=lambda r, i, s: assessor.has_magi_done(records0, r, i, s))
+        try:
+            for td in deps["todos"]():
+                items += assessor.assess_todo(td)
+        except Exception as e:
+            print(f"worksweep: todos collection failed: {e}", file=sys.stderr)
+        for repo in cfg.repos:
+            try:
+                for iss in deps["issues"](repo, cfg.username):
+                    items += assessor.assess_issue(iss)
+            except Exception as e:
+                print(f"worksweep: issues for {repo} failed: {e}", file=sys.stderr)
+        items = assessor.dedupe(items)
+
+        resolved = assessor.resolutions(review_mrs, cfg.username)
+        records = reconcile(records0, items, deps["now"](), resolved=resolved)
+        try:
+            deps["save"](records)
+        except OSError as e:
+            print(f"worksweep: could not persist queue: {e}", file=sys.stderr)
+
+        # done/error records are terminal — they've already been reported (or
+        # failed and are excluded from re-proposal) so they'd only clutter the
+        # digest. The actionable check must use the same filtered set the
+        # formatter renders, or "nothing needs you" and an empty digest could
+        # disagree.
+        actionable = [r for r in records if r.item.status not in ("done", "error")]
+        if actionable:
+            _post_all(format_messages_from_records(actionable))
+        else:
+            _post_all([f"🔍 Worksweep: nothing needs you "
+                       f"(checked {len(review_mrs)} review requests, "
+                       f"{len(authored)} authored MRs)"])
+        return 0
+    except Exception as e:
+        msg = f"⚠️ Worksweep sweep failed: {type(e).__name__}: {e}"
+        try:
+            if cfg.discord_webhook:
+                post(cfg.discord_webhook, msg)
+        except Exception as post_err:
+            print(f"worksweep: error post also failed: {post_err}", file=sys.stderr)
+        print(msg, file=sys.stderr)
+        return 1
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="worksweep")
     ap.add_argument("command", nargs="?", choices=["intake"],
@@ -199,38 +244,18 @@ def main(argv=None) -> int:
     if args.command == "intake":
         return _run_intake(cfg)
 
-    collect_fns = {
-        "my_mrs": collectors.collect_my_mrs,
-        "review_requests": collectors.collect_review_requests,
+    deps = {
+        "graphql": collectors.run_graphql_sweep,
         "todos": collectors.collect_todos,
         "issues": collectors.collect_issues,
+        "post": _post_discord,
+        "load": lambda: load_queue(_queue_path()),
+        "save": lambda records: save_queue(_queue_path(), records),
+        "now": _now,
     }
-    items = collect_and_assess(
-        collect_fns, cfg,
-        has_magi=lambda repo, iid: assessor.has_magi_report(repo, iid))
-
-    # Reconcile the fresh sweep into the persistent queue so the rendered digest
-    # uses stable, persisted numbers — the number a user replies to maps to the
-    # same WorkItem next sweep. The queue is the source of truth for numbering.
-    records = reconcile(load_queue(_queue_path()), items, _now())
-    try:
-        save_queue(_queue_path(), records)
-    except OSError as e:
-        print(f"worksweep: could not persist queue: {e}", file=sys.stderr)
-
-    if args.discord and not args.dry_run:
-        if not cfg.discord_webhook:
-            print("worksweep: no discord_webhook configured", file=sys.stderr)
-            return 1
-        try:
-            for message in format_messages_from_records(records):
-                _post_discord(cfg.discord_webhook, message)
-        except Exception as e:
-            print(f"worksweep: {e}", file=sys.stderr)
-            return 1
-    else:
-        print(format_digest_from_records(records))
-    return 0
+    if args.dry_run or not args.discord:
+        deps["post"] = lambda hook, content: print(content)
+    return run_sweep(cfg, deps)
 
 
 if __name__ == "__main__":
