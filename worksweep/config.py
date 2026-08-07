@@ -36,6 +36,12 @@ def load_config(path: str | None = None) -> WorksweepConfig:
     gl = data.get("gitlab") or {}
     dc = data.get("discord") or {}
     rn = data.get("runner") or {}
+    timeout_raw = rn.get("timeout_seconds", 1800)
+    try:
+        runner_timeout = int(timeout_raw)
+    except (TypeError, ValueError):
+        raise RuntimeError(
+            f"config runner.timeout_seconds must be an integer, got {timeout_raw!r}")
     return WorksweepConfig(
         repos=tuple(gl.get("repos") or []),
         username=gl.get("username", ""),
@@ -45,5 +51,5 @@ def load_config(path: str | None = None) -> WorksweepConfig:
         discord_user_id=dc.get("user_id", ""),
         checkouts_root=rn.get("checkouts_root", ""),
         claude_bin=rn.get("claude_bin", "claude"),
-        runner_timeout=int(rn.get("timeout_seconds", 1800)),
+        runner_timeout=runner_timeout,
     )

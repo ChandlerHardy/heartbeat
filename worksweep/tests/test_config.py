@@ -70,3 +70,17 @@ def test_load_config_missing_discord_block_yields_empty_strings():
         assert cfg.bot_token == ""
         assert cfg.channel_id == ""
         assert cfg.discord_user_id == ""
+
+
+# I4 — a non-numeric runner.timeout_seconds must raise RuntimeError (caught by
+# main()'s never-silent handler), not an uncaught ValueError.
+def test_load_config_non_integer_timeout_raises_runtime_error():
+    with tempfile.TemporaryDirectory() as tmp:
+        p = _write(tmp, {
+            "gitlab": {"username": "x", "repos": []},
+            "runner": {"timeout_seconds": "1800s"},
+        })
+        with pytest.raises(RuntimeError) as exc:
+            load_config(p)
+        assert "runner.timeout_seconds" in str(exc.value)
+        assert "1800s" in str(exc.value)
