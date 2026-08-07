@@ -5,7 +5,7 @@ import os
 from glob import glob
 from typing import Callable, List
 
-from .models import Issue, MergeRequest, Todo, WorkItem
+from .models import Issue, MergeRequest, QueueRecord, Todo, WorkItem
 
 MAGI_REPORTS_BASE = os.path.expanduser("~/workspaces/pla")
 
@@ -139,4 +139,42 @@ def dedupe(items: List[WorkItem]) -> List[WorkItem]:
             continue
         seen.add(it.id)
         out.append(it)
+    return out
+
+
+def has_magi_done(records, repo: str, iid: int, sha: str) -> bool:
+    """Queue-backed replacement for the .magi file glob: a magi run for this
+    (repo, iid) at the CURRENT head sha is recorded as a done record."""
+    for r in records:
+        it = r.item
+        if it.executor != "magi-review" or it.status != "done" or it.repo != repo:
+            continue
+        if f"!{iid}@" not in it.id and it.id != f"review:{repo}!{iid}":
+            continue
+        if sha and (it.sha == sha or it.result_sha == sha):
+            return True
+    return False
+
+
+def bootstrap_magi_records(records, authored, now: str,
+                           report_exists=None):
+    """One-time migration: seed done records from the legacy .magi glob so the
+    first queue-backed sweep doesn't re-propose already-reviewed MRs. Idempotent;
+    a machine without the worktrees (the mini) is a natural no-op."""
+    report_exists = report_exists or has_magi_report
+    out = list(records)
+    next_num = max((r.number for r in out), default=0) + 1
+    for mr in authored:
+        if has_magi_done(out, mr.repo, mr.iid, mr.sha):
+            continue
+        if not report_exists(mr.repo, mr.iid):
+            continue
+        out.append(QueueRecord(
+            number=next_num, first_seen=now, last_seen=now,
+            item=WorkItem(schema_version=1, id=f"magi:{mr.repo}!{mr.iid}@{mr.sha}",
+                          repo=mr.repo, kind="mr", executor="magi-review",
+                          risk="low", why="seeded from legacy .magi report",
+                          web_url=mr.web_url, sha=mr.sha, status="done",
+                          done_reason="bootstrap-glob", result_sha=mr.sha)))
+        next_num += 1
     return out
