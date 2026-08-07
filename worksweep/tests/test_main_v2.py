@@ -67,6 +67,26 @@ def test_collector_exception_posts_error_and_exits_1():
     assert len(texts) == 1 and texts[0].startswith("⚠️") and "glab exploded" in texts[0]
 
 
+def test_todos_deduped_against_graphql_mr_items():
+    """I5: a REST todo pointing at the same MR the GraphQL sweep already
+    surfaced as a review item is redundant noise — only the review item
+    should reach the digest. Matched on web_url, string-equal after a
+    trailing-slash strip."""
+    from worksweep.models import Todo
+
+    posts = []
+    mr_url = "https://gl/x/-/merge_requests/1"
+    deps = _deps(posts, _gql(review_nodes=[_node(iid=1)]))
+    deps["todos"] = lambda: [Todo(target="MergeRequest", action="review_requested",
+                                  web_url=mr_url + "/")]  # trailing slash variant
+    rc = run_sweep(_cfg(), deps)
+    assert rc == 0
+    saved = [args for args in posts if isinstance(args, tuple) and args[0] == "saved"]
+    records = saved[-1][1]
+    kinds = [r.item.kind for r in records if r.item.web_url.rstrip("/") == mr_url]
+    assert kinds == ["review_request"]   # the todo for the same MR was dropped
+
+
 def test_never_zero_messages():
     for raw in (_gql(), _gql(review_nodes=[_node()])):
         posts = []

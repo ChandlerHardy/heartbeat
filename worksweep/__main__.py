@@ -196,6 +196,14 @@ def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
                 print(f"worksweep: issues for {repo} failed: {e}", file=sys.stderr)
         items = assessor.dedupe(items)
 
+        # REST todos and the GraphQL sweep can both surface the same MR (e.g.
+        # a "review requested" todo alongside the review_request item the
+        # GraphQL query already produced for it) — drop the todo duplicate so
+        # the digest doesn't show the same MR twice under two executors.
+        non_todo_urls = {it.web_url.rstrip("/") for it in items if it.kind != "todo"}
+        items = [it for it in items
+                if it.kind != "todo" or it.web_url.rstrip("/") not in non_todo_urls]
+
         resolved = assessor.resolutions(review_mrs, cfg.username)
         records = reconcile(records0, items, deps["now"](), resolved=resolved)
         try:
