@@ -66,3 +66,10 @@ def test_synthetic_authored_fields():
 
 def test_malformed_raw_returns_empty_lists():
     assert parse_graphql_sweep("not json", "me", ("pb-www",)) == ([], [])
+
+
+def test_non_dict_json_returns_empty_lists():
+    # Valid JSON that isn't an object must not raise — same contract as a
+    # decode failure: ([], []).
+    for raw in ("null", "[]", "123", '"str"'):
+        assert parse_graphql_sweep(raw, "me", ("pb-www",)) == ([], [])

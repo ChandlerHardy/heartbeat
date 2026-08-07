@@ -209,7 +209,15 @@ def parse_graphql_sweep(raw: str, username: str, repos: tuple):
     except json.JSONDecodeError as e:
         print(f"worksweep: graphql decode failed: {e}", file=sys.stderr)
         return [], []
+    if not isinstance(data, dict):
+        print(f"worksweep: graphql expected an object, got {type(data).__name__}",
+              file=sys.stderr)
+        return [], []
     data = data.get("data", data) or {}
+    if not isinstance(data, dict):
+        print(f"worksweep: graphql expected an object, got {type(data).__name__}",
+              file=sys.stderr)
+        return [], []
     cu = data.get("currentUser") or {}
 
     def _bucket(key: str):
