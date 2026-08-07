@@ -218,6 +218,17 @@ def run_once(cfg, deps: Dict[str, Callable], lock_path: str = _LOCK_DEFAULT) -> 
             _post(deps, cfg, f"⚠️ Worksweep runner: #{target.number} "
                              f"magi-review failed — {e}")
             return 1
+        except Exception as e:
+            # Non-RunnerError failures (e.g. FileNotFoundError when `claude`/git
+            # is missing from launchd's minimal PATH) must still flip the claim
+            # to error and post — otherwise the item is stuck `running` silently
+            # until the 45-min reap, with no signal anything went wrong.
+            summary = f"{type(e).__name__}: {e}"
+            records = fail(records, target.number, summary, deps["now"]())
+            deps["save"](records)
+            _post(deps, cfg, f"⚠️ Worksweep runner: #{target.number} "
+                             f"magi-review failed — {summary}")
+            return 1
         records = complete(records, target.number, result_sha, report_path,
                            deps["now"]())
         deps["save"](records)

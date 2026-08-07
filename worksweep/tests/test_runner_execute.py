@@ -99,7 +99,8 @@ def test_run_once_happy_path(tmp_path):
             "post": lambda hook, content: posts.append(content),
             "now": lambda: NOW,
             "execute": lambda item, cfg: ("s1", "/r.md")}
-    assert run_once(_cfg(tmp_path), deps) == 0
+    assert run_once(_cfg(tmp_path), deps,
+                    lock_path=str(tmp_path / "runner.lock")) == 0
     final = saves[-1]
     assert final[0].item.status == "done"
     assert any("magi-review" in p for p in posts)
@@ -114,7 +115,26 @@ def test_run_once_failure_posts_warning(tmp_path):
     deps = {"load": lambda: [_approved()], "save": lambda r: saves.append(r),
             "post": lambda hook, content: posts.append(content),
             "now": lambda: NOW, "execute": boom}
-    assert run_once(_cfg(tmp_path), deps) == 1
+    assert run_once(_cfg(tmp_path), deps,
+                    lock_path=str(tmp_path / "runner.lock")) == 1
+    assert saves[-1][0].item.status == "error"
+    assert any(p.startswith("⚠️") for p in posts)
+
+
+def test_run_once_nonrunner_exception_still_fails_and_posts(tmp_path):
+    """FileNotFoundError (e.g. `claude`/git missing from launchd's minimal
+    PATH) must not propagate uncaught — the claim must flip to error and
+    Discord must get a ⚠️, not silence until the 45-min reap."""
+    posts, saves = [], []
+
+    def boom(item, cfg):
+        raise OSError("[Errno 2] No such file or directory: 'claude'")
+
+    deps = {"load": lambda: [_approved()], "save": lambda r: saves.append(r),
+            "post": lambda hook, content: posts.append(content),
+            "now": lambda: NOW, "execute": boom}
+    assert run_once(_cfg(tmp_path), deps,
+                    lock_path=str(tmp_path / "runner.lock")) == 1
     assert saves[-1][0].item.status == "error"
     assert any(p.startswith("⚠️") for p in posts)
 
@@ -124,5 +144,6 @@ def test_run_once_nothing_approved_is_quiet(tmp_path):
     deps = {"load": lambda: [], "save": lambda r: None,
             "post": lambda hook, content: posts.append(content),
             "now": lambda: NOW, "execute": lambda i, c: ("", "")}
-    assert run_once(_cfg(tmp_path), deps) == 0
+    assert run_once(_cfg(tmp_path), deps,
+                    lock_path=str(tmp_path / "runner.lock")) == 0
     assert posts == []   # runner is event-only, no heartbeat spam every 10 min
