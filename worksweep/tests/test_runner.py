@@ -1,10 +1,12 @@
 """Runner claim/reap/complete state machine + lockfile."""
 import datetime
 import os
+from unittest.mock import patch
 
 from worksweep.models import QueueRecord, WorkItem
 from worksweep.runner import (
-    acquire_lock, claim, complete, fail, pick_claim, reap_stale, release_lock)
+    _lock_holder_pid, acquire_lock, claim, complete, fail, pick_claim,
+    reap_stale, release_lock)
 
 NOW = "2026-08-07T12:00:00+00:00"
 
@@ -66,4 +68,42 @@ def test_stale_lock_from_dead_pid_is_broken(tmp_path):
     with open(p, "w") as f:
         f.write("999999999")             # certainly not a live pid
     assert acquire_lock(p) is True
+    release_lock(p)
+
+
+def test_lock_holder_pid_reads_valid_pid(tmp_path):
+    p = str(tmp_path / "lock")
+    with open(p, "w") as f:
+        f.write("12345")
+    assert _lock_holder_pid(p) == 12345
+
+
+def test_lock_holder_pid_missing_file_returns_none(tmp_path):
+    p = str(tmp_path / "missing.lock")
+    assert _lock_holder_pid(p) is None
+
+
+def test_lock_holder_pid_unparseable_content_returns_none(tmp_path):
+    p = str(tmp_path / "lock")
+    with open(p, "w") as f:
+        f.write("not-a-number")
+    assert _lock_holder_pid(p) is None
+
+
+def test_acquire_lock_tolerates_vanishing_lock_file(tmp_path):
+    """Lock file deleted between FileExistsError and pid-read should retry and succeed."""
+    p = str(tmp_path / "runner.lock")
+    call_count = [0]
+
+    def mock_lock_holder_pid(path):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            # First call: simulate vanishing lock (None means file gone)
+            return None
+        # Second call (retry): file still gone
+        return None
+
+    with patch("worksweep.runner._lock_holder_pid", side_effect=mock_lock_holder_pid):
+        # First O_EXCL succeeds (no lock exists yet after vanish)
+        assert acquire_lock(p) is True
     release_lock(p)

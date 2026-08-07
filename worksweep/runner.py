@@ -72,6 +72,15 @@ def _stale(claimed_at: str, now: str) -> bool:
     return (n - t) > datetime.timedelta(minutes=STALE_RUNNING_MINUTES)
 
 
+def _lock_holder_pid(path: str) -> Optional[int]:
+    """Read PID from lock file. Returns None if file missing or PID unparseable."""
+    try:
+        with open(path) as f:
+            return int(f.read().strip())
+    except (FileNotFoundError, ValueError):
+        return None
+
+
 def acquire_lock(path: str) -> bool:
     parent = os.path.dirname(path)
     if parent:
@@ -85,12 +94,17 @@ def acquire_lock(path: str) -> bool:
         except FileExistsError:
             if attempt == 2:
                 return False
+            pid = _lock_holder_pid(path)
+            if pid is None:
+                # Lock file vanished (or was unreadable) between FileExistsError and
+                # the read — another process called release_lock. Loop to retry.
+                continue
             try:
-                with open(path) as f:
-                    pid = int(f.read().strip())
                 os.kill(pid, 0)
                 return False           # holder alive
-            except (ValueError, ProcessLookupError):
+            except ProcessLookupError:
+                # TOCTOU: Two concurrent stale-breakers can race; one removes, the
+                # other fails. Accepted for single mini + 10-min launchd cadence.
                 try:
                     os.remove(path)    # stale -> break it, retry once
                 except FileNotFoundError:
