@@ -1,4 +1,5 @@
 """execute() subprocess contract + run_once orchestration (all edges injected)."""
+import dataclasses
 import os
 import subprocess
 
@@ -74,6 +75,19 @@ def test_execute_nonzero_claude_raises(tmp_path):
         execute(_approved().item, _cfg(tmp_path), run_subprocess=fake_run)
 
 
+# I2 — rc 0 but no tribunal report file must NOT be a silent success: it must
+# raise RunnerError so run_once flips the claim to error and posts a warning,
+# instead of recording a permanent "done" with an empty report_path.
+def test_execute_success_with_no_report_raises(tmp_path):
+    os.makedirs(tmp_path / "pb-www")
+
+    def fake_run(cmd, **kw):
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    with pytest.raises(RunnerError, match="no tribunal report"):
+        execute(_approved().item, _cfg(tmp_path), run_subprocess=fake_run)
+
+
 def test_find_report_picks_newest(tmp_path):
     magi = tmp_path / ".magi"
     magi.mkdir()
@@ -137,6 +151,93 @@ def test_run_once_nonrunner_exception_still_fails_and_posts(tmp_path):
                     lock_path=str(tmp_path / "runner.lock")) == 1
     assert saves[-1][0].item.status == "error"
     assert any(p.startswith("⚠️") for p in posts)
+
+
+def test_run_once_no_report_flips_item_to_error(tmp_path):
+    """I2: a real execute() (via fake subprocess, rc 0, no report file written)
+    must surface as an error claim, not a silent 'done' with no report."""
+    os.makedirs(tmp_path / "pb-www")
+
+    def fake_run(cmd, **kw):
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    posts, saves = [], []
+    deps = {"load": lambda: [_approved()],
+            "save": lambda recs: saves.append(recs),
+            "post": lambda hook, content: posts.append(content),
+            "now": lambda: NOW,
+            "execute": lambda item, cfg: execute(item, cfg, run_subprocess=fake_run)}
+    assert run_once(_cfg(tmp_path), deps,
+                    lock_path=str(tmp_path / "runner.lock")) == 1
+    assert saves[-1][0].item.status == "error"
+    assert "no tribunal report" in saves[-1][0].item.error_summary
+    assert any(p.startswith("⚠️") for p in posts)
+
+
+def test_run_once_preserves_concurrent_intake_approval(tmp_path):
+    """C1: run_once must not clobber a concurrent intake approval that lands
+    while #1 is mid-execute. deps["load"] is a stateful fake: the FIRST call
+    (at the top of run_once) returns the pre-execute snapshot (#1 approved,
+    #2 not yet approved); the SECOND call (post-execute re-load, simulating
+    intake having run and saved during the 30-min execute window) returns #2
+    now approved too. After run_once, #1 must be done AND #2 must still show
+    approved — the post-execute save must not stomp #2's approval by writing
+    back the stale pre-execute snapshot."""
+    def _with_status(rec, status):
+        return dataclasses.replace(rec, item=dataclasses.replace(rec.item, status=status))
+
+    # Pre-execute snapshot: #1 approved (the runner's target), #2 not yet
+    # approved. Post-execute (fresh) snapshot: intake ran mid-execute and
+    # flipped #2 to approved — the change a stale-snapshot save would lose.
+    pre = [_approved(1), _with_status(_approved(2), "proposed")]
+    post_execute = [_approved(1), _with_status(_approved(2), "approved")]
+    calls = {"n": 0}
+
+    def fake_load():
+        calls["n"] += 1
+        return pre if calls["n"] == 1 else post_execute
+
+    saves = []
+    posts = []
+    deps = {"load": fake_load,
+            "save": lambda recs: saves.append(recs),
+            "post": lambda hook, content: posts.append(content),
+            "now": lambda: NOW,
+            "execute": lambda item, cfg: ("s1", "/r.md")}
+    assert run_once(_cfg(tmp_path), deps,
+                    lock_path=str(tmp_path / "runner.lock")) == 0
+
+    final = saves[-1]
+    by_num = {r.number: r for r in final}
+    assert by_num[1].item.status == "done"
+    assert by_num[2].item.status == "approved"
+
+
+def test_run_once_lost_claim_after_fresh_reload_posts_warning(tmp_path):
+    """C1 edge case: if the claimed record vanished from the queue by the time
+    the post-execute fresh reload runs (queue rewritten out from under us),
+    run_once must not crash or silently drop it — it posts a ⚠️ naming the
+    lost record instead of saving a phantom update."""
+    calls = {"n": 0}
+
+    def fake_load():
+        calls["n"] += 1
+        return [_approved(1)] if calls["n"] == 1 else []
+
+    saves = []
+    posts = []
+    deps = {"load": fake_load,
+            "save": lambda recs: saves.append(recs),
+            "post": lambda hook, content: posts.append(content),
+            "now": lambda: NOW,
+            "execute": lambda item, cfg: ("s1", "/r.md")}
+    assert run_once(_cfg(tmp_path), deps,
+                    lock_path=str(tmp_path / "runner.lock")) == 0
+    assert any("#1" in p and "⚠️" in p for p in posts)
+    # the claim save (pre-execute) happened, but there is no second (phantom)
+    # post-execute save once the fresh reload can't find #1 anymore
+    assert len(saves) == 1
+    assert saves[0][0].number == 1 and saves[0][0].item.status == "running"
 
 
 def test_run_once_nothing_approved_is_quiet(tmp_path):

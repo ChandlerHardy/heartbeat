@@ -188,8 +188,37 @@ def execute(item: WorkItem, cfg,
     if proc.returncode != 0:
         tail = "\n".join((proc.stderr or proc.stdout or "").splitlines()[-15:])
         raise RunnerError(f"magi-review !{iid} exited {proc.returncode}: {tail}")
-    report = find_report(checkout, iid) or ""
+    report = find_report(checkout, iid)
+    if report is None:
+        raise RunnerError(f"magi-review !{iid} produced no tribunal report")
     return item.sha, report
+
+
+def _apply_to_fresh(deps, cfg, number: int,
+                    apply_fn: Callable[[List[QueueRecord]], List[QueueRecord]]
+                    ) -> Optional[List[QueueRecord]]:
+    """Re-load the queue fresh and apply `apply_fn` (complete/fail) to `number`
+    in that fresh state, then save it.
+
+    execute() can run for up to 30 minutes; the in-memory `records` captured
+    before execute() started is a stale snapshot by the time it returns, and
+    saving it back would clobber any concurrent write (e.g. intake approving
+    a different item) that landed mid-run. Re-loading right before the
+    post-execute save closes that window.
+
+    If `number` no longer exists in the fresh load (the queue was rewritten
+    out from under us), nothing is saved for it and a ⚠️ names the lost
+    record; returns None so the caller can skip any follow-up post that would
+    otherwise claim a result was recorded.
+    """
+    fresh = deps["load"]()
+    if not any(r.number == number for r in fresh):
+        _post(deps, cfg, f"⚠️ Worksweep runner: #{number} vanished from the "
+                         f"queue before its result could be recorded")
+        return None
+    updated = apply_fn(fresh)
+    deps["save"](updated)
+    return updated
 
 
 def run_once(cfg, deps: Dict[str, Callable], lock_path: str = _LOCK_DEFAULT) -> int:
@@ -213,10 +242,12 @@ def run_once(cfg, deps: Dict[str, Callable], lock_path: str = _LOCK_DEFAULT) -> 
         try:
             result_sha, report_path = deps["execute"](target.item, cfg)
         except RunnerError as e:
-            records = fail(records, target.number, str(e), deps["now"]())
-            deps["save"](records)
-            _post(deps, cfg, f"⚠️ Worksweep runner: #{target.number} "
-                             f"magi-review failed — {e}")
+            if _apply_to_fresh(
+                    deps, cfg, target.number,
+                    lambda fresh: fail(fresh, target.number, str(e), deps["now"]())
+            ) is not None:
+                _post(deps, cfg, f"⚠️ Worksweep runner: #{target.number} "
+                                 f"magi-review failed — {e}")
             return 1
         except Exception as e:
             # Non-RunnerError failures (e.g. FileNotFoundError when `claude`/git
@@ -224,21 +255,25 @@ def run_once(cfg, deps: Dict[str, Callable], lock_path: str = _LOCK_DEFAULT) -> 
             # to error and post — otherwise the item is stuck `running` silently
             # until the 45-min reap, with no signal anything went wrong.
             summary = f"{type(e).__name__}: {e}"
-            records = fail(records, target.number, summary, deps["now"]())
-            deps["save"](records)
-            _post(deps, cfg, f"⚠️ Worksweep runner: #{target.number} "
-                             f"magi-review failed — {summary}")
+            if _apply_to_fresh(
+                    deps, cfg, target.number,
+                    lambda fresh: fail(fresh, target.number, summary, deps["now"]())
+            ) is not None:
+                _post(deps, cfg, f"⚠️ Worksweep runner: #{target.number} "
+                                 f"magi-review failed — {summary}")
             return 1
-        records = complete(records, target.number, result_sha, report_path,
-                           deps["now"]())
-        deps["save"](records)
-        verdict = extract_verdict(report_path) if report_path else ""
-        msg = (f"🧙 magi-review done — #{target.number} {target.item.repo} "
-               f"<{target.item.web_url}>\n"
-               + (f"```\n{verdict}\n```\n" if verdict else "")
-               + (f"report: `{report_path}`" if report_path
-                  else "(no report file found)"))
-        _post(deps, cfg, msg)
+        updated = _apply_to_fresh(
+            deps, cfg, target.number,
+            lambda fresh: complete(fresh, target.number, result_sha, report_path,
+                                   deps["now"]()))
+        if updated is not None:
+            verdict = extract_verdict(report_path) if report_path else ""
+            msg = (f"🧙 magi-review done — #{target.number} {target.item.repo} "
+                   f"<{target.item.web_url}>\n"
+                   + (f"```\n{verdict}\n```\n" if verdict else "")
+                   + (f"report: `{report_path}`" if report_path
+                      else "(no report file found)"))
+            _post(deps, cfg, msg)
         return 0
     finally:
         release_lock(lock_path)
