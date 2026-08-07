@@ -23,6 +23,9 @@ class MergeRequest:
     reviewers: tuple  # tuple[str, ...]
     ci_status: str     # "success" | "failed" | "running" | "unknown"
     updated_at: str    # ISO8601
+    my_review_state: str = ""       # GitLab reviewState enum for cfg.username, "" = unknown
+    changes_requested: bool = False # any reviewer state REQUESTED_CHANGES on my MR
+    unresolved_count: int = 0       # resolvable - resolved discussions on my MR
 
     @property
     def dev_url_present(self) -> bool:
@@ -55,7 +58,12 @@ class WorkItem:
     why: str
     web_url: str
     sha: str
-    status: str = "proposed"  # "proposed" | "approved" | "running" | "done"
+    status: str = "proposed"  # "proposed" | "approved" | "running" | "done" | "error"
+    claimed_at: str = ""      # ISO8601 — set when the runner claims (status=running)
+    done_reason: str = ""     # "executor-completed" | "already-reviewed" | "mr-merged" | "bootstrap-glob"
+    result_sha: str = ""      # head SHA the executor actually reviewed
+    report_path: str = ""     # tribunal report path written by the executor
+    error_summary: str = ""   # short failure text (status=error)
 
 
 @dataclass(frozen=True)
