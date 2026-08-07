@@ -33,6 +33,29 @@ def test_main_returns_1_on_discord_post_failure(monkeypatch, tmp_path):
     assert main(["--discord"]) == 1
 
 
+# --discord with no configured webhook must hard-fail before run_sweep, not
+# silently degrade to stdout printing (never-silent contract: a cron caller
+# checking the exit code must see the failure).
+def test_main_discord_without_webhook_hard_fails(monkeypatch, tmp_path, capsys):
+    cfg = WorksweepConfig(repos=(), username="me", discord_webhook="")
+    monkeypatch.setattr(wsmain, "load_config", lambda *a, **k: cfg)
+    monkeypatch.setattr(wsmain, "_queue_path",
+                        lambda: os.path.join(str(tmp_path), "queue.json"))
+
+    posted = []
+    monkeypatch.setattr(wsmain, "_post_discord", lambda wh, content: posted.append(content))
+    # graphql/todos must never even be consulted -- the guard trips first.
+    monkeypatch.setattr(wsmain.collectors, "run_graphql_sweep",
+                        lambda: (_ for _ in ()).throw(AssertionError("should not run")))
+    monkeypatch.setattr(wsmain.collectors, "collect_todos",
+                        lambda: (_ for _ in ()).throw(AssertionError("should not run")))
+
+    assert main(["--discord"]) == 1
+    assert posted == []
+    err = capsys.readouterr().err
+    assert "no discord_webhook configured" in err
+
+
 # Long digest is delivered across multiple Discord messages, none over the cap
 def test_main_discord_posts_multiple_messages_for_long_digest(monkeypatch, tmp_path):
     cfg = WorksweepConfig(repos=("pb-www",), username="chandler.hardy",

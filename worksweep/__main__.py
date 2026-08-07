@@ -244,6 +244,10 @@ def main(argv=None) -> int:
     if args.command == "intake":
         return _run_intake(cfg)
 
+    if args.discord and not args.dry_run and not cfg.discord_webhook:
+        print("worksweep: no discord_webhook configured", file=sys.stderr)
+        return 1
+
     deps = {
         "graphql": collectors.run_graphql_sweep,
         "todos": collectors.collect_todos,
