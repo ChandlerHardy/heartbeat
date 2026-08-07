@@ -55,4 +55,26 @@ class WorkItem:
     why: str
     web_url: str
     sha: str
-    status: str = "proposed"
+    status: str = "proposed"  # "proposed" | "approved" | "running" | "done"
+
+
+@dataclass(frozen=True)
+class QueueRecord:
+    """A WorkItem with its stable digest number + sweep-tracking timestamps.
+
+    `number` is the approval handle the formatter renders and the user replies
+    to (`✅ 3`). It is assigned once at first sight and preserved across sweeps
+    by the queue (see queue.reconcile) so the contract holds.
+    """
+    number: int
+    item: WorkItem
+    first_seen: str  # ISO8601 — when this id first entered the queue
+    last_seen: str   # ISO8601 — last sweep that still saw this id
+
+
+@dataclass(frozen=True)
+class DiscordMessage:
+    id: str          # snowflake (used as the `after` cursor)
+    author_id: str
+    content: str
+    timestamp: str   # ISO8601

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import List
 
-from .models import WorkItem
+from .models import QueueRecord, WorkItem
 
 DISCORD_MAX_CHARS = 1900
 
@@ -41,16 +41,21 @@ def _item_line(n: int, it: WorkItem) -> str:
     return f"{' '.join(parts)} — {it.why}"
 
 
-def format_messages(items: List[WorkItem],
-                    max_bytes: int = DISCORD_MAX_CHARS) -> List[str]:
-    """Split the digest into messages each <= max_bytes (byte-safe)."""
-    if not items:
+def _numbered(items: List[WorkItem]) -> List[tuple]:
+    """Pair items with sequential numbers (M1 path, no queue)."""
+    return list(enumerate(items, 1))
+
+
+def _format_messages_numbered(numbered: List[tuple],
+                              max_bytes: int = DISCORD_MAX_CHARS) -> List[str]:
+    """Split a list of (number, WorkItem) pairs into capped messages."""
+    if not numbered:
         return [_ALL_CLEAR]
-    head = f"{_HEADER} — {len(items)} item(s) need you:"
+    head = f"{_HEADER} — {len(numbered)} item(s) need you:"
     cont = f"{_HEADER} *(cont.)*"
     msgs: List[str] = []
     cur = head
-    for n, it in enumerate(items, 1):
+    for n, it in numbered:
         # Reserve headroom so even an oversized single line fits under a
         # continuation header without breaching the cap.
         line = _truncate_bytes(_item_line(n, it), max_bytes - 80)
@@ -69,11 +74,44 @@ def format_messages(items: List[WorkItem],
     return msgs
 
 
-def format_digest(items: List[WorkItem]) -> str:
-    """The whole digest as a single string (uncapped) — for stdout/dry-run."""
-    if not items:
+def _format_digest_numbered(numbered: List[tuple]) -> str:
+    if not numbered:
         return _ALL_CLEAR
-    lines = [f"{_HEADER} — {len(items)} item(s) need you:"]
-    lines += [_item_line(n, it) for n, it in enumerate(items, 1)]
+    lines = [f"{_HEADER} — {len(numbered)} item(s) need you:"]
+    lines += [_item_line(n, it) for n, it in numbered]
     lines.append(f"\n{_FOOTER}")
     return "\n".join(lines)
+
+
+def format_messages(items: List[WorkItem],
+                    max_bytes: int = DISCORD_MAX_CHARS) -> List[str]:
+    """Split the digest into messages each <= max_bytes (byte-safe)."""
+    return _format_messages_numbered(_numbered(items), max_bytes)
+
+
+def format_digest(items: List[WorkItem]) -> str:
+    """The whole digest as a single string (uncapped) — for stdout/dry-run."""
+    return _format_digest_numbered(_numbered(items))
+
+
+def _records_numbered(records: List[QueueRecord]) -> List[tuple]:
+    """Pair each record's WorkItem with its PERSISTED number, in number order.
+
+    This is the numbering contract: the digest number a user sees (and replies
+    to) is the queue's `number`, not a render-time enumerate — so `✅ 3` maps to
+    the same WorkItem the queue knows as #3 even across sweeps where lower
+    numbers dropped.
+    """
+    ordered = sorted(records, key=lambda r: r.number)
+    return [(r.number, r.item) for r in ordered]
+
+
+def format_messages_from_records(records: List[QueueRecord],
+                                 max_bytes: int = DISCORD_MAX_CHARS) -> List[str]:
+    """Capped messages rendered from queue records in persisted-number order."""
+    return _format_messages_numbered(_records_numbered(records), max_bytes)
+
+
+def format_digest_from_records(records: List[QueueRecord]) -> str:
+    """Single-string digest rendered from queue records in number order."""
+    return _format_digest_numbered(_records_numbered(records))

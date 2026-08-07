@@ -1,12 +1,16 @@
 ---
 name: heartbeat
-description: "Run heartbeat commands locally. Discovery, implementation, interviews, and status checks. All interactive work runs in the current session — OCI is only for the nightly cron bot. Use for: heartbeat, run heartbeat, discover, heartbeat status, heartbeat interview, implement proposal."
+description: "Use when the user says heartbeat or /heartbeat with any subcommand (status, discover, interview, implement, build, merge, burn, cleanup, history, brainstorm, projects, add-project, dashboard, config), or asks to scan a portfolio project for improvements, implement a proposal/issue, or merge approved heartbeat PRs."
 user-invocable: true
 ---
 
 # Heartbeat — Fully Local
 
 All interactive heartbeat work runs in the current session using local tools and subagents. OCI is only for the unattended nightly cron and Discord bot — never SSH to OCI from interactive commands.
+
+> **Current status (2026-07):** the nightly `heartbeat.sh` cron and `heartbeat-bot.service` on OCI
+> are **disabled** — only the weekly GitHub digest (`heartbeat-weekly.sh`, Sun 14:05 UTC) runs.
+> Re-enable steps are in MEMORY.md § Scheduled Tasks. Interactive commands below are unaffected.
 
 ## Dashboard
 
@@ -61,11 +65,9 @@ After discovery, create issues with `heartbeat` + category labels and add to the
 Show open PRs and issues across all heartbeat-tracked projects. Run locally via `gh`.
 
 ```bash
-# Filter PRs by `heartbeat/` branch prefix — heartbeat's pr create doesn't
-# apply a label, and `--search "heartbeat"` would match any PR body/comment
-# mentioning the word. Branch prefix is the canonical marker. Issues DO get
-# the heartbeat label (applied by heartbeat.sh::create_issue_if_new), so
-# --label is correct for the issue half.
+# Heartbeat PRs carry no label — filter by the canonical heartbeat/ branch
+# prefix (--search "heartbeat" would match any PR mentioning the word).
+# Issues DO get the heartbeat label (heartbeat.sh::create_issue_if_new).
 for repo in ChandlerHardy/crooked-finger ChandlerHardy/gnomestead-web ChandlerHardy/gnomestead ChandlerHardy/heartbeat ChandlerHardy/elucidate-chess ChandlerHardy/greenline ChandlerHardy/snapcal; do
   name=$(echo $repo | cut -d/ -f2)
   prs=$(gh pr list --repo $repo --state open --json number,title,headRefName,reviewDecision \
@@ -132,10 +134,8 @@ Default to `general-purpose` for quick-wins and tech-debt. Use `implementer` for
 Merge all approved heartbeat PRs.
 
 ```bash
-# Same branch-prefix filter as `status` — don't use `--search "heartbeat"`
-# because it matches any PR body/comment mentioning the word. Only APPROVED
-# PRs are merged (reviewDecision is the aggregate; some PRs may have review
-# events that are COMMENT or CHANGES_REQUESTED from seneschal rounds).
+# Same branch-prefix filter as `status`. Only APPROVED PRs are merged
+# (reviewDecision is the aggregate across seneschal review rounds).
 for repo in ChandlerHardy/crooked-finger ChandlerHardy/gnomestead-web ChandlerHardy/gnomestead ChandlerHardy/elucidate-chess ChandlerHardy/greenline ChandlerHardy/snapcal; do
   gh pr list --repo $repo --state open --json number,headRefName,reviewDecision \
     --jq '.[] | select((.headRefName | startswith("heartbeat/")) and .reviewDecision == "APPROVED") | .number' \
@@ -143,6 +143,14 @@ for repo in ChandlerHardy/crooked-finger ChandlerHardy/gnomestead-web ChandlerHa
       gh pr merge $pr --repo $repo --merge --delete-branch
     done
 done
+```
+
+### `cleanup [project]`
+Delete remote `heartbeat/*` branches whose PRs are merged or closed (no-PR branches are skipped; projects from `~/etc/heartbeat.json`). Dry-run first and show the output, then run for real:
+
+```bash
+~/repos/heartbeat/bin/heartbeat-cleanup.sh --dry-run [--project <name>]
+~/repos/heartbeat/bin/heartbeat-cleanup.sh [--project <name>]
 ```
 
 ### `build <project> <proposal>`
@@ -166,7 +174,7 @@ done
 ```
 
 ### `add-project <name> <github-repo>`
-Add a new project to the heartbeat system. Three steps:
+Add a new project to the heartbeat system. Four steps:
 
 **Step 1: Add to the project name mapping table** in this skill file.
 
@@ -176,16 +184,16 @@ ssh oci "cd /mnt/block_volume/repos && git clone git@github.com:<github-repo>.gi
 ssh oci "jq '.projects += [{\"name\": \"<name>\", \"path\": \"/mnt/block_volume/repos/<local-dir-name>\", \"stale_days\": 14}]' ~/etc/heartbeat.json > /tmp/hb.json && mv /tmp/hb.json ~/etc/heartbeat.json"
 ```
 
-**Step 3: Add to REPO_NAME_MAP in code-reviewer/app.py** (if GitHub name != OCI dir name):
+**Step 3: Add to REPO_NAME_MAP in `~/repos/seneschal/app.py`** (only if GitHub name != OCI dir name; Seneschal lives in its own repo):
 ```python
 REPO_NAME_MAP = {
     "gnomestead": "gnomestead-ios",
     "<github-name>": "<local-dir-name>",
 }
 ```
-Then redeploy the Seneschal webhook handler:
+Then redeploy the Seneschal webhook handler from ITS repo:
 ```bash
-./install.sh oci    # ships the updated app.py to ~/seneschal/ and restarts seneschal.service
+cd ~/repos/seneschal && ./install.sh oci    # ships app.py to OCI and restarts seneschal.service
 ```
 
 **Step 4: Create product context**
@@ -197,7 +205,7 @@ Commit skill changes and push.
 Autonomous discover → implement → merge loop in the current session.
 
 Loop until session usage hits `--until` (default 80%):
-1. Check usage via claude-in-chrome (`claude.ai/settings/usage` tab must be open)
+1. Check usage via claude-in-chrome (`claude.ai/settings/usage` tab must be open). If the tab isn't open or claude-in-chrome is unavailable, ask the user to open it; if they decline, run exactly 2 rounds and stop.
 2. Run discovery locally via Explore subagent
 3. Create issues from findings (GitHub projects only)
 4. Merge any approved PRs
@@ -218,7 +226,7 @@ Show a summary of recent heartbeat runs from the structured log on OCI (this is 
 HISTORY=$(ssh oci "cat ~/heartbeat-reports/history.jsonl 2>/dev/null")
 ```
 
-Then summarize locally. Default: last 7 entries. If `--last N` specified, use N.
+Summarize locally; default last 7 entries (`--last N` overrides).
 
 **If a project is specified**, filter to only that project's entries:
 ```bash
@@ -238,18 +246,18 @@ If there are errors, list the most recent ones.
 ```
 
 ### `brainstorm [--focus <theme>]`
-Runs `bin/heartbeat-brainstorm.sh` to propose ENTIRELY NEW project ideas that complement the existing portfolio (not features for existing projects). Reads each tracked project's `docs/product-context.md` and calls `claude -p` with a system prompt that explicitly bans saturated categories (dev tools "because dev tools are hot", generic SaaS clones) and requires concrete pitches with failure modes.
+Proposes ENTIRELY NEW project ideas complementing the portfolio (not features for existing projects). Reads each tracked project's `docs/product-context.md` and calls `claude -p`; bans saturated categories, requires concrete pitches with failure modes. Requires `~/etc/heartbeat.json`.
 
 ```bash
-bin/heartbeat-brainstorm.sh                     # all projects, archive
-bin/heartbeat-brainstorm.sh --focus="consumer"  # steer the brainstorm
-bin/heartbeat-brainstorm.sh --discord           # post preview to Discord
+~/repos/heartbeat/bin/heartbeat-brainstorm.sh                     # all projects, archive
+~/repos/heartbeat/bin/heartbeat-brainstorm.sh --focus="consumer"  # steer the brainstorm
+~/repos/heartbeat/bin/heartbeat-brainstorm.sh --discord           # post preview to Discord
 ```
 
-Output: `~/heartbeat-reports/brainstorm-YYYY-MM-DD.md`. Intended to run weekly as part of the Sunday cron.
+Output: `~/heartbeat-reports/brainstorm-YYYY-MM-DD.md`. Not wired into any cron — run on demand.
 
 ### Default (no args or "help")
-Print the command menu **as a fresh response — verbatim, in your own message, even when this skill file is already inlined in the user's prompt context.** The user invoked `help` to get a clean menu; they cannot easily extract one from a multi-hundred-line file dump. "It's already on screen" is not a substitute for printing it. After the menu, run `status`.
+Print the menu below verbatim as a fresh response — never answer "it's already on screen" or point at the inlined skill file. Then run `status`.
 
 ```
 Heartbeat Commands:
@@ -271,16 +279,17 @@ Heartbeat Commands:
 ```
 
 ### `dashboard`
-Launch the local heartbeat-dashboard web UI on http://127.0.0.1:8765. Binary at `~/bin/heartbeat-dashboard`, builds from `tools/heartbeat-dashboard/`. Read-only; shows projects config, run history from `~/heartbeat-reports/history.jsonl`, and live issue/PR counts via `gh`.
+Run `~/bin/heartbeat-dashboard` in the background; UI at http://127.0.0.1:8765. Read-only; shows projects config, run history from `~/heartbeat-reports/history.jsonl`, and live issue/PR counts via `gh`. If the binary is missing, build it: `cd ~/repos/heartbeat/tools/heartbeat-dashboard && go build -o ~/bin/heartbeat-dashboard ./cmd/heartbeat-dashboard`.
 
 ### `config <list|add|remove|show>`
-Edit `heartbeat.json` via `bin/heartbeat-config.sh`:
+Edit the LOCAL `~/etc/heartbeat.json` (used by cleanup/brainstorm/dashboard). The OCI nightly cron has its own copy — update that via add-project Step 2, not here.
 
 ```bash
-heartbeat-config list                               # tabular project list
-heartbeat-config add gnomestead /path/to/dir 14     # add project
-heartbeat-config remove old-project                 # remove project
-heartbeat-config show                               # raw JSON
+CFG=~/repos/heartbeat/bin/heartbeat-config.sh
+$CFG list                               # tabular project list
+$CFG add gnomestead /path/to/dir 14     # add project
+$CFG remove old-project                 # remove project
+$CFG show                               # raw JSON
 ```
 
 Then show status output.
@@ -299,4 +308,8 @@ Then show status output.
 - "merge" or "merge all" → `merge`
 - "projects" or "list" → `projects`
 - "add" or "add-project" → `add-project`
+- "brainstorm" (+ optional --focus) → `brainstorm`
+- "dashboard" → `dashboard`
+- "config" + subcommand → `config`
+- "help" → default menu
 - Project name alone → `discover <project>`

@@ -47,3 +47,26 @@ def test_load_config_malformed_json_raises_with_path():
         with pytest.raises(RuntimeError) as exc:
             load_config(p)
         assert p in str(exc.value)
+
+
+# M2 — the discord block populates bot_token / channel_id / discord_user_id
+def test_load_config_reads_discord_block():
+    with tempfile.TemporaryDirectory() as tmp:
+        p = _write(tmp, {
+            "gitlab": {"username": "chandler.hardy", "repos": ["pb-www"]},
+            "discord": {"bot_token": "BOT", "channel_id": "123", "user_id": "456"},
+        })
+        cfg = load_config(p)
+        assert cfg.bot_token == "BOT"
+        assert cfg.channel_id == "123"
+        assert cfg.discord_user_id == "456"
+
+
+# M2 — missing discord block leaves all three fields empty (graceful)
+def test_load_config_missing_discord_block_yields_empty_strings():
+    with tempfile.TemporaryDirectory() as tmp:
+        p = _write(tmp, {"gitlab": {"username": "x", "repos": []}})
+        cfg = load_config(p)
+        assert cfg.bot_token == ""
+        assert cfg.channel_id == ""
+        assert cfg.discord_user_id == ""
