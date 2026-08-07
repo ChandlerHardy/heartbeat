@@ -127,3 +127,102 @@ def collect_issues(repo: str, username: str) -> List[Issue]:
     raw = _run_glab(["api",
         f"projects/{_project(repo)}/issues?state=opened&assignee_username={user}&per_page=100"])
     return parse_issues(raw, repo)
+
+
+# --- GraphQL sweep (M3): one query mirroring the "Your work / MRs" dashboard ---
+
+_GRAPHQL_SWEEP_QUERY = """
+query {
+  currentUser {
+    username
+    reviewRequestedMergeRequests(state: opened, first: 100) {
+      nodes {
+        iid title draft webUrl diffHeadSha updatedAt
+        project { fullPath }
+        author { username }
+        reviewers { nodes { username mergeRequestInteraction { reviewState } } }
+        headPipeline { status }
+      }
+    }
+    authoredMergeRequests(state: opened, first: 100) {
+      nodes {
+        iid title draft webUrl diffHeadSha updatedAt description
+        project { fullPath }
+        author { username }
+        reviewers { nodes { username mergeRequestInteraction { reviewState } } }
+        headPipeline { status }
+        resolvableDiscussionsCount resolvedDiscussionsCount
+      }
+    }
+  }
+}
+"""
+
+
+def run_graphql_sweep() -> str:
+    """Shell edge: run the dashboard-equivalent GraphQL query via glab."""
+    return _run_glab(["api", "graphql", "-f", f"query={_GRAPHQL_SWEEP_QUERY}"])
+
+
+def _gql_mr(node: dict, username: str) -> "MergeRequest":
+    """Map one GraphQL MR node -> MergeRequest. Raises on missing must-haves."""
+    full_path = ((node.get("project") or {}).get("fullPath") or "")
+    repo = full_path.split("/", 1)[1] if "/" in full_path else full_path
+    my_state = ""
+    reviewers = []
+    for rv in ((node.get("reviewers") or {}).get("nodes") or []):
+        uname = (rv or {}).get("username", "")
+        reviewers.append(uname)
+        if uname == username:
+            my_state = (((rv or {}).get("mergeRequestInteraction") or {})
+                        .get("reviewState") or "").upper()
+    changes_requested = any(
+        (((rv or {}).get("mergeRequestInteraction") or {}).get("reviewState") or "")
+        .upper() == "REQUESTED_CHANGES"
+        for rv in ((node.get("reviewers") or {}).get("nodes") or []))
+    resolvable = int(node.get("resolvableDiscussionsCount") or 0)
+    resolved = int(node.get("resolvedDiscussionsCount") or 0)
+    pipe = (node.get("headPipeline") or {}).get("status") or "unknown"
+    return MergeRequest(
+        repo=repo,
+        iid=int(node.get("iid", 0)),
+        title=node.get("title", ""),
+        author=((node.get("author") or {}).get("username") or ""),
+        web_url=node.get("webUrl", ""),
+        description=node.get("description") or "",
+        sha=node.get("diffHeadSha") or "",
+        is_draft=bool(node.get("draft", False)),
+        reviewers=tuple(reviewers),
+        ci_status=str(pipe).lower(),
+        updated_at=node.get("updatedAt", ""),
+        my_review_state=my_state,
+        changes_requested=changes_requested,
+        unresolved_count=max(0, resolvable - resolved),
+    )
+
+
+def parse_graphql_sweep(raw: str, username: str, repos: tuple):
+    """Pure: raw GraphQL JSON -> (review_requested, authored) MergeRequest lists,
+    filtered to the configured performancelivestock repos. Malformed -> ([], [])."""
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        print(f"worksweep: graphql decode failed: {e}", file=sys.stderr)
+        return [], []
+    data = data.get("data", data) or {}
+    cu = data.get("currentUser") or {}
+
+    def _bucket(key: str):
+        out = []
+        for node in ((cu.get(key) or {}).get("nodes") or []):
+            try:
+                mr = _gql_mr(node or {}, username)
+            except (ValueError, TypeError, AttributeError) as e:
+                print(f"worksweep: graphql skipping bad node: {e}", file=sys.stderr)
+                continue
+            if mr.repo in repos:
+                out.append(mr)
+        return out
+
+    return (_bucket("reviewRequestedMergeRequests"),
+            _bucket("authoredMergeRequests"))
