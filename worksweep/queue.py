@@ -20,10 +20,23 @@ from typing import List
 
 from .models import QueueRecord, WorkItem
 
-# Statuses whose records survive vanishing from a sweep: an approved/running
-# item is mid-flight toward an executor (M3) and must not disappear before it is
-# handled. A still-`proposed` item that's gone upstream is dropped.
-_RETAIN_IF_GONE = ("approved", "running")
+_TERMINAL = ("done", "error")
+_RETAIN_IF_GONE = ("approved", "running", "done", "error")
+_COMPACT_AFTER_DAYS = 90
+
+
+def _older_than_days(iso_ts: str, iso_now: str, days: int) -> bool:
+    """True when iso_ts is more than `days` before iso_now. Unparseable -> False
+    (never destroy a record on bad data)."""
+    import datetime
+    try:
+        ts = datetime.datetime.fromisoformat(iso_ts)
+        now = datetime.datetime.fromisoformat(iso_now)
+    except (ValueError, TypeError):
+        return False
+    if (ts.tzinfo is None) != (now.tzinfo is None):   # naive/aware mix -> keep
+        return False
+    return (now - ts) > datetime.timedelta(days=days)
 
 
 def load_queue(path: str) -> List[QueueRecord]:
@@ -79,29 +92,16 @@ def save_queue(path: str, records: List[QueueRecord]) -> None:
 
 
 def reconcile(existing: List[QueueRecord], fresh: List[WorkItem],
-              now: str) -> List[QueueRecord]:
-    """Fold a fresh sweep into the queue, preserving stable numbers + status.
-
-    Rules (see plan Task 2):
-    - New id -> next number (max existing + 1), status from the item, first/last
-      seen = now.
-    - Same id + same sha -> keep number, keep status (approved stays approved),
-      keep first_seen, bump last_seen = now.
-    - Same id + different sha -> keep number, update sha, reset status to
-      proposed (the prior approval was for the old SHA), bump last_seen = now.
-    - Queued id absent from the sweep -> drop, UNLESS its status is approved or
-      running (retained mid-flight, last_seen unchanged).
-
-    `now` is injected so callers/tests are deterministic.
-    """
+              now: str, resolved: dict | None = None) -> List[QueueRecord]:
+    """Fold a sweep into the queue. M2 rules plus the M3 lifecycle:
+    resolutions -> done; error+present -> retry; done+new-sha -> resurrect;
+    terminal retained until 90-day compaction."""
+    resolved = resolved or {}
     by_id = {r.item.id: r for r in existing}
     fresh_ids = {it.id for it in fresh}
     next_num = max((r.number for r in existing), default=0) + 1
 
     out: List[QueueRecord] = []
-    # Retained-but-gone records first would scramble order; instead walk fresh in
-    # order, then append surviving-gone records, then sort by number so the queue
-    # is always rendered in stable number order.
     for it in fresh:
         prior = by_id.get(it.id)
         if prior is None:
@@ -109,23 +109,38 @@ def reconcile(existing: List[QueueRecord], fresh: List[WorkItem],
                                    first_seen=now, last_seen=now))
             next_num += 1
             continue
-        if prior.item.sha == it.sha:
-            # Same proposal: keep number + status + first_seen, refresh the item
-            # (its non-status metadata may have changed) but force-keep status.
-            merged = dataclasses.replace(it, status=prior.item.status)
-            out.append(QueueRecord(number=prior.number, item=merged,
-                                   first_seen=prior.first_seen, last_seen=now))
-        else:
-            # New commits on the same MR: the old approval no longer applies.
+        ps = prior.item.status
+        if ps == "error":
             merged = dataclasses.replace(it, status="proposed")
-            out.append(QueueRecord(number=prior.number, item=merged,
-                                   first_seen=prior.first_seen, last_seen=now))
+        elif ps == "done":
+            if prior.item.sha == it.sha:
+                out.append(QueueRecord(number=prior.number, item=prior.item,
+                                       first_seen=prior.first_seen, last_seen=now))
+                continue
+            merged = dataclasses.replace(it, status="proposed")
+        elif prior.item.sha == it.sha:
+            merged = dataclasses.replace(it, status=ps,
+                                         claimed_at=prior.item.claimed_at)
+        else:
+            merged = dataclasses.replace(it, status="proposed")
+        out.append(QueueRecord(number=prior.number, item=merged,
+                               first_seen=prior.first_seen, last_seen=now))
 
     for r in existing:
         if r.item.id in fresh_ids:
             continue
+        reason = resolved.get(r.item.id)
+        if reason and r.item.status not in _TERMINAL:
+            out.append(QueueRecord(
+                number=r.number, first_seen=r.first_seen, last_seen=now,
+                item=dataclasses.replace(r.item, status="done",
+                                         done_reason=reason)))
+            continue
         if r.item.status in _RETAIN_IF_GONE:
-            out.append(r)   # retained mid-flight, last_seen untouched
+            out.append(r)
 
+    out = [r for r in out
+           if not (r.item.status in _TERMINAL
+                   and _older_than_days(r.last_seen, now, _COMPACT_AFTER_DAYS))]
     out.sort(key=lambda r: r.number)
     return out
