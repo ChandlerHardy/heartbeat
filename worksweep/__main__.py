@@ -28,11 +28,11 @@ from typing import Callable, Dict, Optional
 # a tampered/typo'd webhook from exfiltrating the digest elsewhere.
 _ALLOWED_WEBHOOK_HOSTS = ("discord.com", "discordapp.com")
 
-from . import assessor, collectors
+from . import assessor, collectors, curator
 from .approvals import apply_approvals
 from .config import WorksweepConfig, load_config
 from .discord_read import fetch_messages
-from .formatter import format_messages_from_records
+from .formatter import _FOOTER, _HEADER, format_messages_from_records
 from .queue import load_queue, reconcile, save_queue
 
 _QUEUE_DEFAULT = os.path.expanduser("~/.worksweep/queue.json")
@@ -227,7 +227,16 @@ def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
         # disagree.
         actionable = [r for r in records if r.item.status not in ("done", "error")]
         if actionable:
-            _post_all(format_messages_from_records(actionable, now=deps["now"]()))
+            curated = None
+            run_llm = deps.get("llm")
+            if cfg.curate and run_llm is not None:
+                curated = curator.curate(actionable, deps["now"](), run_llm)
+            if curated is not None:
+                n, m = curator.partition_counts(actionable)
+                _post_all([f"{_HEADER} (curated) — {n} actionable / {m} held:\n"
+                          f"{curated}\n{_FOOTER}"])
+            else:
+                _post_all(format_messages_from_records(actionable, now=deps["now"]()))
         else:
             _post_all([f"🔍 Worksweep: nothing needs you "
                        f"(checked {len(review_mrs)} review requests, "
@@ -289,6 +298,10 @@ def main(argv=None) -> int:
     }
     if args.dry_run or not args.discord:
         deps["post"] = lambda hook, content: print(content)
+    # --dry-run must never shell out to the curator LLM (it's meant to be a
+    # side-effect-free preview); every other invocation gets the real edge.
+    if not args.dry_run:
+        deps["llm"] = curator.make_run_llm(cfg)
     return run_sweep(cfg, deps)
 
 

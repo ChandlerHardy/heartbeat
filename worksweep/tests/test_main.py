@@ -58,8 +58,12 @@ def test_main_discord_without_webhook_hard_fails(monkeypatch, tmp_path, capsys):
 
 # Long digest is delivered across multiple Discord messages, none over the cap
 def test_main_discord_posts_multiple_messages_for_long_digest(monkeypatch, tmp_path):
+    # curate=False: this test is about the raw formatter's pagination, not
+    # curation -- and disabling it keeps this test from shelling out to a
+    # real `claude` (main() wires a real curator LLM edge for non-dry-run).
     cfg = WorksweepConfig(repos=("pb-www",), username="chandler.hardy",
-                          discord_webhook="https://discord.com/api/webhooks/1/x")
+                          discord_webhook="https://discord.com/api/webhooks/1/x",
+                          curate=False)
     many = [_mr(iid=i, description="no link") for i in range(60)]
     monkeypatch.setattr(wsmain, "load_config", lambda *a, **k: cfg)
     monkeypatch.setattr(wsmain, "_queue_path",
@@ -110,8 +114,12 @@ def test_validate_webhook_rejects_lookalike_host():
 def test_post_persists_queue_and_posted_number_matches_record_number(monkeypatch, tmp_path):
     from worksweep.queue import load_queue
     qp = os.path.join(str(tmp_path), "queue.json")
+    # curate=False: this test is about the raw formatter's number contract,
+    # not curation -- and disabling it keeps this test from shelling out to
+    # a real `claude` (main() wires a real curator LLM edge for non-dry-run).
     cfg = WorksweepConfig(repos=("pb-www",), username="chandler.hardy",
-                          discord_webhook="https://discord.com/api/webhooks/1/x")
+                          discord_webhook="https://discord.com/api/webhooks/1/x",
+                          curate=False)
     monkeypatch.setattr(wsmain, "load_config", lambda *a, **k: cfg)
     monkeypatch.setattr(wsmain, "_queue_path", lambda: qp)
     monkeypatch.setattr(wsmain.assessor, "has_magi_report", lambda repo, iid: False)

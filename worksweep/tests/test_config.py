@@ -84,3 +84,35 @@ def test_load_config_non_integer_timeout_raises_runtime_error():
             load_config(p)
         assert "runner.timeout_seconds" in str(exc.value)
         assert "1800s" in str(exc.value)
+
+
+# M3.5 Task C — curate defaults on, is read from the existing `runner` block
+# (no separate curator_bin -- claude_bin is reused for the curator LLM edge).
+def test_load_config_curate_defaults_true():
+    with tempfile.TemporaryDirectory() as tmp:
+        p = _write(tmp, {"gitlab": {"username": "x", "repos": []}})
+        cfg = load_config(p)
+        assert cfg.curate is True
+        assert cfg.claude_bin == "claude"
+
+
+def test_load_config_reads_curate_false_from_runner_block():
+    with tempfile.TemporaryDirectory() as tmp:
+        p = _write(tmp, {
+            "gitlab": {"username": "x", "repos": []},
+            "runner": {"curate": False, "claude_bin": "/usr/local/bin/claude"},
+        })
+        cfg = load_config(p)
+        assert cfg.curate is False
+        assert cfg.claude_bin == "/usr/local/bin/claude"
+
+
+def test_load_config_non_bool_curate_raises_runtime_error():
+    with tempfile.TemporaryDirectory() as tmp:
+        p = _write(tmp, {
+            "gitlab": {"username": "x", "repos": []},
+            "runner": {"curate": "yes"},
+        })
+        with pytest.raises(RuntimeError) as exc:
+            load_config(p)
+        assert "runner.curate" in str(exc.value)

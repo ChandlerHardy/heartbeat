@@ -22,6 +22,10 @@ class WorksweepConfig:
     checkouts_root: str = ""
     claude_bin: str = "claude"
     runner_timeout: int = 1800
+    # M3.5 Task C: gate for the LLM digest-curation pass. Reuses claude_bin
+    # (no separate curator_bin) -- both are just "claude" runs in a
+    # subprocess, one against a checkout, one against the repo root.
+    curate: bool = True
 
 
 def load_config(path: str | None = None) -> WorksweepConfig:
@@ -42,6 +46,10 @@ def load_config(path: str | None = None) -> WorksweepConfig:
     except (TypeError, ValueError):
         raise RuntimeError(
             f"config runner.timeout_seconds must be an integer, got {timeout_raw!r}")
+    curate_raw = rn.get("curate", True)
+    if not isinstance(curate_raw, bool):
+        raise RuntimeError(
+            f"config runner.curate must be a boolean, got {curate_raw!r}")
     return WorksweepConfig(
         repos=tuple(gl.get("repos") or []),
         username=gl.get("username", ""),
@@ -52,4 +60,5 @@ def load_config(path: str | None = None) -> WorksweepConfig:
         checkouts_root=rn.get("checkouts_root", ""),
         claude_bin=rn.get("claude_bin", "claude"),
         runner_timeout=runner_timeout,
+        curate=curate_raw,
     )
