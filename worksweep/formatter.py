@@ -135,7 +135,7 @@ def _format_digest_numbered(numbered: List[tuple], now: Optional[str] = None) ->
 def format_messages(items: List[WorkItem],
                     max_bytes: int = DISCORD_MAX_CHARS) -> List[str]:
     """Split the digest into messages each <= max_bytes (byte-safe)."""
-    return _format_messages_numbered(_numbered(items), max_bytes)
+    return _format_messages_numbered(_numbered(items), max_bytes=max_bytes)
 
 
 def format_digest(items: List[WorkItem]) -> str:

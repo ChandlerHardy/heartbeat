@@ -174,3 +174,16 @@ def test_age_marker_in_messages_from_records():
     messages = format_messages_from_records([rec], now=now)
     joined = "\n".join(messages)
     assert "⏳6d" in joined
+
+
+def test_format_messages_respects_max_bytes_cap():
+    # Verify that max_bytes parameter actually works (not shadowed by now param)
+    # With max_bytes=200, many items should split into multiple messages
+    items = [_wi(i, why="x" * 50) for i in range(50)]
+    messages = format_messages(items, max_bytes=200)
+    # With such a small cap, we should get multiple messages
+    assert len(messages) > 3, f"Expected > 3 messages with max_bytes=200, got {len(messages)}"
+    # All messages should respect the cap
+    for msg in messages:
+        enc = msg.encode("utf-8")
+        assert len(enc) <= 200, f"Message exceeds max_bytes=200: {len(enc)} bytes"
