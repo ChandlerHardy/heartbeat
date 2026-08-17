@@ -32,7 +32,10 @@ from . import assessor, collectors, curator
 from .approvals import apply_approvals
 from .config import WorksweepConfig, load_config
 from .discord_read import fetch_messages
-from .formatter import _FOOTER, _HEADER, format_messages_from_records
+from .formatter import (
+    DISCORD_MAX_CHARS, _FOOTER, _HEADER, _truncate_bytes,
+    format_messages_from_records,
+)
 from .queue import load_queue, reconcile, save_queue
 
 _QUEUE_DEFAULT = os.path.expanduser("~/.worksweep/queue.json")
@@ -233,8 +236,12 @@ def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
                 curated = curator.curate(actionable, deps["now"](), run_llm)
             if curated is not None:
                 n, m = curator.partition_counts(actionable)
-                _post_all([f"{_HEADER} (curated) — {n} actionable / {m} held:\n"
-                          f"{curated}\n{_FOOTER}"])
+                msg = (f"{_HEADER} (curated) — {n} actionable / {m} held:\n"
+                      f"{curated}\n{_FOOTER}")
+                # curated is validated at <= 1700 bytes, but header/footer add
+                # ~140 more bytes on top -- truncate the assembled message as
+                # a hard backstop so it never breaches the Discord-safe cap.
+                _post_all([_truncate_bytes(msg, DISCORD_MAX_CHARS)])
             else:
                 _post_all(format_messages_from_records(actionable, now=deps["now"]()))
         else:

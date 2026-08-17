@@ -112,19 +112,37 @@ def test_validate_strips_held_count_tally_before_scanning():
     assert validate(out2, _queue()) is True
 
 
-def test_validate_strips_markdown_link_urls_before_scanning():
-    # The URL half of a masked link can carry unrelated digits (e.g. a
-    # namespace/project id); only the visible label should be scanned.
-    out = ("1. pb-www [!4061](https://gitlab.com/group/99999/-/merge_requests/4061) "
-          "— review requested")
+# Critical fix: a link/URL is a hard rejection, not stripped-then-allowed.
+# This is the injection bound -- an untrusted MR/issue title riding into the
+# prompt via `why` can make the LLM emit arbitrary prose, but it must never
+# be able to turn that into a clickable link posted straight to Discord.
+def test_validate_rejects_bare_https_url():
+    out = "1. pb-www !4061 -- review requested, see https://evil.example.com/x"
+    assert validate(out, _queue()) is False
+
+
+def test_validate_rejects_markdown_link():
+    out = "1. pb-www [!4061](https://gitlab.com/x/-/merge_requests/4061) -- review requested"
+    assert validate(out, _queue()) is False
+
+
+def test_validate_accepts_clean_output_with_no_links():
+    out = "1. pb-www !4061 -- review requested\n1 low-priority items held in queue: 43"
     assert validate(out, _queue()) is True
 
 
-def test_validate_allows_numbers_already_present_in_a_records_why_text():
-    # The prompt's line format echoes `why` verbatim; a count that already
-    # exists in our own trusted input (here: "2 unresolved threads") is a
-    # faithful quote, not an invented number, even though 2 isn't a queue
-    # or ref number in this fixture.
+def test_validator_accepts_why_digit_reuse_documented_risk():
+    """Accepted residual risk (see _allowed_numbers docstring): the
+    why-digit whitelist is global across all records, not scoped per-record.
+    The prompt's line format echoes `why` verbatim; a count that already
+    exists in our own trusted input (here: "2 unresolved threads") is
+    accepted as a faithful quote even though 2 isn't a queue/ref number in
+    this fixture. This is deliberately not hardened further -- an invented
+    small-number reference is cosmetic (a ✅ reply against a number nobody
+    holds status on is a no-op in intake), and the one hard invariant
+    (every proposed/approved magi-review number is referenced) is checked
+    independently and unaffected by this widening. This test pins the
+    current, accepted behavior."""
     recs = [_rec(1, _wi(iid=4061, kind="feedback", executor="triage",
                         status="proposed", why="2 unresolved threads"))]
     out = "1. pb-www !4061 -- 2 unresolved threads"
@@ -136,16 +154,6 @@ def test_validate_still_rejects_a_number_absent_from_every_why_text():
                         status="proposed", why="changes requested"))]
     out = "1. pb-www !4061 -- 7 unresolved threads"
     assert validate(out, recs) is False
-
-
-def test_validate_link_url_digits_alone_would_be_rejected():
-    # Sanity check for the stripping test above: an *invented* number hidden
-    # only inside a link URL (not the visible label) is still not allowed
-    # in through the back door -- 9999 in the URL is fine (stripped), but if
-    # it also appeared unstripped anywhere it would fail. This just proves
-    # the URL-digit itself isn't magically added to the allowed set.
-    out = "9999 low-priority items held in queue: 43, 44"
-    assert validate(out, _queue()) is False
 
 
 # --- curate ------------------------------------------------------------

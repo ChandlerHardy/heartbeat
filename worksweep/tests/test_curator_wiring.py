@@ -114,6 +114,29 @@ def test_missing_llm_dep_skips_curation_raw_path_used():
     assert "(curated)" not in texts[0]
 
 
+def test_assembled_curated_message_never_exceeds_discord_cap():
+    """Important fix: curated is validated at <=1700 bytes, but header +
+    "(curated) -- N actionable / M held:" + footer add ~140 more bytes on
+    top -- the assembled message must be truncated to the Discord-safe cap
+    (formatter.DISCORD_MAX_CHARS = 1900) before posting, not just trust the
+    curated budget to leave enough headroom."""
+    from worksweep.formatter import DISCORD_MAX_CHARS
+
+    posts = []
+    # Build a near-1700-byte curated string that still passes validate():
+    # no links/URLs, and the only digit token is the real magi-review ref.
+    padding = "review requested. " * 85  # ~1615 bytes of digit-free filler
+    good = f"1. pb-www !4061 -- {padding}".rstrip()
+    assert len(good.encode("utf-8")) <= 1700  # sanity: curated budget itself is respected
+    deps = _deps(posts, _gql(review_nodes=[_node()]), llm=lambda prompt: good)
+    rc = run_sweep(_cfg(curate=True), deps)
+    assert rc == 0
+    texts = [p for p in posts if isinstance(p, str)]
+    assert len(texts) == 1
+    assert "(curated)" in texts[0]
+    assert len(texts[0].encode("utf-8")) <= DISCORD_MAX_CHARS
+
+
 def test_curated_path_untouched_for_heartbeat_message():
     """When nothing is actionable, the heartbeat message is unaffected by
     curation (curator must not run at all -- no items to curate)."""

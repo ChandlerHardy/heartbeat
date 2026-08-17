@@ -32,7 +32,7 @@ from typing import Callable, List, Optional, Tuple
 
 from .models import QueueRecord
 
-_MAX_OUTPUT_BYTES = 1800
+_MAX_OUTPUT_BYTES = 1700
 _LLM_TIMEOUT_SECONDS = 120
 # Parent of the worksweep/ package -- the heartbeat repo root. Curation has
 # no specific per-repo checkout to run in (unlike runner.execute), so the
@@ -100,7 +100,7 @@ Hard rules:
 - If you mention an item's age, write it as `(Nd)` immediately after that
   item's line, using the age_days column.
 - No greeting, no sign-off, no markdown headers (bold with ** is fine).
-- Keep the entire reply under 1800 bytes UTF-8.
+- Keep the entire reply under 1700 bytes UTF-8.
 
 Queue:
 """
@@ -118,7 +118,12 @@ def build_prompt(records: List[QueueRecord], now: str) -> str:
     return _INSTRUCTIONS + "\n".join(lines)
 
 
-_LINK_RE = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+# Injection bound: an untrusted MR/issue title riding into the prompt (via
+# `why`) can make the LLM emit arbitrary prose, but validate() must ensure it
+# can never turn that into a clickable link -- so any URL or markdown link
+# syntax is a hard rejection, not just neutralized before the number scan.
+_URL_RE = re.compile(r"https?://", re.IGNORECASE)
+_MD_LINK_RE = re.compile(r"\[[^\]]*\]\([^)]*\)")
 _AGE_TOKEN_RE = re.compile(r"\(\d{1,3}d\)")
 # The instructed collapse line's leading count ("N low-priority items held in
 # queue: ...") is a tally, not a queue/ref number, and will routinely NOT
@@ -131,11 +136,11 @@ _NUMBER_RE = re.compile(r"\b\d{1,4}\b")
 def _strip_noise(text: str) -> str:
     """Remove noise sources that legitimately carry digits that are not
     queue/ref numbers, before the validator's number scan runs:
-      - the URL half of a markdown link `[label](url)` -> keeps `label`
       - age markers like `(12d)` -> removed entirely
       - the held-count tally in the collapsed low-priority line
+    (Links are handled separately, by hard rejection in validate() -- not
+    stripped-then-allowed, since a URL is itself the thing being disallowed.)
     """
-    text = _LINK_RE.sub(r"\1", text)
     text = _AGE_TOKEN_RE.sub("", text)
     text = _HELD_COUNT_RE.sub("", text)
     return text
@@ -148,7 +153,24 @@ def _allowed_numbers(records: List[QueueRecord]) -> set:
     invites the LLM to echo `why` verbatim, and a count that already exists
     in our own trusted input is not an invented number, just a faithful
     quote. This is still strict: a number with no origin anywhere in the
-    input records is rejected."""
+    input records is rejected.
+
+    Accepted residual risk: this whitelist is global across all records, not
+    scoped per-record -- a number lifted from one record's `why` text would
+    also be accepted if it showed up attached to a different record's line.
+    Per-record scoping was considered and rejected as not worth the added
+    complexity, because the failure mode it would prevent is cosmetic, not a
+    security or data-integrity issue: a reference to the wrong (but still
+    real) small number just reads oddly -- it doesn't let the LLM invent a
+    number that doesn't exist anywhere in the queue (that's still hard
+    rejected), it can't forge a link (hard rejected separately, see
+    _URL_RE/_MD_LINK_RE), and a `✅ <n>` reply against a number nobody
+    actually holds status on is a no-op in intake (apply_approvals only
+    matches real queue numbers). The one hard invariant this whitelist must
+    never weaken -- every proposed/approved magi-review item's own number is
+    referenced somewhere in the output -- is checked independently below and
+    is unaffected by how loosely other numbers are sourced.
+    `test_validator_accepts_why_digit_reuse_documented_risk` pins this."""
     allowed = {r.number for r in records}
     for r in records:
         ref = _ref_number(r.item.web_url)
@@ -161,9 +183,14 @@ def _allowed_numbers(records: List[QueueRecord]) -> set:
 def validate(output: str, records: List[QueueRecord]) -> bool:
     """Deterministic accept/reject gate for LLM output. Rejects (returns
     False, logging why to stderr) unless:
-      - output is non-empty and <= 1800 bytes UTF-8
+      - output is non-empty and <= 1700 bytes UTF-8
+      - output contains no URL and no markdown link syntax at all -- this is
+        the injection bound: an untrusted title riding into the prompt can
+        make the LLM say almost anything, but it can never turn that into a
+        clickable link, since the digest is posted straight to Discord
       - every 1-4 digit number referenced (after stripping age markers and
-        link URLs) is a queue number or ref of a record in `records`
+        the held-count tally) is a queue number or ref of a record in
+        `records` (or already present in that record's own `why` text)
       - every proposed/approved magi-review record's number is referenced
         somewhere in the output
     """
@@ -174,6 +201,10 @@ def validate(output: str, records: List[QueueRecord]) -> bool:
     if size > _MAX_OUTPUT_BYTES:
         print(f"worksweep: curator validation failed: "
               f"{size} bytes > {_MAX_OUTPUT_BYTES} byte cap", file=sys.stderr)
+        return False
+    if _URL_RE.search(output) or _MD_LINK_RE.search(output):
+        print("worksweep: curator validation failed: "
+              "output contains a URL or markdown link", file=sys.stderr)
         return False
 
     stripped = _strip_noise(output)
