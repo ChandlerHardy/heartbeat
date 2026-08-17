@@ -139,19 +139,33 @@ def assess_todo(todo: Todo) -> List[WorkItem]:
         web_url=todo.web_url, sha="")]
 
 
-# Matches "#1701" anywhere in an authored MR's title (the `feat(#1701): ...`
-# convention). A source-branch fallback (`/(\d{3,5})-`) is deferred -- the
-# GraphQL sweep node doesn't fetch the source branch name today -- so v1 is
-# title-only, per the M3.5 plan.
-_ISSUE_REF_RE = re.compile(r"#(\d+)")
+# Two narrow patterns instead of a blanket "#\d+ anywhere in the title" scan
+# -- a bare findall over the whole title over-suppresses (a title like
+# "feat(#1701): follow-up to #796 review" would wrongly cover unrelated
+# issue #796 too). Only two shapes count as a real "this MR covers that
+# issue" claim:
+#  1. the leading conventional-commit tag: `feat(#1701):`, `refactor(#1681):`,
+#     optionally prefixed with GitLab's "Draft: " marker.
+#  2. an explicit closing keyword anywhere in the title: "Closes #42",
+#     "Fixes #42", "Resolves #42".
+# A source-branch fallback (`/(\d{3,5})-`) is deferred -- the GraphQL sweep
+# node doesn't fetch the source branch name today -- so v1 is title-only,
+# per the M3.5 plan.
+_ISSUE_TAG_RE = re.compile(r"^\s*(?:Draft:\s*)?[a-z]+\(#(\d+)\)")
+_ISSUE_CLOSE_RE = re.compile(r"(?:[Cc]loses|[Ff]ixes|[Rr]esolves)\s+#(\d+)")
 
 
 def covered_issue_iids(authored: List[MergeRequest]) -> Set[int]:
     """Issue iids already covered by an open authored MR's title, so
-    assess_issue can suppress the redundant separate issue item."""
+    assess_issue can suppress the redundant separate issue item. Only the
+    leading conventional-commit tag and explicit closing keywords count --
+    an incidental "#NNN" reference elsewhere in the title does not."""
     covered: Set[int] = set()
     for mr in authored:
-        covered.update(int(n) for n in _ISSUE_REF_RE.findall(mr.title))
+        tag = _ISSUE_TAG_RE.match(mr.title)
+        if tag:
+            covered.add(int(tag.group(1)))
+        covered.update(int(n) for n in _ISSUE_CLOSE_RE.findall(mr.title))
     return covered
 
 

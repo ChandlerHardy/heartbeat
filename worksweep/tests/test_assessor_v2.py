@@ -95,6 +95,31 @@ def test_covered_issue_iids_empty_for_no_authored_mrs():
     assert covered_issue_iids([]) == set()
 
 
+# Review follow-up: a bare "#\d+ anywhere in the title" scan over-suppresses
+# -- it wrongly covers incidental refs (e.g. "follow-up to #796 review")
+# alongside the real leading tag, and treats "(see #869)" as a coverage
+# claim. Narrowed to the leading conventional tag + explicit closing
+# keywords only.
+def test_covered_issue_iids_ignores_incidental_mid_title_ref():
+    mrs = [_authored_mr(title="feat(#1701): follow-up to #796 review")]
+    assert covered_issue_iids(mrs) == {1701}
+
+
+def test_covered_issue_iids_leading_tag_with_draft_prefix():
+    mrs = [_authored_mr(title="Draft: feat(#1598): bulk edit")]
+    assert covered_issue_iids(mrs) == {1598}
+
+
+def test_covered_issue_iids_parenthetical_mention_not_covered():
+    mrs = [_authored_mr(title="Fix the thing (see #869)")]
+    assert covered_issue_iids(mrs) == set()
+
+
+def test_covered_issue_iids_closing_keyword_without_leading_tag():
+    mrs = [_authored_mr(title="chore: cleanup — Closes #42")]
+    assert covered_issue_iids(mrs) == {42}
+
+
 def test_assess_issue_suppressed_when_covered():
     issue = Issue(repo="pb-www", iid=1701, title="t", web_url="u")
     assert assess_issue(issue, covered={1701}) == []
