@@ -23,7 +23,7 @@ def test_main_returns_1_on_discord_post_failure(monkeypatch, tmp_path):
                         lambda: os.path.join(str(tmp_path), "queue.json"))
     monkeypatch.setattr(wsmain.collectors, "run_graphql_sweep", lambda: "")
     monkeypatch.setattr(wsmain.collectors, "parse_graphql_sweep",
-                        lambda raw, user, repos: ([], []))
+                        lambda raw, user, repos: ([], [], []))
     monkeypatch.setattr(wsmain.collectors, "collect_todos", lambda: [])
 
     def boom(webhook, content):
@@ -67,7 +67,7 @@ def test_main_discord_posts_multiple_messages_for_long_digest(monkeypatch, tmp_p
     monkeypatch.setattr(wsmain.assessor, "has_magi_report", lambda repo, iid: False)
     monkeypatch.setattr(wsmain.collectors, "run_graphql_sweep", lambda: "")
     monkeypatch.setattr(wsmain.collectors, "parse_graphql_sweep",
-                        lambda raw, user, repos: ([], many))
+                        lambda raw, user, repos: ([], many, []))
     monkeypatch.setattr(wsmain.collectors, "collect_todos", lambda: [])
     monkeypatch.setattr(wsmain.collectors, "collect_issues", lambda repo, user: [])
 
@@ -119,7 +119,7 @@ def test_post_persists_queue_and_posted_number_matches_record_number(monkeypatch
     monkeypatch.setattr(wsmain.collectors, "run_graphql_sweep", lambda: "")
     monkeypatch.setattr(
         wsmain.collectors, "parse_graphql_sweep",
-        lambda raw, user, repos: ([], [_mr(iid=3890, description="no link")]))
+        lambda raw, user, repos: ([], [_mr(iid=3890, description="no link")], []))
     monkeypatch.setattr(wsmain.collectors, "collect_todos", lambda: [])
     monkeypatch.setattr(wsmain.collectors, "collect_issues", lambda repo, user: [])
 

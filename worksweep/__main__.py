@@ -170,7 +170,7 @@ def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
 
     try:
         raw = deps["graphql"]()
-        review_mrs, authored = collectors.parse_graphql_sweep(
+        review_mrs, authored, assigned = collectors.parse_graphql_sweep(
             raw, cfg.username, cfg.repos)
 
         items = []
@@ -183,26 +183,35 @@ def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
             items += assessor.assess_own_mr(
                 mr, cfg.username,
                 has_magi=lambda r, i, s: assessor.has_magi_done(records0, r, i, s))
-        try:
-            for td in deps["todos"]():
-                items += assessor.assess_todo(td)
-        except Exception as e:
-            print(f"worksweep: todos collection failed: {e}", file=sys.stderr)
+        # An assigned-to-me MR not already surfaced as a review-requested or
+        # authored item this sweep gets a lightweight triage item.
+        tracked_mr_ids = {(mr.repo, mr.iid) for mr in review_mrs + authored}
+        for mr in assigned:
+            items += assessor.assess_assigned_mr(mr, cfg.username, tracked_mr_ids)
+        covered_issues = assessor.covered_issue_iids(authored)
         for repo in cfg.repos:
             try:
                 for iss in deps["issues"](repo, cfg.username):
-                    items += assessor.assess_issue(iss)
+                    items += assessor.assess_issue(iss, covered=covered_issues)
             except Exception as e:
                 print(f"worksweep: issues for {repo} failed: {e}", file=sys.stderr)
         items = assessor.dedupe(items)
 
-        # REST todos and the GraphQL sweep can both surface the same MR (e.g.
-        # a "review requested" todo alongside the review_request item the
-        # GraphQL query already produced for it) — drop the todo duplicate so
-        # the digest doesn't show the same MR twice under two executors.
-        non_todo_urls = {it.web_url.rstrip("/") for it in items if it.kind != "todo"}
-        items = [it for it in items
-                if it.kind != "todo" or it.web_url.rstrip("/") not in non_todo_urls]
+        # GitLab todos are noisier than the GraphQL sweep's authoritative
+        # buckets (review/authored/assigned) -- drop a todo whose action is
+        # already covered by a bucket, or whose (fragment/slash-normalized)
+        # URL matches an item or MR already surfaced this sweep, so the
+        # digest doesn't show the same thing twice under two executors.
+        try:
+            todos_raw = deps["todos"]()
+        except Exception as e:
+            print(f"worksweep: todos collection failed: {e}", file=sys.stderr)
+            todos_raw = []
+        surviving_todos = assessor.filter_todos(
+            todos_raw, items, review_mrs + authored + assigned)
+        for td in surviving_todos:
+            items += assessor.assess_todo(td)
+        items = assessor.dedupe(items)
 
         resolved = assessor.resolutions(review_mrs, cfg.username)
         records = reconcile(records0, items, deps["now"](), resolved=resolved)

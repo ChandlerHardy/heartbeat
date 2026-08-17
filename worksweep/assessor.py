@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import os
+import re
 from glob import glob
-from typing import Callable, List
+from typing import Callable, FrozenSet, List, Set, Tuple
 
 from .models import Issue, MergeRequest, QueueRecord, Todo, WorkItem
 
@@ -76,7 +77,9 @@ def assess_own_mr(mr: MergeRequest, username: str,
             schema_version=1, id=f"magi:{mr.repo}!{mr.iid}@{mr.sha}",
             repo=mr.repo, kind="mr", executor="magi-review", risk="low",
             why="no magi-review yet", web_url=mr.web_url, sha=mr.sha))
-    if not mr.dev_url_present:
+    # Drafts often don't have a dev link yet (the environment isn't assigned/
+    # ready until the MR leaves draft) -- exempt them from the hygiene nag.
+    if not mr.is_draft and not mr.dev_url_present:
         items.append(WorkItem(
             schema_version=1, id=f"hygiene-devurl:{mr.repo}!{mr.iid}",
             repo=mr.repo, kind="mr", executor="mr-hygiene", risk="low",
@@ -98,6 +101,26 @@ def assess_own_mr(mr: MergeRequest, username: str,
     return items
 
 
+def assess_assigned_mr(mr: MergeRequest, username: str,
+                       tracked: Set[Tuple[str, int]]) -> List[WorkItem]:
+    """An MR assigned to me via GitLab's `assignedMergeRequests` bucket.
+
+    Self-assigned MRs (author == username) are already fully covered by
+    assess_own_mr's magi/hygiene/feedback/ci items, and an MR already seen in
+    another bucket this sweep (review-requested or authored -- passed in via
+    `tracked` as (repo, iid) pairs) is already represented -- so both cases
+    emit nothing here to avoid a redundant "assigned to you" line.
+    """
+    if mr.author == username:
+        return []
+    if (mr.repo, mr.iid) in tracked:
+        return []
+    return [WorkItem(
+        schema_version=1, id=f"assigned:{mr.repo}!{mr.iid}",
+        repo=mr.repo, kind="assigned_mr", executor="triage", risk="low",
+        why="assigned to you", web_url=mr.web_url, sha=mr.sha)]
+
+
 def assess_mr(mr: MergeRequest, username: str,
               has_magi: Callable[[str, int, str], bool]) -> List[WorkItem]:
     """Shim over assess_review_request/assess_own_mr for callers assessing a
@@ -116,11 +139,65 @@ def assess_todo(todo: Todo) -> List[WorkItem]:
         web_url=todo.web_url, sha="")]
 
 
-def assess_issue(issue: Issue) -> List[WorkItem]:
+# Matches "#1701" anywhere in an authored MR's title (the `feat(#1701): ...`
+# convention). A source-branch fallback (`/(\d{3,5})-`) is deferred -- the
+# GraphQL sweep node doesn't fetch the source branch name today -- so v1 is
+# title-only, per the M3.5 plan.
+_ISSUE_REF_RE = re.compile(r"#(\d+)")
+
+
+def covered_issue_iids(authored: List[MergeRequest]) -> Set[int]:
+    """Issue iids already covered by an open authored MR's title, so
+    assess_issue can suppress the redundant separate issue item."""
+    covered: Set[int] = set()
+    for mr in authored:
+        covered.update(int(n) for n in _ISSUE_REF_RE.findall(mr.title))
+    return covered
+
+
+def assess_issue(issue: Issue,
+                 covered: FrozenSet[int] = frozenset()) -> List[WorkItem]:
+    """An assigned issue -- suppressed when an open authored MR's title
+    already references it (covered_issue_iids), since the MR item is the
+    actionable one and a separate issue item would just be a duplicate."""
+    if issue.iid in covered:
+        return []
     return [WorkItem(
         schema_version=1, id=f"issue:{issue.repo}#{issue.iid}", repo=issue.repo,
         kind="issue", executor="triage", risk="low",
         why=f"assigned issue: {issue.title}", web_url=issue.web_url, sha="")]
+
+
+def _normalize_todo_url(url: str) -> str:
+    """Strip a Discord/GitLab note-anchor fragment (#note_...) and any
+    trailing slash so URL-based matching ignores anchor/trailing-slash
+    noise between a todo's target_url and an item/MR's web_url."""
+    return (url or "").split("#", 1)[0].rstrip("/")
+
+
+def filter_todos(todos: List[Todo], items: List[WorkItem],
+                 tracked_mrs: List[MergeRequest]) -> List[Todo]:
+    """Hard filter: GitLab todos are noisy compared to the GraphQL sweep's
+    authoritative buckets (review-requested/authored/assigned). Drop a todo
+    when:
+      - its action is `review_requested` or `assigned` (both buckets already
+        cover these unconditionally), or
+      - its normalized web_url matches a non-todo item emitted this sweep, or
+        any MR in the review/authored/assigned buckets (already tracked).
+    Survivors are genuine mentions/direct-addresses on things not otherwise
+    tracked."""
+    tracked_urls = {_normalize_todo_url(it.web_url) for it in items
+                    if it.kind != "todo" and it.web_url}
+    tracked_urls |= {_normalize_todo_url(mr.web_url) for mr in tracked_mrs
+                     if mr.web_url}
+    out = []
+    for td in todos:
+        if td.action in ("review_requested", "assigned"):
+            continue
+        if _normalize_todo_url(td.web_url) in tracked_urls:
+            continue
+        out.append(td)
+    return out
 
 
 def dedupe(items: List[WorkItem]) -> List[WorkItem]:

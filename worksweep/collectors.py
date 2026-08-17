@@ -154,6 +154,16 @@ query {
         resolvableDiscussionsCount resolvedDiscussionsCount
       }
     }
+    assignedMergeRequests(state: opened, first: 100) {
+      nodes {
+        iid title draft webUrl diffHeadSha updatedAt description
+        project { fullPath }
+        author { username }
+        reviewers { nodes { username mergeRequestInteraction { reviewState } } }
+        headPipeline { status }
+        resolvableDiscussionsCount resolvedDiscussionsCount
+      }
+    }
   }
 }
 """
@@ -202,22 +212,23 @@ def _gql_mr(node: dict, username: str) -> "MergeRequest":
 
 
 def parse_graphql_sweep(raw: str, username: str, repos: tuple):
-    """Pure: raw GraphQL JSON -> (review_requested, authored) MergeRequest lists,
-    filtered to the configured performancelivestock repos. Malformed -> ([], [])."""
+    """Pure: raw GraphQL JSON -> (review_requested, authored, assigned)
+    MergeRequest lists, filtered to the configured performancelivestock
+    repos. Malformed -> ([], [], [])."""
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as e:
         print(f"worksweep: graphql decode failed: {e}", file=sys.stderr)
-        return [], []
+        return [], [], []
     if not isinstance(data, dict):
         print(f"worksweep: graphql expected an object, got {type(data).__name__}",
               file=sys.stderr)
-        return [], []
+        return [], [], []
     data = data.get("data", data) or {}
     if not isinstance(data, dict):
         print(f"worksweep: graphql expected an object, got {type(data).__name__}",
               file=sys.stderr)
-        return [], []
+        return [], [], []
     cu = data.get("currentUser") or {}
 
     def _bucket(key: str):
@@ -233,4 +244,5 @@ def parse_graphql_sweep(raw: str, username: str, repos: tuple):
         return out
 
     return (_bucket("reviewRequestedMergeRequests"),
-            _bucket("authoredMergeRequests"))
+            _bucket("authoredMergeRequests"),
+            _bucket("assignedMergeRequests"))
