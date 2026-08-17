@@ -227,7 +227,7 @@ def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
         # disagree.
         actionable = [r for r in records if r.item.status not in ("done", "error")]
         if actionable:
-            _post_all(format_messages_from_records(actionable))
+            _post_all(format_messages_from_records(actionable, now=deps["now"]()))
         else:
             _post_all([f"🔍 Worksweep: nothing needs you "
                        f"(checked {len(review_mrs)} review requests, "
