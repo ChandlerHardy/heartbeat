@@ -8,6 +8,7 @@ is delivered in full across several messages instead of being truncated.
 from __future__ import annotations
 
 import datetime
+import re
 from typing import List, Optional
 
 from .models import QueueRecord, WorkItem
@@ -44,13 +45,37 @@ def _compute_age_days(iso_ts: str, iso_now: str) -> Optional[int]:
 
 _TITLE_LIMIT = 60
 
+# An MR/issue title is untrusted (author-supplied) text riding straight into
+# a Discord message and into the curator LLM's prompt. Neutralize markdown/
+# link injection at this render boundary: `[`/`]` are stripped so a
+# `[text](url)` link shape can never form (Discord requires the literal `]('
+# sequence — dropping `]` alone kills it), backticks are stripped so a title
+# can't break out of/reopen a code span, `*`/`_`/`~` runs are stripped so a
+# title can't break out of the `*title*` emphasis wrapper or force bold/
+# strike formatting, and any `http(s)://` scheme is neutralized so no
+# clickable URL can ride through even without link syntax.
+_SCHEME_RE = re.compile(r"https?://", re.IGNORECASE)
+_MD_EMPHASIS_RE = re.compile(r"[*_~]+")
+
+
+def _sanitize_title(title: str) -> str:
+    """Strip markdown/link-injection characters from an untrusted title
+    before it's rendered into Discord markdown (or fed to the curator LLM
+    -- see curator._record_line, which reuses this). Empty -> empty."""
+    if not title:
+        return ""
+    out = title.replace("[", "").replace("]", "").replace("`", "")
+    out = _MD_EMPHASIS_RE.sub("", out)
+    out = _SCHEME_RE.sub("hxxp://", out)
+    return out
+
 
 def _truncate_title(title: str, limit: int = _TITLE_LIMIT) -> str:
-    """Collapse a title to one line and cap it at `limit` chars, single-`…`
+    """Sanitize, collapse to one line, and cap at `limit` chars, single-`…`
     truncation for readability. Empty title -> empty string (no segment)."""
     if not title:
         return ""
-    single = " ".join(title.split())
+    single = " ".join(_sanitize_title(title).split())
     if len(single) <= limit:
         return single
     return single[:limit].rstrip() + "…"

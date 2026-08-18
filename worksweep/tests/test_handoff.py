@@ -324,3 +324,83 @@ def test_live_fixture_4007_yields_exactly_one_handoff_item():
     items = assess_own_mr(mr4007, "chandler.hardy", has_magi=lambda r, i, s: False)
     assert len(items) == 1
     assert items[0].id == "handoff:pb-www!4007"
+
+
+# --- Fix round: curator title-digit whitelist + render-boundary sanitizing ---
+
+def test_validate_accepts_title_digit_reference():
+    # Real failure mode: MR !4007's title embeds an unrelated issue number
+    # (#1701) via the conventional-commit tag -- the curator prompt tells
+    # the LLM to echo the title, so validate() must whitelist digits that
+    # appear in a record's own title, not just its why/ref/number.
+    wi = WorkItem(schema_version=1, id="x4007", repo="pb-www", kind="review_request",
+                 executor="magi-review", risk="low", why="review requested",
+                 web_url="https://gl/x/-/merge_requests/4007", sha="s",
+                 title="feat(#1701): Add Usage column", status="proposed")
+    rec = QueueRecord(number=1, item=wi, first_seen="t", last_seen="t")
+    out = "1. pb-www !4007 -- feat(#1701): Add Usage column -- review requested"
+    assert validate(out, [rec]) is True
+
+
+def test_validate_still_rejects_number_absent_from_title_too():
+    wi = WorkItem(schema_version=1, id="x4007", repo="pb-www", kind="review_request",
+                 executor="magi-review", risk="low", why="review requested",
+                 web_url="https://gl/x/-/merge_requests/4007", sha="s",
+                 title="feat(#1701): Add Usage column", status="proposed")
+    rec = QueueRecord(number=1, item=wi, first_seen="t", last_seen="t")
+    out = "1. pb-www !4007 -- review requested, see item 999"
+    assert validate(out, [rec]) is False
+
+
+def test_item_line_sanitizes_link_shaped_title():
+    it = WorkItem(schema_version=1, id="x", repo="pb-www", kind="mr",
+                 executor="magi-review", risk="low", why="review requested",
+                 web_url="https://gl/x/-/merge_requests/1", sha="s",
+                 title="Click here](https://evil.com) for info")
+    line = _item_line(1, it)
+    # The item's own masked ref link ([#1](url)) legitimately contains "](" --
+    # only the TITLE-derived portion must be link-injection-free.
+    title_segment = line.split("*")[1]
+    assert "](" not in title_segment
+    assert "]" not in title_segment
+    assert "https://" not in title_segment
+
+
+def test_item_line_sanitizes_backticks_in_title():
+    it = WorkItem(schema_version=1, id="x", repo="pb-www", kind="mr",
+                 executor="magi-review", risk="low", why="w",
+                 web_url="https://gl/x/-/merge_requests/1", sha="s",
+                 title="`rm -rf /` cleanup")
+    line = _item_line(1, it)
+    assert "`rm -rf /`" not in line
+    assert "rm -rf / cleanup" in line
+
+
+def test_item_line_normal_title_unchanged():
+    it = WorkItem(schema_version=1, id="x", repo="pb-www", kind="mr",
+                 executor="magi-review", risk="low", why="w",
+                 web_url="https://gl/x/-/merge_requests/1", sha="s",
+                 title="Add Usage column to the feed report")
+    line = _item_line(1, it)
+    assert "Add Usage column to the feed report" in line
+
+
+def test_record_line_sanitizes_link_shaped_title():
+    wi = WorkItem(schema_version=1, id="x1", repo="pb-www", kind="mr",
+                 executor="triage", risk="low", why="w",
+                 web_url="https://gl/x/-/merge_requests/1", sha="s",
+                 title="Click here](https://evil.com) for info")
+    rec = QueueRecord(number=1, item=wi, first_seen="t", last_seen="t")
+    line = _record_line(rec, "t")
+    assert "](" not in line
+    assert "https://" not in line
+
+
+def test_record_line_normal_title_unchanged():
+    wi = WorkItem(schema_version=1, id="x1", repo="pb-www", kind="mr",
+                 executor="triage", risk="low", why="w",
+                 web_url="https://gl/x/-/merge_requests/1", sha="s",
+                 title="Add Usage column")
+    rec = QueueRecord(number=1, item=wi, first_seen="t", last_seen="t")
+    line = _record_line(rec, "t")
+    assert "Add Usage column" in line

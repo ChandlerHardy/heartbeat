@@ -30,6 +30,7 @@ import subprocess
 import sys
 from typing import Callable, List, Optional, Tuple
 
+from .formatter import _sanitize_title
 from .models import QueueRecord
 
 _MAX_OUTPUT_BYTES = 1700
@@ -75,7 +76,11 @@ def _record_line(r: QueueRecord, now: str) -> str:
         r.item.why,
         str(age) if age is not None else "",
         r.item.status,
-        r.item.title,
+        # Sanitized (same rule as formatter._item_line, imported from there
+        # for a single source of truth): defense in depth so the LLM never
+        # even sees a raw link/markdown-injection shape in a title, on top
+        # of validate()'s hard rejection of any link in its output.
+        _sanitize_title(r.item.title),
     ]
     return " | ".join(fields)
 
@@ -157,11 +162,13 @@ def _strip_noise(text: str) -> str:
 def _allowed_numbers(records: List[QueueRecord]) -> set:
     """Every number the LLM is entitled to output: each record's queue
     number and ref (iid), plus any number already present in a record's own
-    `why` text (e.g. "2 unresolved threads") -- the prompt's line format
-    invites the LLM to echo `why` verbatim, and a count that already exists
-    in our own trusted input is not an invented number, just a faithful
-    quote. This is still strict: a number with no origin anywhere in the
-    input records is rejected.
+    `why` or `title` text (e.g. "2 unresolved threads", or a conventional-
+    commit-tagged title like "feat(#1701): ...") -- the prompt's line
+    format invites the LLM to echo both verbatim (rule 1 explicitly asks
+    for "{short title} -- {why}"), and a count/reference that already
+    exists in our own trusted input is not an invented number, just a
+    faithful quote. This is still strict: a number with no origin anywhere
+    in the input records is rejected.
 
     Accepted residual risk: this whitelist is global across all records, not
     scoped per-record -- a number lifted from one record's `why` text would
@@ -185,6 +192,7 @@ def _allowed_numbers(records: List[QueueRecord]) -> set:
         if ref is not None:
             allowed.add(ref)
         allowed.update(int(m) for m in _NUMBER_RE.findall(r.item.why))
+        allowed.update(int(m) for m in _NUMBER_RE.findall(r.item.title))
     return allowed
 
 
