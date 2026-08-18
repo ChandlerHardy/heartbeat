@@ -57,12 +57,16 @@ class WorkItem:
     id: str
     repo: str
     kind: str       # "mr" | "review_request" | "feedback" | "ci_red" | "todo" | "issue"
-    executor: str   # "magi-review" | "mr-hygiene" | "triage"
+    executor: str   # "magi-review" | "mr-hygiene" | "triage" | "implement"
     risk: str       # "low" | "medium" | "high"
     why: str
     web_url: str
     sha: str
-    status: str = "proposed"  # "proposed" | "approved" | "running" | "done" | "error"
+    # "proposed" | "approved" | "running" | "done" | "error" | "needs-input".
+    # `needs-input` (M4 Task G) = the implementer halted with a question for
+    # the human: terminal-ish (never auto-retried) until a fresh Discord ✅
+    # flips it back to `approved` (see approvals.apply_approvals).
+    status: str = "proposed"
     claimed_at: str = ""      # ISO8601 — set when the runner claims (status=running)
     done_reason: str = ""     # "executor-completed" | "already-reviewed" | "mr-merged" | "bootstrap-glob"
     result_sha: str = ""      # head SHA the executor actually reviewed
@@ -70,6 +74,7 @@ class WorkItem:
     error_summary: str = ""   # short failure text (status=error)
     title: str = ""           # mr.title / issue.title -- "" for todo items
     dev_box: str = ""         # name of the dev box claimed by an `implement` executor
+    mr_iid: int = 0           # Draft MR iid opened by the `implement` executor
 
 
 @dataclass(frozen=True)

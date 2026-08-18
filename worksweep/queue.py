@@ -21,7 +21,12 @@ from typing import List
 from .models import QueueRecord, WorkItem
 
 _TERMINAL = ("done", "error")
-_RETAIN_IF_GONE = ("approved", "running", "done", "error")
+# `needs-input` (M4 Task G) is terminal-ish: retained when it drops out of a
+# sweep like an approved/running item, but deliberately NOT in _TERMINAL --
+# it is never compacted away and never auto-re-proposed. The only path back
+# to `approved` is a fresh Discord ✅ (approvals.apply_approvals).
+_RETAIN_IF_GONE = ("approved", "running", "done", "error", "needs-input")
+_NEEDS_INPUT = "needs-input"
 _COMPACT_AFTER_DAYS = 90
 
 
@@ -110,7 +115,15 @@ def reconcile(existing: List[QueueRecord], fresh: List[WorkItem],
             next_num += 1
             continue
         ps = prior.item.status
-        if ps == "error":
+        if ps == _NEEDS_INPUT:
+            # A halted item stays halted no matter what the sweep says (even
+            # on a new sha): re-proposing it would let the runner re-claim
+            # work the human was asked to unblock, and the question would
+            # scroll away unanswered.
+            merged = dataclasses.replace(it, status=_NEEDS_INPUT,
+                                         error_summary=prior.item.error_summary,
+                                         dev_box=prior.item.dev_box)
+        elif ps == "error":
             merged = dataclasses.replace(it, status="proposed")
         elif ps == "done":
             if prior.item.sha == it.sha:

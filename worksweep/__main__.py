@@ -30,8 +30,12 @@ from typing import Callable, Dict, Optional
 _ALLOWED_WEBHOOK_HOSTS = ("discord.com", "discordapp.com")
 
 _SSH_TIMEOUT_SECONDS = 20
+# M4 Task G: syncing a branch onto a dev box does a real `git fetch` over the
+# network on the far side — the 20s read-only probe budget is far too short.
+_SSH_SYNC_TIMEOUT_SECONDS = 300
+_HTTP_PROBE_TIMEOUT_SECONDS = 20
 
-from . import assessor, collectors, curator, devslots
+from . import assessor, collectors, curator, devslots, implementer
 from .approvals import apply_approvals
 from .config import WorksweepConfig, load_config
 from .discord_read import fetch_messages
@@ -128,6 +132,45 @@ def run_ssh(host: str, command: str, timeout: int = _SSH_TIMEOUT_SECONDS) -> str
     if result.returncode != 0:
         raise RuntimeError(f"ssh {host} failed: {(result.stderr or '').strip()}")
     return result.stdout
+
+
+def http_status(url: str, timeout: int = _HTTP_PROBE_TIMEOUT_SECONDS) -> int:
+    """M4 Task G http edge: GET `url` and return its status code. Used only to
+    prove a dev box still serves 200 after a sync, so an HTTP error response
+    is a RESULT (its code), not an exception; anything that isn't an HTTP
+    response at all raises and implementer.sync_to_box turns it into a
+    RunnerError."""
+    req = urllib.request.Request(url, method="GET",
+                                 headers={"User-Agent": "WorksweepBot/1.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            resp.read(1)
+            return int(resp.status)
+    except urllib.error.HTTPError as e:
+        return int(e.code)
+
+
+def _implement_boxes(cfg: WorksweepConfig) -> list:
+    """Probe + classify the dev boxes for one implement claim.
+
+    Deliberately re-runs the GraphQL sweep instead of trusting the queue: the
+    tier of a box depends on the CURRENT state of the MR sitting on its branch
+    (merged? approved and handed off? under live review?), and the runner
+    fires on its own cadence, minutes to hours after the digest that proposed
+    the item. Raises on failure — the runner's implement pass catches it and
+    turns it into an error status + ⚠️ rather than guessing a box is free.
+    """
+    if not cfg.dev_boxes:
+        return []
+    boxes = devslots.probe(list(cfg.dev_boxes), run_ssh)
+    review_mrs, authored, assigned = collectors.parse_graphql_sweep(
+        collectors.run_graphql_sweep(), cfg.username, cfg.repos)
+    records = load_queue(_queue_path())
+    claimed = frozenset(r.item.dev_box for r in records
+                        if r.item.dev_box and r.item.executor == "implement"
+                        and r.item.status in ("running", "approved"))
+    return implementer.annotate_boxes(boxes, review_mrs + authored + assigned,
+                                      cfg.username, claimed=claimed)
 
 
 def _run_intake(cfg: WorksweepConfig) -> int:
@@ -315,6 +358,26 @@ def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
         return 1
 
 
+def _execute_implement(item, cfg, boxes):
+    """Real implement edge: subprocess + a longer-budget ssh + an http probe."""
+    return implementer.execute(
+        item, cfg, boxes, run_subprocess=subprocess.run,
+        run_ssh=lambda host, command: run_ssh(
+            host, command, timeout=_SSH_SYNC_TIMEOUT_SECONDS),
+        http_get=http_status)
+
+
+def _dry_run_implement(item, cfg, boxes):
+    box = boxes[0] if boxes else None
+    iid = implementer.issue_iid(item)
+    return implementer.ImplementResult(
+        iid=iid, mr_iid=0, mr_url="", dev_url=getattr(box, "url", ""),
+        dev_box=getattr(box, "name", ""),
+        branch=implementer.branch_name(iid, item.title or ""),
+        report_path="(dry-run)", verdict="", result_sha=item.sha,
+        magi_note="dry-run: nothing was pushed, opened or synced")
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="worksweep")
     ap.add_argument("command", nargs="?", choices=["intake", "run"],
@@ -342,6 +405,12 @@ def main(argv=None) -> int:
             "now": _now,
             "execute": (lambda item, c: (item.sha, "(dry-run)"))
                        if args.dry_run else _runner.execute,
+            # M4 Task G. Box probing stays real under --dry-run (read-only ssh,
+            # nothing to preview around); the executor itself does not, since
+            # it pushes, opens an MR and rewrites a dev box.
+            "boxes": lambda: _implement_boxes(cfg),
+            "execute_implement": (_dry_run_implement if args.dry_run
+                                  else _execute_implement),
         }
         return _runner.run_once(cfg, deps)
 

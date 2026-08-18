@@ -25,6 +25,10 @@ _HAS_MARKER_RE = re.compile(r"✅|approve", re.I)
 _TOKEN_RE = re.compile(r"(\d+)\s*-\s*(\d+)|(-?)(\d+)")
 # Cap the span of a range so `✅ 1-100000` can't expand into a giant set.
 _MAX_RANGE_SPAN = 500
+# Statuses a ✅ may flip to `approved`. `needs-input` is included so the human's
+# answer un-parks a halted implement item; `running`/`done`/`error` are not (a
+# ✅ must never re-enter a live claim, and `error` re-proposes itself).
+_APPROVABLE = ("proposed", "needs-input")
 
 
 def parse_approval(text: str) -> Set[int]:
@@ -58,6 +62,10 @@ def apply_approvals(records: List[QueueRecord], messages: List[DiscordMessage],
                     user_id: str, now: str) -> Tuple[List[QueueRecord], Set[int]]:
     """Flip queue records the configured user approved, proposed -> approved.
 
+    M4 Task G: `needs-input` also flips to `approved`. A halted implement item
+    is parked on the human's answer; their ✅ is the explicit "go again" that
+    releases it (reconcile never re-proposes it on its own).
+
     Author gate: only messages whose author_id == user_id contribute numbers (a
     colleague typing `✅ 1` is ignored). The union of those messages' parsed
     numbers is matched against record numbers; each matching record currently
@@ -76,7 +84,7 @@ def apply_approvals(records: List[QueueRecord], messages: List[DiscordMessage],
     out: List[QueueRecord] = []
     newly: Set[int] = set()
     for r in records:
-        if r.number in approved_numbers and r.item.status == "proposed":
+        if r.number in approved_numbers and r.item.status in _APPROVABLE:
             out.append(QueueRecord(
                 number=r.number, first_seen=r.first_seen, last_seen=now,
                 item=dataclasses.replace(r.item, status="approved")))

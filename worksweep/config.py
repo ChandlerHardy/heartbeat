@@ -22,6 +22,10 @@ class WorksweepConfig:
     checkouts_root: str = ""
     claude_bin: str = "claude"
     runner_timeout: int = 1800
+    # M4 Task G: hard cap for ONE `/rubric:do` implement run (90 min). The
+    # runner reaps an implement claim at implement_timeout + 15 min, so this
+    # value also sets the stuck-claim window.
+    implement_timeout: int = 5400
     # M3.5 Task C: gate for the LLM digest-curation pass. Reuses claude_bin
     # (no separate curator_bin) -- both are just "claude" runs in a
     # subprocess, one against a checkout, one against the repo root.
@@ -50,6 +54,13 @@ def load_config(path: str | None = None) -> WorksweepConfig:
     except (TypeError, ValueError):
         raise RuntimeError(
             f"config runner.timeout_seconds must be an integer, got {timeout_raw!r}")
+    implement_raw = rn.get("implement_timeout", 5400)
+    try:
+        implement_timeout = int(implement_raw)
+    except (TypeError, ValueError):
+        raise RuntimeError(
+            f"config runner.implement_timeout must be an integer, "
+            f"got {implement_raw!r}")
     curate_raw = rn.get("curate", True)
     if not isinstance(curate_raw, bool):
         raise RuntimeError(
@@ -68,6 +79,7 @@ def load_config(path: str | None = None) -> WorksweepConfig:
         checkouts_root=rn.get("checkouts_root", ""),
         claude_bin=rn.get("claude_bin", "claude"),
         runner_timeout=runner_timeout,
+        implement_timeout=implement_timeout,
         curate=curate_raw,
         dev_boxes=tuple(dev_boxes_raw),
     )

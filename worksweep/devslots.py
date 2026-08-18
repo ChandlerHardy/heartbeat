@@ -38,6 +38,13 @@ class DevBox:
     url: str
     branch: str = ""   # "" = unknown/unreachable (probe couldn't determine it)
     sha: str = ""
+    # M4 Task G: filled in by implementer.annotate_boxes so one value carries
+    # both the box and the decision made about it. tier is "" until annotated;
+    # mr_iid is the open MR occupying box.branch (0 = none), used for the
+    # "dev4 reassigned from !4006" Discord note when a handed-off box is
+    # reclaimed.
+    tier: str = ""
+    mr_iid: int = 0
 
 
 def probe(boxes_cfg: List[dict],
@@ -82,11 +89,7 @@ def classify(boxes: List[DevBox], all_mrs: List[MergeRequest], username: str,
     order); a real duplicate is not expected in practice (GitLab does not
     allow two open MRs from the same source branch in one project).
     """
-    by_branch: Dict[str, MergeRequest] = {}
-    for mr in all_mrs:
-        sb = mr.source_branch or ""
-        if sb and sb not in by_branch:
-            by_branch[sb] = mr
+    by_branch = mr_by_branch(all_mrs)
 
     tiers: Dict[str, str] = {}
     for box in boxes:
@@ -104,6 +107,18 @@ def classify(boxes: List[DevBox], all_mrs: List[MergeRequest], username: str,
         else:
             tiers[box.name] = _TIER_LIVE
     return tiers
+
+
+def mr_by_branch(all_mrs: List[MergeRequest]) -> Dict[str, MergeRequest]:
+    """Pure: source_branch -> MR. First MR wins on a duplicate source_branch
+    (stable given the sweep's deterministic bucket order); GitLab does not
+    allow two open MRs from the same source branch in one project."""
+    by_branch: Dict[str, MergeRequest] = {}
+    for mr in all_mrs:
+        sb = mr.source_branch or ""
+        if sb and sb not in by_branch:
+            by_branch[sb] = mr
+    return by_branch
 
 
 def pick(tiers: Dict[str, str], order: Sequence[str]) -> Optional[str]:

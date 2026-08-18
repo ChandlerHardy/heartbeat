@@ -42,7 +42,11 @@ _LLM_TIMEOUT_SECONDS = 120
 # process happens to invoke worksweep).
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-_MAGI_LEAD_STATUSES = ("proposed", "approved")
+# Statuses that make an item a live ask the curated digest may not drop.
+# `needs-input` (M4 Task G) is one of them: the implementer stopped ON a
+# question for Chandler, so that item is the most human-blocking thing in the
+# queue -- it must survive curation, not get folded into a low-priority line.
+_MAGI_LEAD_STATUSES = ("proposed", "approved", "needs-input")
 
 
 def _ref_number(web_url: str) -> Optional[int]:
