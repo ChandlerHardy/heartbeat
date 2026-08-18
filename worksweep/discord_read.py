@@ -13,8 +13,7 @@ from __future__ import annotations
 import json
 import sys
 import urllib.request
-from typing import Callable, List, Optional
-import urllib.parse
+from typing import List, Optional
 
 from .models import DiscordMessage
 
@@ -72,27 +71,3 @@ def fetch_messages(channel_id: str, bot_token: str,
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         body = resp.read().decode("utf-8")
     return parse_messages(body)
-
-
-# --- reactions (M4: 👀 acknowledgement on approval replies) -----------------
-
-def react(channel_id: str, message_id: str, emoji: str, bot_token: str,
-          timeout: int = 10, opener: Optional[Callable] = None) -> bool:
-    """PUT a reaction from the bot onto one message. Best-effort: returns
-    False (and logs) on any failure — a missing 👀 must never block intake.
-    Requires the bot to have Add Reactions + Read Message History on the
-    channel. `opener` is injectable for tests (defaults to urllib.urlopen)."""
-    url = (f"{_API_BASE}/channels/{channel_id}/messages/{message_id}/reactions/"
-           f"{urllib.parse.quote(emoji, safe='')}/@me")
-    req = urllib.request.Request(url, method="PUT", headers={
-        "Authorization": f"Bot {bot_token}",
-        "User-Agent": _USER_AGENT,
-        "Content-Length": "0",
-    })
-    try:
-        with (opener or urllib.request.urlopen)(req, timeout=timeout) as resp:
-            return 200 <= getattr(resp, "status", 204) < 300
-    except Exception as e:  # network / 4xx — never raise out of intake
-        print(f"worksweep: reaction {emoji} on {message_id} failed: {e}",
-              file=sys.stderr)
-        return False
