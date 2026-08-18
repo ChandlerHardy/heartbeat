@@ -350,6 +350,7 @@ def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
                 curated = curator.curate(actionable, deps["now"](), run_llm,
                                          preamble=slot_line)
             if curated is not None:
+                curated = curator.linkify(curated, actionable)  # deterministic, post-validation
                 n, m = curator.partition_counts(actionable)
                 head = (f"{_HEADER} (curated) — {n} actionable / {m} held:\n"
                         + (f"{slot_line}\n" if slot_line else ""))
@@ -361,6 +362,7 @@ def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
                 # line is present (Task F review finding, 2026-08-18).
                 fixed = len(head.encode("utf-8")) + len(tail.encode("utf-8"))
                 body_budget = max(200, DISCORD_MAX_CHARS - fixed)
+                curated = curator.fit_links(curated, body_budget)   # drop links before bytes
                 _post_all([head + _truncate_bytes(curated, body_budget) + tail])
             else:
                 _post_all(format_messages_from_records(

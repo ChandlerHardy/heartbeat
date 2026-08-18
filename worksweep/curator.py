@@ -33,7 +33,7 @@ from typing import Callable, List, Optional, Tuple
 from .formatter import _sanitize_title
 from .models import QueueRecord
 
-_MAX_OUTPUT_BYTES = 1700
+_MAX_OUTPUT_BYTES = 1300  # leaves ~600B for deterministic linkify + header/footer under the 1900B cap
 _LLM_TIMEOUT_SECONDS = 120
 # Parent of the worksweep/ package -- the heartbeat repo root. Curation has
 # no specific per-repo checkout to run in (unlike runner.execute), so the
@@ -332,3 +332,65 @@ def make_run_llm(cfg, run_subprocess: Callable = subprocess.run
             raise RuntimeError(f"curator LLM exited {proc.returncode}: {tail}")
         return proc.stdout
     return _run
+
+
+# --- deterministic linkification (after validation) --------------------------
+#
+# The LLM is forbidden from emitting URLs (validate() hard-rejects them — that is
+# the prompt-injection bound). Links are added HERE, from the queue's own
+# GitLab web_urls, never from the model: `pb-www !4010` -> `pb-www [!4010](<url>)`
+# and `pb-www #1775` -> `pb-www [#1775](<url>)`. Discord's `<url>` form suppresses
+# embed cards so the digest stays compact.
+
+_REF_TOKEN_RE = re.compile(r"(?<![\w\[/])([!#])(\d{1,6})\b")
+
+
+def _ref_urls(records: List[QueueRecord]) -> dict:
+    """{('!', '4010'): url, ('#', '1775'): url} from non-terminal records.
+    MR items key on '!' + iid, issue items on '#' + iid — derived from the
+    web_url path so we never trust an id we didn't fetch."""
+    out = {}
+    for r in records:
+        url = r.item.web_url or ""
+        m = re.search(r"/merge_requests/(\d+)", url)
+        if m:
+            out.setdefault(("!", m.group(1)), url)
+            continue
+        m = re.search(r"/(?:issues|work_items)/(\d+)", url)
+        if m:
+            out.setdefault(("#", m.group(1)), url)
+    return out
+
+
+def linkify(text: str, records: List[QueueRecord]) -> str:
+    """Replace bare `!iid` / `#iid` refs with Discord masked links to the
+    matching queue record's web_url. Refs with no known url are left as-is.
+    Pure; call only on VALIDATED output."""
+    urls = _ref_urls(records)
+    if not urls:
+        return text
+
+    def _sub(m):
+        key = (m.group(1), m.group(2))
+        url = urls.get(key)
+        return f"[{m.group(1)}{m.group(2)}](<{url}>)" if url else m.group(0)
+
+    return _REF_TOKEN_RE.sub(_sub, text)
+
+
+_MASKED_LINK_RE = re.compile(r"\[([!#]\d{1,6})\]\(<[^>]*>\)")
+
+
+def fit_links(text: str, max_bytes: int) -> str:
+    """If linkified text exceeds max_bytes, degrade gracefully: strip masked
+    links back to bare refs from the END of the text backwards until it fits
+    (never slice a URL mid-way, never touch prose). Refs stay readable; only
+    their clickability is lost, last-lines first."""
+    if len(text.encode("utf-8")) <= max_bytes:
+        return text
+    spans = [(m.start(), m.end(), m.group(1)) for m in _MASKED_LINK_RE.finditer(text)]
+    for start, end, ref in reversed(spans):
+        text = text[:start] + ref + text[end:]
+        if len(text.encode("utf-8")) <= max_bytes:
+            return text
+    return text  # no links left; caller's byte-truncation is the last resort

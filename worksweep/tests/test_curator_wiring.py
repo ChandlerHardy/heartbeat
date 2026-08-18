@@ -58,7 +58,7 @@ def test_curated_digest_posts_single_message_with_curated_header():
     texts = [p for p in posts if isinstance(p, str)]
     assert len(texts) == 1
     assert "(curated)" in texts[0]
-    assert good in texts[0]
+    assert "1. pb-www [!4061](<https://gl/x/-/merge_requests/4061>) -- review requested" in texts[0]  # linkified post-validation
     assert "1 actionable" in texts[0]
 
 
@@ -115,7 +115,7 @@ def test_missing_llm_dep_skips_curation_raw_path_used():
 
 
 def test_assembled_curated_message_never_exceeds_discord_cap():
-    """Important fix: curated is validated at <=1700 bytes, but header +
+    """Important fix: curated is validated at <=1300 bytes, but header +
     "(curated) -- N actionable / M held:" + footer add ~140 more bytes on
     top -- the assembled message must be truncated to the Discord-safe cap
     (formatter.DISCORD_MAX_CHARS = 1900) before posting, not just trust the
@@ -123,11 +123,11 @@ def test_assembled_curated_message_never_exceeds_discord_cap():
     from worksweep.formatter import DISCORD_MAX_CHARS
 
     posts = []
-    # Build a near-1700-byte curated string that still passes validate():
+    # Build a near-1300-byte curated string that still passes validate():
     # no links/URLs, and the only digit token is the real magi-review ref.
-    padding = "review requested. " * 85  # ~1615 bytes of digit-free filler
+    padding = "review requested. " * 68  # ~1290 bytes of digit-free filler
     good = f"1. pb-www !4061 -- {padding}".rstrip()
-    assert len(good.encode("utf-8")) <= 1700  # sanity: curated budget itself is respected
+    assert len(good.encode("utf-8")) <= 1300  # sanity: curated budget itself is respected
     deps = _deps(posts, _gql(review_nodes=[_node()]), llm=lambda prompt: good)
     rc = run_sweep(_cfg(curate=True), deps)
     assert rc == 0

@@ -383,3 +383,39 @@ def test_make_run_llm_passes_devnull_stdin():
     cfg = WorksweepConfig(repos=("pb-www",), username="me", discord_webhook="")
     make_run_llm(cfg, run_subprocess=fake_run)("prompt")
     assert seen["stdin"] is sp.DEVNULL
+
+
+# --- linkify (deterministic links after validation) --------------------------
+
+def _rec_with_url(number, id_, url, kind="review_request", executor="magi-review"):
+    from worksweep.models import QueueRecord, WorkItem
+    return QueueRecord(number=number, first_seen="t", last_seen="t",
+                       item=WorkItem(schema_version=1, id=id_, repo="pb-www", kind=kind,
+                                     executor=executor, risk="low", why="", web_url=url,
+                                     sha="s", status="proposed"))
+
+
+def test_linkify_mr_and_issue_refs():
+    from worksweep.curator import linkify
+    recs = [_rec_with_url(153, "review:pb-www!4010", "https://gitlab.com/g/pb-www/-/merge_requests/4010"),
+            _rec_with_url(175, "issue:pb-www#1775", "https://gitlab.com/g/pb-www/-/work_items/1775",
+                          kind="issue", executor="implement")]
+    out = linkify("153. pb-www !4010 -- x\n175. pb-www #1775 -- y\n9 held: 66, 112", recs)
+    assert "[!4010](<https://gitlab.com/g/pb-www/-/merge_requests/4010>)" in out
+    assert "[#1775](<https://gitlab.com/g/pb-www/-/work_items/1775>)" in out
+    assert "9 held: 66, 112" in out          # bare queue numbers untouched
+
+
+def test_linkify_leaves_unknown_refs_and_does_not_double_link():
+    from worksweep.curator import linkify
+    recs = [_rec_with_url(1, "review:pb-www!4010", "https://gl/-/merge_requests/4010")]
+    once = linkify("see !4010 and !9999", recs)
+    assert once.count("[!4010]") == 1 and "!9999" in once and "[!9999]" not in once
+    assert linkify(once, recs) == once        # idempotent
+
+
+def test_linkify_never_invents_urls_from_text():
+    from worksweep.curator import linkify
+    # a record whose web_url is empty contributes no link
+    recs = [_rec_with_url(1, "review:pb-www!4010", "")]
+    assert linkify("!4010", recs) == "!4010"
