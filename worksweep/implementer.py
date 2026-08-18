@@ -27,13 +27,12 @@ nothing this executor produces can be merged by accident.
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
 from dataclasses import dataclass, replace as _dc_replace
 from typing import Callable, FrozenSet, List, Optional, Sequence
 
-from . import devslots
+from . import checkouts, devslots
 from .devslots import DevBox
 from .models import MergeRequest, WorkItem
 from .runner import NeedsInputError, RunnerError, extract_verdict, find_report
@@ -374,10 +373,14 @@ def execute(item: WorkItem, cfg, boxes: Sequence[DevBox],
             run_ssh: Callable[[str, str], str] = None,
             http_get: Callable[[str], int] = None) -> ImplementResult:
     """Implement one approved assigned issue. See the module docstring for the
-    three-outcome contract."""
-    checkout = os.path.join(cfg.checkouts_root or "", item.repo)
-    if not os.path.isdir(checkout):
-        raise RunnerError(f"no checkout for {item.repo} at {checkout}")
+    three-outcome contract.
+
+    Runs in a DEDICATED git worktree (see checkouts.worktree_for), not the
+    shared `<checkouts_root>/<repo>` clone -- a keep-current claim's
+    `checkout -B` in that same shared clone could otherwise switch the
+    branch out from under this run's live `/rubric:do` (review fix C1,
+    2026-08-18)."""
+    checkout = checkouts.worktree_for(cfg, item.repo, "implement", run_subprocess)
     if run_ssh is None or http_get is None:
         raise RunnerError("implement executor wired without an ssh/http edge")
     iid = issue_iid(item)

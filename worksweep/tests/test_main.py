@@ -74,6 +74,13 @@ def test_main_discord_posts_multiple_messages_for_long_digest(monkeypatch, tmp_p
                         lambda raw, user, repos: ([], many, []))
     monkeypatch.setattr(wsmain.collectors, "collect_todos", lambda: [])
     monkeypatch.setattr(wsmain.collectors, "collect_issues", lambda repo, user: [])
+    # M4 Task H: main() always wires a real diverged-commits REST edge for
+    # the digest path -- without this stub, 60 authored MRs means 60 real
+    # `glab api ...` subprocess spawns (hermetic-suite violation; this alone
+    # turned this test from ~0.05s into ~48s). 0 < stale_threshold, so no
+    # stale items -- the "120 items" count below is unaffected.
+    monkeypatch.setattr(wsmain.collectors, "collect_diverged_commits_count",
+                        lambda repo, iid: 0)
 
     posted = []
     monkeypatch.setattr(wsmain, "_post_discord", lambda wh, content: posted.append(content))
@@ -130,6 +137,9 @@ def test_post_persists_queue_and_posted_number_matches_record_number(monkeypatch
         lambda raw, user, repos: ([], [_mr(iid=3890, description="no link")], []))
     monkeypatch.setattr(wsmain.collectors, "collect_todos", lambda: [])
     monkeypatch.setattr(wsmain.collectors, "collect_issues", lambda repo, user: [])
+    # M4 Task H: see the long-digest test above -- same hermetic-suite fix.
+    monkeypatch.setattr(wsmain.collectors, "collect_diverged_commits_count",
+                        lambda repo, iid: 0)
 
     posted = []
     monkeypatch.setattr(wsmain, "_post_discord", lambda wh, content: posted.append(content))

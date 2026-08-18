@@ -364,11 +364,17 @@ class _Edges:
         return 200
 
 
+def _worktree(tmp_path):
+    """review fix C1: implement runs in its own worktree
+    (<checkouts_root>/.worktrees/<repo>-implement), not the shared clone."""
+    return tmp_path / ".worktrees" / "pb-www-implement"
+
+
 def _run_execute(tmp_path, edges=None, boxes=None, cfg=None, item=None):
-    co = tmp_path / "pb-www"
-    co.mkdir(exist_ok=True)
+    root = tmp_path / "pb-www"
+    root.mkdir(exist_ok=True)
     edges = edges or _Edges()
-    edges.checkout = str(co)
+    edges.checkout = str(_worktree(tmp_path))
     return execute(item or _item(), cfg or _cfg(tmp_path),
                    boxes if boxes is not None else [_box()],
                    run_subprocess=edges.run, run_ssh=edges.ssh,
@@ -396,7 +402,7 @@ def test_execute_happy_path(tmp_path):
     do_call = next(kw for c, kw in edges.calls
                    if c[0] == "claude" and c[2].startswith("/rubric:do"))
     assert do_call["timeout"] == 5400
-    assert do_call["cwd"] == str(tmp_path / "pb-www")
+    assert do_call["cwd"] == str(_worktree(tmp_path))
     # push happened before the box sync, and the box sync verified the sha
     assert edges.ssh_calls and edges.http_calls == [result.dev_url]
 
@@ -538,9 +544,9 @@ def test_annotate_boxes_attaches_tier_and_mr_iid():
 def _e2e(tmp_path, edges):
     from worksweep.models import QueueRecord
     from worksweep.runner import run_once
-    co = tmp_path / "pb-www"
-    co.mkdir(exist_ok=True)
-    edges.checkout = str(co)
+    root = tmp_path / "pb-www"
+    root.mkdir(exist_ok=True)
+    edges.checkout = str(_worktree(tmp_path))
     rec = QueueRecord(number=7, first_seen=NOW, last_seen=NOW, item=_item())
     state = {"records": [rec]}
     posts = []

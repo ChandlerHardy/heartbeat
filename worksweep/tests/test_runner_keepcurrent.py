@@ -188,13 +188,45 @@ def test_run_once_keep_current_and_magi_review_both_run_one_pass(tmp_path):
     assert final == {1: "done", 2: "approved"}    # keep-current waits its turn
 
 
-def test_run_once_keep_current_does_not_touch_implement_lock(tmp_path):
+def test_run_once_keep_current_and_implement_use_different_worktrees(tmp_path):
+    """review fix C1: keep-current and implement must resolve to DIFFERENT
+    checkout directories for the same repo. Lock-file independence (a live
+    implement run holding its own lock doesn't block keep-current, asserted
+    below too) was the ORIGINAL guard here -- but it's not what actually
+    prevents the collision this finding named: a keep-current `checkout -B`
+    running concurrently with a live 90-min implement run in the SAME shared
+    clone could switch the branch out from under it regardless of which
+    locks either held. Worktree separation (checkouts.worktree_for) is the
+    real defense; this test asserts THAT property, not just the lock one."""
+    import subprocess as sp
+
+    from worksweep.checkouts import worktree_for
     from worksweep.runner import acquire_lock
+
+    cfg = _cfg(tmp_path)
+    (tmp_path / "pb-www").mkdir()
+
+    def fake_run(cmd, **kw):
+        return sp.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    used = {"implement": worktree_for(cfg, "pb-www", "implement", fake_run)}
+
+    def execute_keep_current(item, c):
+        used["keep-current"] = worktree_for(c, item.repo, "keep-current", fake_run)
+        return _result()
+
     locks = _locks(tmp_path)
-    assert acquire_lock(locks["implement_lock_path"])   # implement lock held elsewhere
-    deps, posts, saves, state = _deps([_rec(1)])
-    assert run_once(_cfg(tmp_path), deps, **locks) == 0
-    assert state["records"][0].item.status == "done"
+    assert acquire_lock(locks["implement_lock_path"])   # a live implement run holds its own lock
+    deps, posts, saves, state = _deps([_rec(1)],
+                                      execute_keep_current=execute_keep_current)
+    assert run_once(cfg, deps, **locks) == 0
+    assert state["records"][0].item.status == "done"      # lock independence held
+
+    # the actual safety property: two DIFFERENT directories, so a live
+    # implement checkout is never touched by keep-current's checkout -B.
+    assert used["keep-current"] != used["implement"]
+    assert used["keep-current"] == str(tmp_path / ".worktrees" / "pb-www-keep-current")
+    assert used["implement"] == str(tmp_path / ".worktrees" / "pb-www-implement")
 
 
 def test_run_once_without_keep_current_deps_still_runs_magi(tmp_path):

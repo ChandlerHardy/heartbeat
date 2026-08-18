@@ -391,12 +391,20 @@ def _execute_implement(item, cfg, boxes):
 
 
 def _execute_keep_current(item, cfg):
-    """Real keep-current edge: subprocess + the longer-budget sync ssh + an
-    http probe. `cfg.dev_boxes` is the raw box-config list — keepcurrent.
-    execute probes it itself (devslots.probe) to find whichever box, if any,
-    currently has the stale branch checked out."""
+    """Real keep-current edge: subprocess + two ssh budgets + an http probe.
+    `cfg.dev_boxes` is the raw box-config list — keepcurrent.execute probes
+    it itself (devslots.probe) to find whichever box, if any, currently has
+    the stale branch checked out.
+
+    review fix I5: that probe is a fan-out over EVERY configured box, so it
+    gets the plain (20s) `run_ssh` edge — the same one `_implement_boxes`
+    uses for its own probing. Only `sync_to_box`, which touches exactly ONE
+    box once it's found, gets the longer 300s-wrapped edge (mirrors
+    `_execute_implement`'s single sync-budget edge above).
+    """
     return keepcurrent.execute(
         item, cfg, list(cfg.dev_boxes), run_subprocess=subprocess.run,
+        run_ssh_probe=run_ssh,
         run_ssh=lambda host, command: run_ssh(
             host, command, timeout=_SSH_SYNC_TIMEOUT_SECONDS),
         http_get=http_status)
