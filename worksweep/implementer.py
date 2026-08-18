@@ -158,8 +158,9 @@ def select_slot(boxes: Sequence[DevBox]) -> Optional[DevBox]:
 # ---------------------------------------------------------------------------
 
 def sync_to_box(box: DevBox, branch: str, run_ssh: Callable[[str, str], str],
-                http_get: Callable[[str], int],
-                expected_sha: str = "") -> str:
+                http_get: Callable[[str], int], expected_sha: str = "",
+                claim_branch: Optional[str] = None,
+                claim_sha: Optional[str] = None) -> str:
     """Put `branch` on the dev box and PROVE it landed.
 
     Ported from ~/bin/git-push-sync (hardened 2026-08-17): `checkout -B` from
@@ -168,14 +169,52 @@ def sync_to_box(box: DevBox, branch: str, run_ssh: Callable[[str, str], str],
     boxes ended up on the wrong branch while the script still said "Done".
     Verification is the point of this function: sha equality plus an HTTP 200,
     or RunnerError. Never returns on a half-landed sync.
+
+    Two safety rules the shell script does not have, because this runs
+    unattended against boxes other people use:
+
+    1. **Drift check.** The box is re-probed and must still be on the exact
+       branch+sha it was classified `free`/`handed_off` on (`claim_branch`/
+       `claim_sha`, defaulting to what `devslots.probe` saw). Up to 90 minutes
+       pass between the claim and this call; if a human checked something out
+       in the meantime the box is theirs, and we abort instead of yanking it.
+    2. **Only drop OUR stash.** `git stash -u` is a no-op on a clean tree, so
+       an unconditional `git stash drop` would delete whatever stash@{0}
+       already belonged to whoever uses that box. The drop is guarded by a
+       before/after stash count.
     """
+    expect_branch = box.branch if claim_branch is None else claim_branch
+    expect_sha = box.sha if claim_sha is None else claim_sha
+    if expect_branch:
+        try:
+            raw = run_ssh(box.host, f"cd '{box.path}' && git branch "
+                                    f"--show-current && git rev-parse HEAD")
+        except Exception as e:
+            raise RunnerError(f"could not re-probe {box.name} ({box.host}) "
+                              f"before sync: {e}")
+        probe = [ln.strip() for ln in (raw or "").splitlines() if ln.strip()]
+        now_branch = probe[0] if probe else ""
+        now_sha = probe[1] if len(probe) > 1 else ""
+        drifted = (now_branch != expect_branch
+                   or (expect_sha and now_sha and now_sha != expect_sha))
+        if drifted:
+            raise RunnerError(
+                f"{box.name} moved to {now_branch or '(unknown)'}@"
+                f"{(now_sha or '?')[:8]} since it was claimed (expected "
+                f"{expect_branch}@{(expect_sha or '?')[:8]}) — someone else "
+                f"is using it; not taking it over")
+
     cmd = ("set -e\n"
            f"cd '{box.path}'\n"
            "git merge --abort 2>/dev/null || true\n"
+           "stash_before=$(git stash list | wc -l)\n"
            "git stash -u >/dev/null 2>&1 || true\n"
+           "stash_after=$(git stash list | wc -l)\n"
            f"git fetch origin '{branch}'\n"
            f"git checkout -q -B '{branch}' 'origin/{branch}'\n"
-           "git stash drop >/dev/null 2>&1 || true\n"
+           # Drop ONLY a stash this run created — never a pre-existing one.
+           "if [ \"$stash_after\" -gt \"$stash_before\" ]; then "
+           "git stash drop >/dev/null 2>&1 || true; fi\n"
            "git rev-parse HEAD")
     try:
         raw = run_ssh(box.host, cmd)
@@ -220,9 +259,8 @@ def build_description(checkout: str, cfg, iid: int, title: str, dev_url: str,
         f"Diffstat (git diff --stat origin/master..HEAD):\n{stat}\n")
     body = ""
     try:
-        proc = run_subprocess([cfg.claude_bin, "-p", prompt], cwd=checkout,
-                              capture_output=True, text=True,
-                              timeout=_DESC_TIMEOUT)
+        proc = _run([cfg.claude_bin, "-p", prompt], run_subprocess,
+                    cwd=checkout, timeout=_DESC_TIMEOUT)
         if proc.returncode == 0:
             body = (proc.stdout or "").strip()
     except Exception as e:                      # timeout, missing binary, ...
@@ -257,50 +295,60 @@ def open_draft_mr(checkout: str, iid: int, title: str, description: str,
            "--title", f"feat(#{iid}): {title}",
            "--description", description]
     try:
-        proc = run_subprocess(cmd, cwd=checkout, capture_output=True, text=True,
-                              timeout=_GLAB_TIMEOUT)
+        proc = _run(cmd, run_subprocess, cwd=checkout, timeout=_GLAB_TIMEOUT)
     except subprocess.TimeoutExpired:
         raise RunnerError(f"glab mr create timed out after {_GLAB_TIMEOUT}s")
     out = f"{proc.stdout or ''}\n{proc.stderr or ''}"
     if proc.returncode != 0:
         raise RunnerError(f"glab mr create exited {proc.returncode}: "
                           f"{_tail(out)}")
-    m = re.search(r"!(\d+)", out)
-    if not m:
+    # glab prints `!42 <url>`, but the exact line has changed between
+    # versions — accept either form and only give up when BOTH miss, since
+    # by this point the MR really does exist and losing its iid means losing
+    # the tribunal run and the record.
+    url_m = re.search(r"https?://\S*/-/merge_requests/(\d+)", out)
+    bang_m = re.search(r"!(\d+)", out)
+    if bang_m:
+        mr_iid = int(bang_m.group(1))
+    elif url_m:
+        mr_iid = int(url_m.group(1))
+    else:
         raise RunnerError(f"glab mr create: could not parse MR iid from "
                           f"output: {_tail(out)}")
-    mr_iid = int(m.group(1))
-    url_m = re.search(r"https?://\S*/-/merge_requests/\d+", out)
-    _ensure_draft(checkout, mr_iid, run_subprocess)
-    return mr_iid, (url_m.group(0) if url_m else "")
+    mr_url = url_m.group(0) if url_m else ""
+    _ensure_draft(checkout, mr_iid, run_subprocess, mr_url)
+    return mr_iid, mr_url
 
 
-def _ensure_draft(checkout: str, mr_iid: int, run_subprocess: Callable) -> None:
+def _ensure_draft(checkout: str, mr_iid: int, run_subprocess: Callable,
+                  mr_url: str = "") -> None:
     draft = _is_draft(checkout, mr_iid, run_subprocess)
     if draft is True:
         return
     # Unknown (view/parse failed) or explicitly not draft -> force it.
     try:
-        proc = run_subprocess(["glab", "mr", "update", str(mr_iid), "--draft",
-                               "--yes"], cwd=checkout, capture_output=True,
-                              text=True, timeout=_GLAB_TIMEOUT)
+        proc = _run(["glab", "mr", "update", str(mr_iid), "--draft", "--yes"],
+                    run_subprocess, cwd=checkout, timeout=_GLAB_TIMEOUT)
         ok = proc.returncode == 0
         err = _tail(f"{proc.stdout or ''}\n{proc.stderr or ''}")
     except Exception as e:
         ok, err = False, str(e)
+    # `glab mr update --draft` exiting 0 is not proof: read the state back.
+    if ok and _is_draft(checkout, mr_iid, run_subprocess) is not True:
+        ok, err = False, "update exited 0 but the MR still reads non-draft"
     if not ok:
         raise RunnerError(f"!{mr_iid} is not a draft and could not be marked "
                           f"draft ({err}) — mark it draft by hand before "
-                          f"anyone merges it")
+                          f"anyone merges it"
+                          + (f": {mr_url}" if mr_url else ""))
 
 
 def _is_draft(checkout: str, mr_iid: int,
               run_subprocess: Callable) -> Optional[bool]:
     """True/False, or None when glab/JSON didn't answer (caller forces draft)."""
     try:
-        proc = run_subprocess(["glab", "mr", "view", str(mr_iid), "-F", "json"],
-                              cwd=checkout, capture_output=True, text=True,
-                              timeout=_GLAB_TIMEOUT)
+        proc = _run(["glab", "mr", "view", str(mr_iid), "-F", "json"],
+                    run_subprocess, cwd=checkout, timeout=_GLAB_TIMEOUT)
         if proc.returncode != 0:
             return None
         data = json.loads(proc.stdout or "{}")
@@ -351,9 +399,9 @@ def execute(item: WorkItem, cfg, boxes: Sequence[DevBox],
 
     # --- the long pole: full Ferdinand ceremony via /rubric:do -------------
     try:
-        proc = run_subprocess([cfg.claude_bin, "-p", f"/rubric:do #{iid}"],
-                              cwd=checkout, capture_output=True, text=True,
-                              timeout=cfg.implement_timeout)
+        proc = _run([cfg.claude_bin, "-p", f"/rubric:do #{iid}"],
+                    run_subprocess, cwd=checkout,
+                    timeout=cfg.implement_timeout)
     except subprocess.TimeoutExpired:
         raise RunnerError(f"/rubric:do #{iid} exceeded "
                           f"{cfg.implement_timeout}s")
@@ -381,7 +429,10 @@ def execute(item: WorkItem, cfg, boxes: Sequence[DevBox],
          timeout=_PUSH_TIMEOUT)
     # Sync BEFORE the MR: a box that won't serve the branch means no MR at all,
     # rather than a Draft MR advertising a dev URL that 502s.
-    sync_to_box(slot, branch, run_ssh, http_get, expected_sha=head)
+    # claim_branch/claim_sha are what devslots.probe saw when this box was
+    # classified free/handed_off — sync_to_box refuses the box if it moved.
+    sync_to_box(slot, branch, run_ssh, http_get, expected_sha=head,
+                claim_branch=slot.branch, claim_sha=slot.sha)
 
     description = build_description(checkout, cfg, iid, item.title or "",
                                     slot.url, branch, log, run_subprocess)
@@ -408,9 +459,9 @@ def _magi_advisory(checkout: str, cfg, mr_iid: int,
     item (which would strand a real Draft MR under an `error` record)."""
     note = ""
     try:
-        proc = run_subprocess(
+        proc = _run(
             [cfg.claude_bin, "-p", f"/magi:magi-review !{mr_iid} --advisory"],
-            cwd=checkout, capture_output=True, text=True, timeout=_MAGI_TIMEOUT)
+            run_subprocess, cwd=checkout, timeout=_MAGI_TIMEOUT)
         if proc.returncode != 0:
             note = (f"magi-review !{mr_iid} exited {proc.returncode}: "
                     f"{_tail(f'{proc.stdout or ''}{proc.stderr or ''}', 5)}")
@@ -422,12 +473,25 @@ def _magi_advisory(checkout: str, cfg, mr_iid: int,
     return report, extract_verdict(report), note
 
 
+def _run(cmd: List[str], run_subprocess: Callable, **kw):
+    """The ONLY way this module spawns a process.
+
+    `stdin=subprocess.DEVNULL` is non-negotiable and is why this helper
+    exists: under launchd there is no TTY, and an inherited stdin makes
+    `claude -p` exit 1 after ~3s and makes `glab` sit on an interactive
+    prompt for the whole timeout (fixed once already in c0e7791 — this
+    module must not reintroduce it call by call).
+    """
+    kw.setdefault("capture_output", True)
+    kw.setdefault("text", True)
+    return run_subprocess(cmd, stdin=subprocess.DEVNULL, **kw)
+
+
 def _git(run_subprocess: Callable, checkout: str, args: List[str],
          timeout: int = _GIT_TIMEOUT, allow_fail: bool = False) -> str:
     cmd = ["git", "-C", checkout] + list(args)
     try:
-        proc = run_subprocess(cmd, capture_output=True, text=True,
-                              timeout=timeout)
+        proc = _run(cmd, run_subprocess, timeout=timeout)
     except subprocess.TimeoutExpired:
         if allow_fail:
             return ""

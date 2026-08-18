@@ -122,3 +122,19 @@ def test_run_subcommand_wires_both_executors(tmp_path):
     for key in ("load", "save", "post", "now", "execute", "boxes",
                 "execute_implement"):
         assert key in deps, f"run deps missing {key}"
+
+
+def test_run_ssh_pins_stdin_to_devnull():
+    """C1's sibling: ssh must not hand the runner's stdin to the remote."""
+    import subprocess
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen.update(kw)
+        seen["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="ok\n", stderr="")
+
+    with patch("subprocess.run", fake_run):
+        assert m.run_ssh("host", "hostname") == "ok\n"
+    assert seen["stdin"] is subprocess.DEVNULL
+    assert seen["cmd"][:2] == ["ssh", "host"]

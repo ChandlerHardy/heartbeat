@@ -132,8 +132,15 @@ def reconcile(existing: List[QueueRecord], fresh: List[WorkItem],
                 continue
             merged = dataclasses.replace(it, status="proposed")
         elif prior.item.sha == it.sha:
+            # Carry the executor's own bookkeeping across the sweep. `dev_box`
+            # in particular: issue items have sha="" so this branch fires
+            # EVERY sweep, and rebuilding from the fresh item (dev_box="")
+            # would wipe a live claim -- the claimed-box exclusion would go
+            # empty and the next digest would offer an occupied box as free.
             merged = dataclasses.replace(it, status=ps,
-                                         claimed_at=prior.item.claimed_at)
+                                         claimed_at=prior.item.claimed_at,
+                                         dev_box=prior.item.dev_box,
+                                         mr_iid=prior.item.mr_iid)
         else:
             merged = dataclasses.replace(it, status="proposed")
         out.append(QueueRecord(number=prior.number, item=merged,

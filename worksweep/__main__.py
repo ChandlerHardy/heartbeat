@@ -123,7 +123,11 @@ def run_ssh(host: str, command: str, timeout: int = _SSH_TIMEOUT_SECONDS) -> str
     (devslots.probe) catch this per-box and degrade to an unknown branch/sha
     rather than losing the whole sweep to one unreachable box."""
     try:
+        # stdin=DEVNULL (the `ssh -n` equivalent): without it ssh hands the
+        # parent's stdin to the remote command, which under launchd is the
+        # same non-TTY hazard fixed for `claude -p` in c0e7791.
         result = subprocess.run(["ssh", host, command],
+                                stdin=subprocess.DEVNULL,
                                 capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"ssh {host} timed out after {timeout}s")

@@ -93,11 +93,28 @@ def test_select_slot_prefers_free_then_handed_off_then_none():
 # sync_to_box (ssh + http edges injected)
 # --------------------------------------------------------------------------
 
+def _ssh_seq(*responses):
+    """Fake ssh returning the scripted responses in order, recording commands."""
+    calls = []
+
+    def run(host, command):
+        calls.append(command)
+        idx = min(len(calls) - 1, len(responses) - 1)
+        return responses[idx]
+
+    run.calls = calls
+    return run
+
+
 def test_sync_to_box_runs_hardened_recipe_and_verifies():
     seen = {}
+    calls = []
 
     def fake_ssh(host, cmd):
+        calls.append(cmd)
         seen["host"], seen["cmd"] = host, cmd
+        if len(calls) == 1:
+            return "master\ndeadbeef\n"      # drift re-probe
         return "remote: feat/1775-x @ abc123\nabc123\n"
 
     codes = []
@@ -111,15 +128,21 @@ def test_sync_to_box_runs_hardened_recipe_and_verifies():
     assert codes == ["https://dev1.chandlerhardy-dev.performancebeef.com/"]
 
 
+def _ok_probe(*sync_responses):
+    """ssh fake: the drift re-probe answers with the box's claim-time state,
+    then the sync half answers with `sync_responses`."""
+    return _ssh_seq("master\ndeadbeef\n", *sync_responses)
+
+
 def test_sync_to_box_sha_mismatch_raises():
     with pytest.raises(RunnerError, match="did NOT land"):
-        sync_to_box(_box(), "b", lambda h, c: "zzz\n", lambda url: 200,
+        sync_to_box(_box(), "b", _ok_probe("zzz\n"), lambda url: 200,
                     expected_sha="abc123")
 
 
 def test_sync_to_box_non_200_raises():
     with pytest.raises(RunnerError, match="HTTP 502"):
-        sync_to_box(_box(), "b", lambda h, c: "abc\n", lambda url: 502,
+        sync_to_box(_box(), "b", _ok_probe("abc\n"), lambda url: 502,
                     expected_sha="abc")
 
 
@@ -136,7 +159,7 @@ def test_sync_to_box_http_failure_raises_runner_error():
         raise OSError("connection reset")
 
     with pytest.raises(RunnerError, match="connection reset"):
-        sync_to_box(_box(), "b", lambda h, c: "abc\n", boom, expected_sha="abc")
+        sync_to_box(_box(), "b", _ok_probe("abc\n"), boom, expected_sha="abc")
 
 
 # --------------------------------------------------------------------------
@@ -226,11 +249,24 @@ def test_open_draft_mr_unparseable_output_raises():
 
 
 def test_open_draft_mr_marks_draft_when_glab_did_not():
-    calls = []
-    open_draft_mr("/co", 1, "T", "b", "br",
-                  _glab_run(view_json='{"iid": 42, "draft": false, "title": "x"}',
-                            calls=calls))
+    """Read-back says non-draft -> force it -> read back AGAIN and accept."""
+    calls, views = [], {"n": 0}
+
+    def run(cmd, **kw):
+        calls.append(list(cmd))
+        if cmd[:3] == ["glab", "mr", "create"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="!42 https://gl/x/-/merge_requests/42\n", stderr="")
+        if cmd[:3] == ["glab", "mr", "view"]:
+            views["n"] += 1
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout=('{"draft": false}' if views["n"] == 1
+                                else '{"draft": true}'), stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    open_draft_mr("/co", 1, "T", "b", "br", run)
     assert ["glab", "mr", "update", "42", "--draft", "--yes"] in calls
+    assert views["n"] == 2      # the forced update is verified, not trusted
 
 
 def test_open_draft_mr_raises_when_it_cannot_be_made_draft():
@@ -269,6 +305,10 @@ class _Edges:
         self.magi_rc = kw.get("magi_rc", 0)
         self.report_body = kw.get("report_body", "## Verdict\nSHIP with nits\n")
         self.checkout = kw.get("checkout", "")
+        # what the box reports back from the sync half (default: it landed)
+        self.box_sha = kw.get("box_sha", None)
+        # what the drift re-probe sees (default: exactly what was claimed)
+        self.probe_out = kw.get("probe_out", "master\ndeadbeef\n")
 
     def run(self, cmd, **kw):
         self.calls.append((list(cmd), kw))
@@ -314,7 +354,10 @@ class _Edges:
 
     def ssh(self, host, command):
         self.ssh_calls.append((host, command))
-        return f"remote\n{self.head_sha}\n"
+        if len(self.ssh_calls) == 1:
+            return self.probe_out
+        landed = self.head_sha if self.box_sha is None else self.box_sha
+        return f"remote\n{landed}\n"
 
     def http(self, url):
         self.http_calls.append(url)
@@ -459,12 +502,7 @@ def test_execute_handed_off_box_records_reassignment(tmp_path):
 def test_execute_sync_failure_raises_after_mr_is_not_created(tmp_path):
     """Sync happens before the MR is opened, so a dead box never leaves a
     dangling Draft MR behind."""
-    class S(_Edges):
-        def ssh(self, host, command):
-            self.ssh_calls.append((host, command))
-            return "remote\nDIFFERENT\n"
-
-    edges = S()
+    edges = _Edges(box_sha="DIFFERENT")
     with pytest.raises(RunnerError, match="did NOT land"):
         _run_execute(tmp_path, edges=edges)
     assert not any("glab" in c[0] for c, _ in edges.calls)
@@ -542,12 +580,141 @@ def test_end_to_end_halt_records_needs_input_and_posts_question(tmp_path):
 
 
 def test_end_to_end_sync_failure_records_error_and_posts_warning(tmp_path):
-    class S(_Edges):
-        def ssh(self, host, command):
-            return "remote\nNOPE\n"
-
-    rc, rec, posts = _e2e(tmp_path, S())
+    rc, rec, posts = _e2e(tmp_path, _Edges(box_sha="NOPE"))
     assert rc == 1
     assert rec.item.status == "error"
     assert "did NOT land" in rec.item.error_summary
     assert any(p.startswith("⚠️") and "did NOT land" in p for p in posts)
+
+
+# ==========================================================================
+# Task G review fixes (2026-08-18)
+# ==========================================================================
+
+# --- C1: every subprocess gets stdin=DEVNULL -------------------------------
+
+def test_every_subprocess_gets_devnull_stdin(tmp_path):
+    """c0e7791 all over again: under launchd there is no TTY, `claude -p`
+    exits 1 in ~3s on an inherited stdin and `glab` blocks on a prompt for
+    the full timeout. EVERY spawn this module makes must pin stdin."""
+    _, edges = _run_execute(tmp_path)
+    spawned = [(c, kw) for c, kw in edges.calls]
+    assert spawned, "execute spawned nothing"
+    for cmd, kw in spawned:
+        assert kw.get("stdin") is subprocess.DEVNULL, \
+            f"{cmd[0]} {cmd[1:3]} was spawned without stdin=DEVNULL"
+    kinds = {c[0] for c, _ in spawned}
+    assert {"git", "claude", "glab"} <= kinds
+
+
+def test_devnull_stdin_on_the_description_and_magi_passes(tmp_path):
+    _, edges = _run_execute(tmp_path)
+    claude_calls = [(c, kw) for c, kw in edges.calls if c[0] == "claude"]
+    prompts = [c[2][:20] for c, _ in claude_calls]
+    assert any(p.startswith("/rubric:do") for p in prompts)
+    assert any(p.startswith("/magi:magi-review") for p in prompts)
+    assert any(p.startswith("Write the merge") for p in prompts)
+    for _, kw in claude_calls:
+        assert kw["stdin"] is subprocess.DEVNULL
+
+
+# --- I3: sync_to_box safety ------------------------------------------------
+
+def test_sync_to_box_only_drops_a_stash_it_created():
+    """A reviewer's pre-existing stash@{0} must survive: the drop is guarded
+    by a before/after stash-count comparison, never unconditional."""
+    ssh = _ssh_seq("master\ndeadbeef\n", "abc123\n")
+    sync_to_box(_box(), "feat/1775-x", ssh, lambda u: 200, expected_sha="abc123")
+    script = ssh.calls[-1]
+    assert "git stash list" in script
+    assert "git stash drop" in script
+    drop_line = next(ln for ln in script.splitlines() if "git stash drop" in ln)
+    # the drop must be inside a guard, not a bare statement
+    assert drop_line.strip().startswith("if ") or "then" in drop_line
+
+
+def test_sync_to_box_aborts_when_the_box_moved_since_it_was_claimed():
+    ssh = _ssh_seq("someone-elses-branch\nffff\n", "abc123\n")
+    with pytest.raises(RunnerError, match="moved"):
+        sync_to_box(_box(), "feat/1775-x", ssh, lambda u: 200,
+                    expected_sha="abc123")
+    assert len(ssh.calls) == 1          # never ran the write half
+
+
+def test_sync_to_box_aborts_when_the_box_sha_moved():
+    ssh = _ssh_seq("master\nSOMETHING-ELSE\n", "abc123\n")
+    with pytest.raises(RunnerError, match="moved"):
+        sync_to_box(_box(), "feat/1775-x", ssh, lambda u: 200,
+                    expected_sha="abc123")
+
+
+def test_sync_to_box_accepts_explicit_claim_time_state():
+    ssh = _ssh_seq("other\nzzz\n", "abc123\n")
+    got = sync_to_box(_box(), "feat/1775-x", ssh, lambda u: 200,
+                      expected_sha="abc123", claim_branch="other",
+                      claim_sha="zzz")
+    assert got == "abc123"
+
+
+def test_sync_to_box_skips_the_drift_check_when_claim_state_is_unknown():
+    import dataclasses
+    ssh = _ssh_seq("abc123\n")
+    box = dataclasses.replace(_box(), branch="", sha="")
+    assert sync_to_box(box, "b", ssh, lambda u: 200, expected_sha="abc123") \
+        == "abc123"
+
+
+def test_sync_to_box_probe_failure_raises():
+    def boom(host, cmd):
+        raise RuntimeError("ssh timed out")
+
+    with pytest.raises(RunnerError, match="ssh timed out"):
+        sync_to_box(_box(), "b", boom, lambda u: 200)
+
+
+# --- I4: draft is proved, not hoped for ------------------------------------
+
+def test_open_draft_mr_raises_when_the_forced_update_did_not_take():
+    """update exits 0 but the read-back still says non-draft -> raise, and
+    name the orphan MR's URL so the ⚠️ is actionable."""
+    run = _glab_run(
+        create_out="!42 https://gl/x/-/merge_requests/42\n",
+        view_json='{"iid": 42, "draft": false}', update_rc=0)
+    with pytest.raises(RunnerError) as ei:
+        open_draft_mr("/co", 1, "T", "b", "br", run)
+    assert "not a draft" in str(ei.value)
+    assert "https://gl/x/-/merge_requests/42" in str(ei.value)
+
+
+def test_open_draft_mr_accepts_a_draft_confirmed_by_the_read_back():
+    seen = {"views": 0}
+
+    def run(cmd, **kw):
+        if cmd[:3] == ["glab", "mr", "create"]:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout="!42 https://gl/x/-/merge_requests/42\n", stderr="")
+        if cmd[:3] == ["glab", "mr", "view"]:
+            seen["views"] += 1
+            body = ('{"draft": false}' if seen["views"] == 1
+                    else '{"draft": true}')
+            return subprocess.CompletedProcess(cmd, 0, stdout=body, stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    mr_iid, url = open_draft_mr("/co", 1, "T", "b", "br", run)
+    assert mr_iid == 42 and seen["views"] == 2
+
+
+# --- I5: iid parse fallback ------------------------------------------------
+
+def test_open_draft_mr_parses_iid_from_the_url_when_bang_is_absent():
+    mr_iid, url = open_draft_mr(
+        "/co", 1, "T", "b", "br",
+        _glab_run(create_out="Created: https://gl/x/-/merge_requests/77\n"))
+    assert mr_iid == 77
+    assert url == "https://gl/x/-/merge_requests/77"
+
+
+def test_open_draft_mr_raises_only_when_both_forms_miss():
+    with pytest.raises(RunnerError, match="could not parse"):
+        open_draft_mr("/co", 1, "T", "b", "br",
+                      _glab_run(create_out="all done, nothing numeric here\n"))

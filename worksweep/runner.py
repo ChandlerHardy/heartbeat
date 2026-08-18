@@ -14,6 +14,7 @@ import subprocess
 import sys
 from typing import Callable, Dict, List, Optional, Tuple
 
+from .formatter import DISCORD_MAX_CHARS, _truncate_bytes
 from .models import QueueRecord, WorkItem
 
 STALE_RUNNING_MINUTES = 45
@@ -490,8 +491,10 @@ def _fail_and_post(deps, cfg, number: int, summary: str, kind: str) -> None:
     if _apply_to_fresh(
             deps, cfg, number,
             lambda fresh: fail(fresh, number, summary, deps["now"]())) is not None:
+        # A stderr tail can be kilobytes; Discord rejects an over-length post
+        # outright, which would turn a reported failure back into silence.
         _post(deps, cfg, f"⚠️ Worksweep runner: #{number} {kind} failed — "
-                         f"{summary}")
+                         + _truncate_bytes(summary or "", DISCORD_MAX_CHARS - 100))
 
 
 def _post(deps, cfg, content: str) -> None:

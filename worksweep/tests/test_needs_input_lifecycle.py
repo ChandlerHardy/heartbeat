@@ -116,3 +116,30 @@ def test_curated_digest_may_not_drop_a_needs_input_item():
     assert partition_counts(recs) == (1, 0)
     assert validate("nothing to see here", recs) is False
     assert validate("4. #1775 is waiting on your answer", recs) is True
+
+
+# --- C2 (Task G review): the dev-box claim must survive a sweep -------------
+
+def test_reconcile_preserves_dev_box_and_mr_iid_on_a_running_implement_item():
+    """Issue items carry sha="" so the same-sha branch fires EVERY sweep. If
+    it rebuilt from the fresh item, `dev_box` would be wiped and the next
+    digest would advertise an occupied box as free."""
+    import dataclasses
+    prior = QueueRecord(number=1, first_seen=T0, last_seen=T0,
+                        item=dataclasses.replace(_item(status="running"),
+                                                 dev_box="dev1", mr_iid=42,
+                                                 claimed_at=T0))
+    out = reconcile([prior], [_item()], T1)
+    assert out[0].item.status == "running"
+    assert out[0].item.dev_box == "dev1"
+    assert out[0].item.mr_iid == 42
+    assert out[0].item.claimed_at == T0
+
+
+def test_reconcile_preserves_dev_box_on_an_approved_implement_item():
+    import dataclasses
+    prior = QueueRecord(number=1, first_seen=T0, last_seen=T0,
+                        item=dataclasses.replace(_item(status="approved"),
+                                                 dev_box="dev4"))
+    out = reconcile([prior], [_item()], T1)
+    assert out[0].item.status == "approved" and out[0].item.dev_box == "dev4"

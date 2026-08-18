@@ -348,3 +348,17 @@ def test_run_once_implement_lock_is_released_after_a_crash(tmp_path):
     except KeyboardInterrupt:
         pass
     assert acquire_lock(locks["implement_lock_path"]) is True
+
+
+def test_fail_post_is_bounded_for_discord(tmp_path):
+    """I6: a 6 kB stderr tail must not produce a post Discord rejects."""
+    from worksweep.formatter import DISCORD_MAX_CHARS
+
+    def boom(item, cfg, boxes):
+        raise RunnerError("x" * 9000)
+
+    deps, posts, saves, state = _deps([_rec(1)], execute_implement=boom)
+    assert run_once(_cfg(tmp_path), deps, **_locks(tmp_path)) == 1
+    warn = next(p for p in posts if p.startswith("⚠️"))
+    assert len(warn.encode("utf-8")) <= DISCORD_MAX_CHARS
+    assert state["records"][0].item.status == "error"
