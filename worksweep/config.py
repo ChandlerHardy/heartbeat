@@ -34,6 +34,11 @@ class WorksweepConfig:
     # {"name","host","path","url"}. Absent/empty `runner.dev_boxes` -> ()
     # (dev-slot sensing off, matches the M3 "absent block -> graceful" pattern).
     dev_boxes: tuple = ()
+    # M4 Task H: an authored MR whose branch is this many (or more) commits
+    # behind master gets a `keep-current` item. GitLab's REST
+    # `diverged_commits_count` isn't in the GraphQL MR node, so this is
+    # sensed with one REST call per authored MR -- see collectors.
+    stale_threshold: int = 5
 
 
 def load_config(path: str | None = None) -> WorksweepConfig:
@@ -69,6 +74,13 @@ def load_config(path: str | None = None) -> WorksweepConfig:
     if not isinstance(dev_boxes_raw, list):
         raise RuntimeError(
             f"config runner.dev_boxes must be a list, got {type(dev_boxes_raw).__name__}")
+    stale_raw = rn.get("stale_threshold", 5)
+    try:
+        stale_threshold = int(stale_raw)
+    except (TypeError, ValueError):
+        raise RuntimeError(
+            f"config runner.stale_threshold must be an integer, "
+            f"got {stale_raw!r}")
     return WorksweepConfig(
         repos=tuple(gl.get("repos") or []),
         username=gl.get("username", ""),
@@ -82,4 +94,5 @@ def load_config(path: str | None = None) -> WorksweepConfig:
         implement_timeout=implement_timeout,
         curate=curate_raw,
         dev_boxes=tuple(dev_boxes_raw),
+        stale_threshold=stale_threshold,
     )

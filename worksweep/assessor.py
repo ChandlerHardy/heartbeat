@@ -218,6 +218,22 @@ def assess_issue(issue: Issue,
         title=issue.title)]
 
 
+def assess_stale(mr: MergeRequest, diverged: int, threshold: int) -> List[WorkItem]:
+    """An authored MR whose branch has fallen `threshold`+ commits behind
+    master (REST `diverged_commits_count`, not carried on the GraphQL node)
+    -- the `keep-current` executor merges master in and syncs the result to
+    whichever dev box serves the branch. Handed-off MRs are the CALLER's job
+    to exempt (run_sweep skips the REST call entirely for those -- the
+    maintainer will merge, not Chandler), not this function's."""
+    if diverged < threshold:
+        return []
+    return [WorkItem(
+        schema_version=1, id=f"stale:{mr.repo}!{mr.iid}",
+        repo=mr.repo, kind="stale", executor="keep-current", risk="low",
+        why=f"{diverged} commits behind master", web_url=mr.web_url,
+        sha=mr.sha, title=mr.title, branch=mr.source_branch)]
+
+
 def _normalize_todo_url(url: str) -> str:
     """Strip a Discord/GitLab note-anchor fragment (#note_...) and any
     trailing slash so URL-based matching ignores anchor/trailing-slash

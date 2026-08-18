@@ -155,3 +155,33 @@ def test_load_config_non_list_dev_boxes_raises_runtime_error():
         with pytest.raises(RuntimeError) as exc:
             load_config(p)
         assert "runner.dev_boxes" in str(exc.value)
+
+
+# M4 Task H — runner.stale_threshold: commits-behind-master threshold for
+# the keep-current sensor. Absent -> 5 (matches the plan's default).
+def test_load_config_stale_threshold_defaults_to_five():
+    with tempfile.TemporaryDirectory() as tmp:
+        p = _write(tmp, {"gitlab": {"username": "x", "repos": []}})
+        cfg = load_config(p)
+        assert cfg.stale_threshold == 5
+
+
+def test_load_config_reads_stale_threshold_from_runner_block():
+    with tempfile.TemporaryDirectory() as tmp:
+        p = _write(tmp, {
+            "gitlab": {"username": "x", "repos": []},
+            "runner": {"stale_threshold": 10},
+        })
+        cfg = load_config(p)
+        assert cfg.stale_threshold == 10
+
+
+def test_load_config_non_integer_stale_threshold_raises_runtime_error():
+    with tempfile.TemporaryDirectory() as tmp:
+        p = _write(tmp, {
+            "gitlab": {"username": "x", "repos": []},
+            "runner": {"stale_threshold": "five"},
+        })
+        with pytest.raises(RuntimeError) as exc:
+            load_config(p)
+        assert "runner.stale_threshold" in str(exc.value)

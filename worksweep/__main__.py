@@ -35,7 +35,7 @@ _SSH_TIMEOUT_SECONDS = 20
 _SSH_SYNC_TIMEOUT_SECONDS = 300
 _HTTP_PROBE_TIMEOUT_SECONDS = 20
 
-from . import assessor, collectors, curator, devslots, implementer
+from . import assessor, collectors, curator, devslots, implementer, keepcurrent
 from .approvals import apply_approvals
 from .config import WorksweepConfig, load_config
 from .discord_read import fetch_messages
@@ -254,6 +254,25 @@ def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
             items += assessor.assess_own_mr(
                 mr, cfg.username,
                 has_magi=lambda r, i, s: assessor.has_magi_done(records0, r, i, s))
+        # M4 Task H: stale-branch sensing — one REST call per authored MR
+        # that isn't already handed off (the maintainer will merge those;
+        # Chandler doesn't need a keep-current nag for someone else's merge).
+        # Entirely opt-in via deps["diverged_commits"] (absent -> skipped,
+        # matching the Task F ssh-dep pattern) and never fatal to the sweep:
+        # one bad glab call just degrades that MR's check to "unknown".
+        diverged_edge = deps.get("diverged_commits")
+        if diverged_edge is not None:
+            for mr in authored:
+                if assessor.is_handed_off(mr, cfg.username):
+                    continue
+                try:
+                    diverged = diverged_edge(mr.repo, mr.iid)
+                except Exception as e:
+                    print(f"worksweep: diverged-commits check for "
+                          f"{mr.repo}!{mr.iid} failed: "
+                          f"{type(e).__name__}: {e}", file=sys.stderr)
+                    continue
+                items += assessor.assess_stale(mr, diverged, cfg.stale_threshold)
         # An assigned-to-me MR not already surfaced as a review-requested or
         # authored item this sweep gets a lightweight triage item.
         tracked_mr_ids = {(mr.repo, mr.iid) for mr in review_mrs + authored}
@@ -371,6 +390,24 @@ def _execute_implement(item, cfg, boxes):
         http_get=http_status)
 
 
+def _execute_keep_current(item, cfg):
+    """Real keep-current edge: subprocess + the longer-budget sync ssh + an
+    http probe. `cfg.dev_boxes` is the raw box-config list — keepcurrent.
+    execute probes it itself (devslots.probe) to find whichever box, if any,
+    currently has the stale branch checked out."""
+    return keepcurrent.execute(
+        item, cfg, list(cfg.dev_boxes), run_subprocess=subprocess.run,
+        run_ssh=lambda host, command: run_ssh(
+            host, command, timeout=_SSH_SYNC_TIMEOUT_SECONDS),
+        http_get=http_status)
+
+
+def _dry_run_keep_current(item, cfg):
+    return keepcurrent.KeepCurrentResult(
+        iid=keepcurrent.iid_of(item), ahead_count=0, box_name="",
+        scss_recompiled=False, result_sha=item.sha, dev_url="")
+
+
 def _dry_run_implement(item, cfg, boxes):
     box = boxes[0] if boxes else None
     iid = implementer.issue_iid(item)
@@ -421,6 +458,8 @@ def main(argv=None) -> int:
             "boxes": lambda: _implement_boxes(cfg),
             "execute_implement": (_dry_run_implement if args.dry_run
                                   else _execute_implement),
+            "execute_keep_current": (_dry_run_keep_current if args.dry_run
+                                     else _execute_keep_current),
         }
         return _runner.run_once(cfg, deps)
 
@@ -448,6 +487,10 @@ def main(argv=None) -> int:
     # edges above, there's no side effect to preview around. run_sweep only
     # ever calls this when cfg.dev_boxes is non-empty.
     deps["ssh"] = run_ssh
+    # M4 Task H: stale-branch REST probe is read-only (one GET per authored
+    # MR), so --dry-run still runs it for real -- same reasoning as "ssh"
+    # above. run_sweep only ever calls it for authored MRs not handed off.
+    deps["diverged_commits"] = collectors.collect_diverged_commits_count
     return run_sweep(cfg, deps)
 
 

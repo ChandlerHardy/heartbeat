@@ -129,6 +129,26 @@ def collect_issues(repo: str, username: str) -> List[Issue]:
     return parse_issues(raw, repo)
 
 
+def collect_diverged_commits_count(repo: str, iid: int) -> int:
+    """M4 Task H: `divergedCommitsCount` isn't in the GraphQL MR node, so
+    keep-current sensing falls back to one REST call per authored MR (that
+    isn't already handed off). Raises via `_run_glab` on failure — the
+    caller (run_sweep) wraps this per-MR so one bad call degrades that one
+    MR's stale check to "unknown" rather than losing the whole sweep."""
+    raw = _run_glab(["api",
+        f"projects/{_project(repo)}/merge_requests/{iid}"
+        f"?include_diverged_commits_count=true"])
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"diverged-commits response for {repo}!{iid} "
+                           f"decode failed: {e}")
+    if not isinstance(data, dict):
+        raise RuntimeError(f"diverged-commits response for {repo}!{iid} "
+                           f"was not an object")
+    return int(data.get("diverged_commits_count") or 0)
+
+
 # --- GraphQL sweep (M3): one query mirroring the "Your work / MRs" dashboard ---
 
 _GRAPHQL_SWEEP_QUERY = """

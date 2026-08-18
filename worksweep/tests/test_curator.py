@@ -205,6 +205,50 @@ def test_partition_counts_splits_actionable_from_held():
     assert (n, m) == (2, 2)
 
 
+# --- M4 Task H: `stale` (keep-current) items in rule 2 --------------------
+
+def test_partition_counts_treats_stale_as_actionable_not_held():
+    recs = _queue() + [_rec(45, _wi(iid=4065, kind="stale",
+                                    executor="keep-current", status="proposed",
+                                    why="7 commits behind master"))]
+    n, m = partition_counts(recs)
+    assert (n, m) == (3, 2)          # stale joins the actionable count
+
+
+def test_partition_counts_ignores_done_stale_items():
+    recs = _queue() + [_rec(45, _wi(iid=4065, kind="stale",
+                                    executor="keep-current", status="done",
+                                    why="7 commits behind master"))]
+    n, m = partition_counts(recs)
+    assert (n, m) == (2, 3)          # done -> not a live ask, falls to held
+
+
+def test_stale_kind_documented_in_rule_2():
+    from worksweep.curator import _INSTRUCTIONS
+    assert "`stale`" in _INSTRUCTIONS
+    assert "keep-current" in _INSTRUCTIONS
+
+
+def test_validate_accepts_stale_item_number_without_requiring_it():
+    """A stale item is whitelisted (its own queue number is always allowed —
+    _allowed_numbers is global, not kind-filtered) but NOT required: a
+    briefing that omits it entirely still validates, unlike a proposed
+    magi-review item."""
+    recs = _queue() + [_rec(45, _wi(iid=4065, kind="stale",
+                                    executor="keep-current", status="proposed",
+                                    why="7 commits behind master"))]
+    out = ("**Needs your review:**\n1. pb-www !4061 — review requested\n\n"
+          "**Feedback / CI:**\n2. pb-www !4062 — changes requested\n"
+          "45. pb-www !4065 — 7 commits behind master\n\n"
+          "2 low-priority items held in queue: 43, 44")
+    assert validate(out, recs) is True
+    # omitting #45 entirely is still valid -- stale items are not required
+    out_without_45 = ("**Needs your review:**\n1. pb-www !4061 — review requested\n\n"
+                      "**Feedback / CI:**\n2. pb-www !4062 — changes requested\n\n"
+                      "2 low-priority items held in queue: 43, 44")
+    assert validate(out_without_45, recs) is True
+
+
 # --- make_run_llm (subprocess edge, injected run_subprocess) -------------
 
 class _Cfg:

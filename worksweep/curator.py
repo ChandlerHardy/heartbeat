@@ -99,7 +99,9 @@ Write the briefing as plain text with these rules, in this order:
    and whose status is `proposed` or `approved`. Format each as
    `{number}. {repo} !{ref} -- {short title} -- {why}`.
 2. "Feedback / CI on your MRs:" -- one line per remaining item whose executor
-   is `triage` and whose kind is `feedback` or `ci_red`, same line format.
+   is `triage` and whose kind is `feedback` or `ci_red`, OR whose kind is
+   `stale` (executor `keep-current` -- the branch fell behind master and will
+   be merged up automatically), same line format.
 2b. "Assigned issues:" -- one line per item whose kind is `issue`, format
    `{number}. {repo} #{ref} -- {short title}` (an assigned issue is a
    first-class ask; NEVER fold it into the low-priority line). If the
@@ -110,8 +112,8 @@ Write the briefing as plain text with these rules, in this order:
    who it's assigned to from that item's `why` column). Never list a
    handoff item under "Needs your review" -- it's informational, not
    actionable, and its number does not need to appear anywhere at all.
-4. Collapse every remaining item (excluding handoff items and issue items,
-   already handled by rules 3 and 2b) into exactly one line:
+4. Collapse every remaining item (excluding handoff, issue, and stale items,
+   already handled by rules 3, 2b, and 2) into exactly one line:
    "N low-priority items held in queue: <comma-separated queue numbers>"
    where N is the count and the numbers are their exact queue numbers.
 
@@ -304,7 +306,8 @@ def partition_counts(records: List[QueueRecord]) -> Tuple[int, int]:
     n = sum(1 for r in records if
             (r.item.executor == "magi-review" and r.item.status in _MAGI_LEAD_STATUSES)
             or (r.item.executor == "triage" and r.item.kind in ("feedback", "ci_red"))
-            or (r.item.kind == "issue" and r.item.status in _MAGI_LEAD_STATUSES))
+            or (r.item.kind == "issue" and r.item.status in _MAGI_LEAD_STATUSES)
+            or (r.item.kind == "stale" and r.item.status in _MAGI_LEAD_STATUSES))
     return n, len(records) - n
 
 

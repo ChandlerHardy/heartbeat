@@ -27,10 +27,15 @@ _IMPLEMENT_LOCK_NAME = "runner-implement.lock"
 
 _MAGI = "magi-review"
 _IMPLEMENT = "implement"
-_ALL_EXECUTORS = (_MAGI, _IMPLEMENT)
+_KEEP_CURRENT = "keep-current"
+_ALL_EXECUTORS = (_MAGI, _IMPLEMENT, _KEEP_CURRENT)
 # Executors that may have at most ONE claim in flight across the whole queue.
 # magi-review is read-only and cheap; implement writes to GitLab and occupies
 # a dev box, so a second one must wait even though it has its own lock file.
+# keep-current is also a write (a merge + push), but it's a short git op --
+# it shares the magi-review pass/lock (see _run_magi_pass) rather than
+# getting its own lock file, and that pass only ever runs ONE claim per
+# invocation regardless, so no separate single-flight entry is needed here.
 _SINGLE_FLIGHT = (_IMPLEMENT,)
 
 
@@ -329,6 +334,10 @@ def _guarded_pass(cfg, deps: Dict[str, Callable], kind: str,
 
 
 def _run_magi_pass(cfg, deps: Dict[str, Callable], lock_path: str) -> int:
+    """One claim from magi-review OR keep-current (lowest number wins across
+    both — see pick_claim). keep-current shares this pass/lock deliberately:
+    it's a short git op (fetch/merge/push), not worth a third lock file, and
+    this pass only ever runs one claim per invocation either way."""
     if not acquire_lock(lock_path):
         return 0    # another runner is live — that's fine, not an error
     try:
@@ -341,11 +350,13 @@ def _run_magi_pass(cfg, deps: Dict[str, Callable], lock_path: str) -> int:
             for r in reaped:
                 _post(deps, cfg, f"⚠️ Worksweep runner: reaped stale claim "
                                  f"#{r.number} ({r.item.repo} {r.item.id})")
-        target = pick_claim(records, (_MAGI,))
+        target = pick_claim(records, (_MAGI, _KEEP_CURRENT))
         if target is None:
             return 0
         records = claim(records, target.number, now)
         deps["save"](records)
+        if target.item.executor == _KEEP_CURRENT:
+            return _run_keep_current_claim(cfg, deps, target)
         try:
             result_sha, report_path = deps["execute"](target.item, cfg)
         except RunnerError as e:
@@ -374,6 +385,37 @@ def _run_magi_pass(cfg, deps: Dict[str, Callable], lock_path: str) -> int:
         return 0
     finally:
         release_lock(lock_path)
+
+
+def _run_keep_current_claim(cfg, deps: Dict[str, Callable],
+                            target: QueueRecord) -> int:
+    """The keep-current half of the shared magi/keep-current pass. Called
+    with the claim already saved as `running` (by _run_magi_pass, same as
+    the magi-review path) -- every exit below ends in a queue status AND a
+    Discord post, since this executor pushes to GitLab and rewrites a dev
+    box's checkout."""
+    number = target.number
+    if "execute_keep_current" not in deps:
+        _fail_and_post(deps, cfg, number,
+                       "keep-current executor is not wired into this runner "
+                       "(no execute_keep_current dep)", _KEEP_CURRENT)
+        return 1
+    try:
+        result = deps["execute_keep_current"](target.item, cfg)
+    except RunnerError as e:
+        _fail_and_post(deps, cfg, number, str(e), _KEEP_CURRENT)
+        return 1
+    except Exception as e:
+        _fail_and_post(deps, cfg, number, f"{type(e).__name__}: {e}",
+                       _KEEP_CURRENT)
+        return 1
+    updated = _apply_to_fresh(
+        deps, cfg, number,
+        lambda fresh: complete(fresh, number, result.result_sha, "",
+                               deps["now"]()))
+    if updated is not None:
+        _post(deps, cfg, _keep_current_done_message(result))
+    return 0
 
 
 def _run_implement_pass(cfg, deps: Dict[str, Callable], lock_path: str) -> int:
@@ -483,6 +525,18 @@ def _implement_done_message(result) -> str:
     if result.magi_note:
         msg += f"\nmagi note: {result.magi_note}"
     return msg
+
+
+def _keep_current_done_message(result) -> str:
+    """`🔄 !4020 merged master (+7 commits, scss recompiled) · dev4 verified
+    200` or `... · no dev box serving branch` when nothing currently has the
+    branch checked out (a done outcome, not an error -- the merge+push
+    already succeeded)."""
+    scss = "recompiled" if result.scss_recompiled else "unchanged"
+    sync_part = (f"{result.box_name} verified 200" if result.box_name
+                else "no dev box serving branch")
+    return (f"🔄 !{result.iid} merged master (+{result.ahead_count} commits, "
+           f"scss {scss}) · {sync_part}")
 
 
 def _fail_and_post(deps, cfg, number: int, summary: str, kind: str) -> None:

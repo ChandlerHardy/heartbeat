@@ -75,6 +75,8 @@ class WorkItem:
     title: str = ""           # mr.title / issue.title -- "" for todo items
     dev_box: str = ""         # name of the dev box claimed by an `implement` executor
     mr_iid: int = 0           # Draft MR iid opened by the `implement` executor
+    branch: str = ""          # M4 Task H: mr.source_branch, set by assess_stale --
+                              # the `keep-current` executor's checkout target
 
 
 @dataclass(frozen=True)

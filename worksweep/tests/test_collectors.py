@@ -1,6 +1,12 @@
-import json, os, sys
+import json, os, subprocess, sys
+from unittest.mock import patch
+
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from worksweep.collectors import parse_mrs, parse_todos, parse_issues, _project  # noqa: E402
+from worksweep.collectors import (  # noqa: E402
+    collect_diverged_commits_count, parse_issues, parse_mrs, parse_todos, _project,
+)
 
 
 def test_parse_mrs_empty():
@@ -100,3 +106,50 @@ def test_project_encodes_slash():
 
 def test_project_encodes_space():
     assert _project("a b") == "performancelivestock%2Fa%20b"
+
+
+# --- collect_diverged_commits_count (M4 Task H) ---------------------------
+
+def _fake_run(stdout, rc=0):
+    def run(cmd, **kw):
+        return subprocess.CompletedProcess(cmd, rc, stdout=stdout, stderr="err\n")
+    return run
+
+
+def test_collect_diverged_commits_count_calls_expected_glab_api():
+    seen = {}
+
+    def run(cmd, **kw):
+        seen["cmd"] = cmd
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout='{"diverged_commits_count": 7}', stderr="")
+
+    with patch("subprocess.run", run):
+        assert collect_diverged_commits_count("pb-www", 4020) == 7
+    assert seen["cmd"][:2] == ["glab", "api"]
+    assert seen["cmd"][2] == (
+        "projects/performancelivestock%2Fpb-www/merge_requests/4020"
+        "?include_diverged_commits_count=true")
+
+
+def test_collect_diverged_commits_count_missing_field_defaults_zero():
+    with patch("subprocess.run", _fake_run('{"iid": 4020}')):
+        assert collect_diverged_commits_count("pb-www", 4020) == 0
+
+
+def test_collect_diverged_commits_count_nonzero_exit_raises():
+    with patch("subprocess.run", _fake_run("", rc=1)):
+        with pytest.raises(RuntimeError, match="err"):
+            collect_diverged_commits_count("pb-www", 4020)
+
+
+def test_collect_diverged_commits_count_malformed_json_raises():
+    with patch("subprocess.run", _fake_run("not json")):
+        with pytest.raises(RuntimeError, match="decode failed"):
+            collect_diverged_commits_count("pb-www", 4020)
+
+
+def test_collect_diverged_commits_count_non_object_json_raises():
+    with patch("subprocess.run", _fake_run("[1, 2]")):
+        with pytest.raises(RuntimeError, match="not an object"):
+            collect_diverged_commits_count("pb-www", 4020)
