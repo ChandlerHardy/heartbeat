@@ -285,13 +285,17 @@ def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
                                          preamble=slot_line)
             if curated is not None:
                 n, m = curator.partition_counts(actionable)
-                msg = (f"{_HEADER} (curated) — {n} actionable / {m} held:\n"
-                      + (f"{slot_line}\n" if slot_line else "")
-                      + f"{curated}\n{_FOOTER}")
-                # curated is validated at <= 1700 bytes, but header/footer add
-                # ~140 more bytes on top -- truncate the assembled message as
-                # a hard backstop so it never breaches the Discord-safe cap.
-                _post_all([_truncate_bytes(msg, DISCORD_MAX_CHARS)])
+                head = (f"{_HEADER} (curated) — {n} actionable / {m} held:\n"
+                        + (f"{slot_line}\n" if slot_line else ""))
+                tail = f"\n{_FOOTER}"
+                # Fixed parts (header, slot line, footer) must always survive:
+                # give the LLM body whatever budget remains and truncate ONLY
+                # the body. Truncating the assembled string from the end would
+                # silently eat the ✅-instructions footer once a multi-box slot
+                # line is present (Task F review finding, 2026-08-18).
+                fixed = len(head.encode("utf-8")) + len(tail.encode("utf-8"))
+                body_budget = max(200, DISCORD_MAX_CHARS - fixed)
+                _post_all([head + _truncate_bytes(curated, body_budget) + tail])
             else:
                 _post_all(format_messages_from_records(
                     actionable, now=deps["now"](), preamble=slot_line))

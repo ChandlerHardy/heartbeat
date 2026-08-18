@@ -147,3 +147,48 @@ def test_ssh_probe_exception_degrades_gracefully_no_crash(capsys):
     # unreachable box -> unknown branch -> live tier, never crashes the sweep
     joined = "\n".join(texts)
     assert "Dev slots: dev1 live" in joined
+
+
+def test_curated_message_keeps_slot_line_and_footer_under_cap(monkeypatch):
+    """A near-cap curated body + a long 6-box slot line must never truncate the
+    header, slot line, or the ✅ footer — only the LLM body may be trimmed."""
+    from worksweep import __main__ as m
+    from worksweep.config import WorksweepConfig
+    from worksweep.formatter import DISCORD_MAX_CHARS, _FOOTER
+    import json
+
+    cfg = WorksweepConfig(
+        repos=("pb-www",), username="me",
+        discord_webhook="https://discord.com/api/webhooks/x/y",
+        curate=True,
+        dev_boxes=tuple({"name": f"dev{i}", "host": "h", "path": f"/p{i}",
+                         "url": f"https://dev{i}.example/"} for i in range(6)))
+    review_node = {"iid": "1", "title": "t", "draft": False,
+                   "webUrl": "https://gl/x/-/merge_requests/1",
+                   "diffHeadSha": "s1", "updatedAt": "2026-08-17T00:00:00Z",
+                   "sourceBranch": "feat/x",
+                   "project": {"fullPath": "performancelivestock/pb-www"},
+                   "author": {"username": "other"},
+                   "reviewers": {"nodes": [{"username": "me",
+                       "mergeRequestInteraction": {"reviewState": "UNREVIEWED"}}]},
+                   "headPipeline": None}
+    raw = json.dumps({"data": {"currentUser": {"username": "me",
+        "reviewRequestedMergeRequests": {"nodes": [review_node]},
+        "authoredMergeRequests": {"nodes": []},
+        "assignedMergeRequests": {"nodes": []}}}})
+    posts = []
+    # every box "free": ssh returns master + a sha -> long slot line
+    deps = {"graphql": lambda: raw, "todos": lambda: [],
+            "issues": lambda repo, u: [], "post": lambda h, c: posts.append(c),
+            "load": lambda: [], "save": lambda r: None,
+            "now": lambda: "2026-08-17T12:00:00+00:00",
+            "ssh": lambda host, cmd: "master\nabc123\n",
+            # LLM returns a valid, near-cap body that cites the required number
+            "llm": lambda prompt: ("Needs your review:\n1. pb-www !1 -- t -- review requested\n"
+                                   + ("x" * 1600))}
+    assert m.run_sweep(cfg, deps) == 0
+    msg = [p for p in posts if isinstance(p, str)][0]
+    assert len(msg.encode("utf-8")) <= DISCORD_MAX_CHARS
+    assert msg.startswith("🔭")
+    assert "Dev slots:" in msg
+    assert msg.rstrip().endswith(_FOOTER.rstrip())
