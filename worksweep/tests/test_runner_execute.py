@@ -55,7 +55,7 @@ def test_execute_invokes_fetch_then_claude(tmp_path):
     assert sha == "s1" and report.endswith("tribunal-report-mr-4020-2026-08-07.md")
     assert calls[0][0][:3] == ("git", "-C", str(tmp_path / "pb-www"))
     assert calls[1][0][0] == "claude"
-    assert "/magi:magi-review !4020" in calls[1][0]
+    assert "/magi:magi-review !4020 --draft-findings" in calls[1][0]
     assert calls[1][1] == str(tmp_path / "pb-www")
 
 
@@ -267,3 +267,30 @@ def test_execute_passes_devnull_stdin_to_claude(tmp_path):
     (tmp_path / "pb-www" / ".magi" / "tribunal-report-mr-4020-x.md").write_text("## Verdict\nok\n")
     execute(_approved().item, _cfg(tmp_path), run_subprocess=fake_run)
     assert seen["stdin"] is sp.DEVNULL
+
+
+def test_run_dry_run_never_saves_or_posts(monkeypatch, tmp_path, capsys):
+    """`worksweep run --dry-run` is a preview: it must not persist a claim/done
+    onto the live queue nor post to Discord (2026-08-18 incident)."""
+    from worksweep import __main__ as m
+    from worksweep.config import WorksweepConfig
+    from worksweep.models import QueueRecord, WorkItem
+    from worksweep.queue import save_queue, load_queue
+    qpath = str(tmp_path / "queue.json")
+    rec = QueueRecord(number=1, first_seen="t", last_seen="t",
+                      item=WorkItem(schema_version=1, id="review:pb-www!1", repo="pb-www",
+                                    kind="review_request", executor="magi-review", risk="low",
+                                    why="", web_url="https://gl/x/-/merge_requests/1", sha="s",
+                                    status="approved"))
+    save_queue(qpath, [rec])
+    monkeypatch.setattr(m, "_queue_path", lambda: qpath)
+    monkeypatch.setattr(m, "load_config", lambda: WorksweepConfig(
+        repos=("pb-www",), username="me", discord_webhook="https://discord.com/api/webhooks/x/y"))
+    posted = []
+    monkeypatch.setattr(m, "_post_discord", lambda h, c: posted.append(c))
+    monkeypatch.setattr(m._runner, "acquire_lock", lambda p: True, raising=False) if hasattr(m, "_runner") else None
+    rc = m.main(["run", "--dry-run"])
+    assert rc == 0
+    assert posted == []                                   # nothing reached Discord
+    assert load_queue(qpath)[0].item.status == "approved"  # live queue untouched
+    assert "dry-run" in capsys.readouterr().out

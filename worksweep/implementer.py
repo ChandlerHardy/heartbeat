@@ -4,7 +4,7 @@ One approved assigned issue in, one Draft MR out:
 
     slot pick -> branch -> `claude -p "/rubric:do #<iid>"` -> verify commits
     -> push -> sync the claimed dev box -> Draft MR (with the dev URL)
-    -> `/magi:magi-review !<mr> --advisory` (advisory only, never auto-fixes)
+    -> `/magi:magi-review !<mr> --advisory --draft-findings` (advisory + pending drafts, never auto-fixes)
 
 Everything that touches the world is injected (`run_subprocess`, `run_ssh`,
 `http_get`) so the test suite never shells out, never sshs, and never opens a
@@ -460,7 +460,7 @@ def _magi_advisory(checkout: str, cfg, mr_iid: int,
     note = ""
     try:
         proc = _run(
-            [cfg.claude_bin, "-p", f"/magi:magi-review !{mr_iid} --advisory"],
+            [cfg.claude_bin, "-p", f"/magi:magi-review !{mr_iid} --advisory --draft-findings"],
             run_subprocess, cwd=checkout, timeout=_MAGI_TIMEOUT)
         if proc.returncode != 0:
             note = (f"magi-review !{mr_iid} exited {proc.returncode}: "

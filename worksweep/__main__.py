@@ -402,10 +402,16 @@ def main(argv=None) -> int:
 
     if args.command == "run":
         from . import runner as _runner
+        # --dry-run must be a preview, never a mutation: it may READ the live
+        # queue but never persists a claim/done nor posts to Discord. (2026-08-18:
+        # a diagnostic dry-run consumed a real ✅ and posted a fake 🧙 verdict.)
         deps = {
             "load": lambda: load_queue(_queue_path()),
-            "save": lambda records: save_queue(_queue_path(), records),
-            "post": _post_discord,
+            "save": ((lambda records: print("worksweep: dry-run — queue NOT saved"))
+                     if args.dry_run else
+                     (lambda records: save_queue(_queue_path(), records))),
+            "post": ((lambda hook, content: print(f"[dry-run post] {content}"))
+                     if args.dry_run else _post_discord),
             "now": _now,
             "execute": (lambda item, c: (item.sha, "(dry-run)"))
                        if args.dry_run else _runner.execute,
