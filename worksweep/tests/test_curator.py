@@ -287,3 +287,42 @@ def test_curate_preamble_does_not_break_validation():
                  lambda p: "Needs your review:\n1. pb-www !4061 -- t -- review requested",
                  preamble=_SLOT_LINE)
     assert out is not None
+
+
+# --- assigned issues are first-class (2026-08-18 regression) ---------------
+
+def _issue_rec(number, iid, title):
+    from worksweep.models import QueueRecord, WorkItem
+    return QueueRecord(number=number, first_seen="2026-08-17T00:00:00+00:00",
+                       last_seen="2026-08-17T00:00:00+00:00",
+                       item=WorkItem(schema_version=1, id=f"issue:pb-www#{iid}",
+                                     repo="pb-www", kind="issue", executor="implement",
+                                     risk="low", why=f"assigned issue: {title}",
+                                     web_url=f"https://gitlab.com/x/-/work_items/{iid}",
+                                     sha="", status="proposed", title=title))
+
+
+def test_validate_rejects_output_that_drops_an_assigned_issue():
+    from worksweep.curator import validate
+    recs = [_issue_rec(175, 1775, "Discrepancy in estimated days left")]
+    # LLM output that folded the issue into nothing (no 175 anywhere)
+    assert validate("Needs your review:\n(none)\n0 low-priority items held in queue:", recs) is False
+
+
+def test_validate_accepts_output_listing_the_assigned_issue():
+    from worksweep.curator import validate
+    recs = [_issue_rec(175, 1775, "Discrepancy in estimated days left")]
+    out = "Assigned issues:\n175. pb-www #1775 -- Discrepancy in estimated days left -- ✅ to implement"
+    assert validate(out, recs) is True
+
+
+def test_partition_counts_treats_assigned_issue_as_actionable():
+    from worksweep.curator import partition_counts
+    n, m = partition_counts([_issue_rec(175, 1775, "x")])
+    assert (n, m) == (1, 0)
+
+
+def test_instructions_name_assigned_issues_section():
+    from worksweep.curator import _INSTRUCTIONS
+    assert "Assigned issues:" in _INSTRUCTIONS
+    assert "NEVER fold it into the low-priority line" in _INSTRUCTIONS

@@ -96,13 +96,18 @@ Write the briefing as plain text with these rules, in this order:
    `{number}. {repo} !{ref} -- {short title} -- {why}`.
 2. "Feedback / CI on your MRs:" -- one line per remaining item whose executor
    is `triage` and whose kind is `feedback` or `ci_red`, same line format.
+2b. "Assigned issues:" -- one line per item whose kind is `issue`, format
+   `{number}. {repo} #{ref} -- {short title}` (an assigned issue is a
+   first-class ask; NEVER fold it into the low-priority line). If the
+   preamble names a free/reclaimable dev slot, append " -- ✅ to implement"
+   to each; otherwise append " -- no dev slot free".
 3. If any item has kind `handoff`, add exactly one trailing informational
    line for all of them together: "Handed off: !{ref} -> {who}, ..." (read
    who it's assigned to from that item's `why` column). Never list a
    handoff item under "Needs your review" -- it's informational, not
    actionable, and its number does not need to appear anywhere at all.
-4. Collapse every remaining item (excluding any handoff items, already
-   handled by rule 3) into exactly one line:
+4. Collapse every remaining item (excluding handoff items and issue items,
+   already handled by rules 3 and 2b) into exactly one line:
    "N low-priority items held in queue: <comma-separated queue numbers>"
    where N is the count and the numbers are their exact queue numbers.
 
@@ -241,9 +246,13 @@ def validate(output: str, records: List[QueueRecord]) -> bool:
               f"invented number(s) {sorted(invented)}", file=sys.stderr)
         return False
 
+    # Required = every proposed/approved magi-review item AND every
+    # proposed/approved assigned-issue item: both are first-class asks that a
+    # curated briefing may never silently drop (2026-08-18: the LLM folded four
+    # new assigned issues into the low-priority line and they vanished).
     required = {r.number for r in records
-                if r.item.executor == "magi-review"
-                and r.item.status in _MAGI_LEAD_STATUSES}
+                if r.item.status in _MAGI_LEAD_STATUSES
+                and (r.item.executor == "magi-review" or r.item.kind == "issue")}
     missing = {n for n in required if not re.search(rf"\b{n}\b", stripped)}
     if missing:
         print(f"worksweep: curator validation failed: "
@@ -290,7 +299,8 @@ def partition_counts(records: List[QueueRecord]) -> Tuple[int, int]:
     own text."""
     n = sum(1 for r in records if
             (r.item.executor == "magi-review" and r.item.status in _MAGI_LEAD_STATUSES)
-            or (r.item.executor == "triage" and r.item.kind in ("feedback", "ci_red")))
+            or (r.item.executor == "triage" and r.item.kind in ("feedback", "ci_red"))
+            or (r.item.kind == "issue" and r.item.status in _MAGI_LEAD_STATUSES))
     return n, len(records) - n
 
 
