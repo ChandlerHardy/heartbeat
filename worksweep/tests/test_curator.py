@@ -326,3 +326,16 @@ def test_instructions_name_assigned_issues_section():
     from worksweep.curator import _INSTRUCTIONS
     assert "Assigned issues:" in _INSTRUCTIONS
     assert "NEVER fold it into the low-priority line" in _INSTRUCTIONS
+
+
+def test_make_run_llm_passes_devnull_stdin():
+    import subprocess as sp
+    from worksweep.curator import make_run_llm
+    from worksweep.config import WorksweepConfig
+    seen = {}
+    def fake_run(cmd, **kw):
+        seen["stdin"] = kw.get("stdin")
+        return sp.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+    cfg = WorksweepConfig(repos=("pb-www",), username="me", discord_webhook="")
+    make_run_llm(cfg, run_subprocess=fake_run)("prompt")
+    assert seen["stdin"] is sp.DEVNULL

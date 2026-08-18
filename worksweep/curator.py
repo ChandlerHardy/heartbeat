@@ -314,7 +314,9 @@ def make_run_llm(cfg, run_subprocess: Callable = subprocess.run
         try:
             proc = run_subprocess(
                 [cfg.claude_bin, "-p", prompt], cwd=_REPO_ROOT,
-                capture_output=True, text=True, timeout=_LLM_TIMEOUT_SECONDS)
+                capture_output=True, text=True,
+                stdin=subprocess.DEVNULL,  # claude -p exits 1 waiting on a non-TTY stdin
+                timeout=_LLM_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired:
             raise RuntimeError(
                 f"curator LLM exceeded {_LLM_TIMEOUT_SECONDS}s")

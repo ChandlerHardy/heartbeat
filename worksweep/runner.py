@@ -182,6 +182,7 @@ def execute(item: WorkItem, cfg,
         proc = run_subprocess(
             [cfg.claude_bin, "-p", f"/magi:magi-review !{iid}"],
             cwd=checkout, capture_output=True, text=True,
+            stdin=subprocess.DEVNULL,  # claude -p blocks/exits 1 waiting on a non-TTY stdin
             timeout=cfg.runner_timeout)
     except subprocess.TimeoutExpired:
         raise RunnerError(f"magi-review !{iid} exceeded {cfg.runner_timeout}s")

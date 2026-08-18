@@ -248,3 +248,22 @@ def test_run_once_nothing_approved_is_quiet(tmp_path):
     assert run_once(_cfg(tmp_path), deps,
                     lock_path=str(tmp_path / "runner.lock")) == 0
     assert posts == []   # runner is event-only, no heartbeat spam every 10 min
+
+
+def test_execute_passes_devnull_stdin_to_claude(tmp_path):
+    """claude -p exits 1 ('no stdin data received in 3s') when spawned without a
+    stdin under launchd/subprocess — found live 2026-08-18 on the first real ✅.
+    Every claude -p edge must pass stdin=DEVNULL."""
+    import subprocess as sp
+    os.makedirs(tmp_path / "pb-www")
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        if cmd[0] == "claude":
+            seen["stdin"] = kw.get("stdin")
+        return sp.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    (tmp_path / "pb-www" / ".magi").mkdir()
+    (tmp_path / "pb-www" / ".magi" / "tribunal-report-mr-4020-x.md").write_text("## Verdict\nok\n")
+    execute(_approved().item, _cfg(tmp_path), run_subprocess=fake_run)
+    assert seen["stdin"] is sp.DEVNULL
