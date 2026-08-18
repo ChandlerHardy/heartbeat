@@ -34,7 +34,7 @@ _SSH_TIMEOUT_SECONDS = 20
 from . import assessor, collectors, curator, devslots
 from .approvals import apply_approvals
 from .config import WorksweepConfig, load_config
-from .discord_read import fetch_messages
+from .discord_read import fetch_messages, react
 from .formatter import (
     DISCORD_MAX_CHARS, _FOOTER, _HEADER, _truncate_bytes,
     format_messages_from_records,
@@ -130,6 +130,18 @@ def run_ssh(host: str, command: str, timeout: int = _SSH_TIMEOUT_SECONDS) -> str
     return result.stdout
 
 
+def _messages_carrying(messages, user_id: str, approved_numbers) -> list:
+    """The user's messages whose parsed approval set intersects
+    `approved_numbers` -- i.e. the replies that actually flipped something.
+    Pure; used to decide which messages get the 👀 ack."""
+    from .approvals import parse_approval
+    out = []
+    for m in messages:
+        if m.author_id == user_id and parse_approval(m.content) & set(approved_numbers):
+            out.append(m)
+    return out
+
+
 def _run_intake(cfg: WorksweepConfig) -> int:
     """Poll Discord for approval replies and flip matched queue items.
 
@@ -154,6 +166,11 @@ def _run_intake(cfg: WorksweepConfig) -> int:
     updated, approved = apply_approvals(records, messages, cfg.discord_user_id, now)
     if approved != set():
         save_queue(qpath, updated)
+        # 👀 on each of the user's messages that carried a freshly-honoured
+        # approval -- CodeRabbit-style "seen it" ack directly on the reply,
+        # complementing the text confirmation below (which names the items).
+        for m in _messages_carrying(messages, cfg.discord_user_id, approved):
+            react(cfg.channel_id, m.id, "👀", cfg.bot_token)
 
     # Advance the cursor to the newest message id seen so the next poll only
     # reads newer messages (Discord ids are monotonically increasing snowflakes).
