@@ -42,17 +42,37 @@ def _compute_age_days(iso_ts: str, iso_now: str) -> Optional[int]:
     return delta.days
 
 
+_TITLE_LIMIT = 60
+
+
+def _truncate_title(title: str, limit: int = _TITLE_LIMIT) -> str:
+    """Collapse a title to one line and cap it at `limit` chars, single-`…`
+    truncation for readability. Empty title -> empty string (no segment)."""
+    if not title:
+        return ""
+    single = " ".join(title.split())
+    if len(single) <= limit:
+        return single
+    return single[:limit].rstrip() + "…"
+
+
 def _item_line(n: int, it: WorkItem, first_seen: Optional[str] = None,
                now: Optional[str] = None) -> str:
     # One compact line per item. The web_url is a masked link ([#ref](url)) so
     # Discord renders no embed card (25 raw URLs would spawn 25 previews) and the
     # ref number stays visible. The leading `n.` is the approval handle for M2.
-    parts = [f"{n}.", f"`{it.executor}`"]
+    # `handoff` items (ready-to-merge, handed to a maintainer) are informational
+    # rather than actionable, so they render with a leading ✅.
+    prefix = "✅ " if it.kind == "handoff" else ""
+    parts = [f"{prefix}{n}.", f"`{it.executor}`"]
     if it.repo:
         parts.append(it.repo)
     if it.web_url:
         ref = it.web_url.rstrip("/").rsplit("/", 1)[-1]
         parts.append(f"[#{ref}]({it.web_url})")
+    title = _truncate_title(it.title)
+    if title:
+        parts.append(f"*{title}*")
     line = f"{' '.join(parts)} — {it.why}"
 
     # Add age marker if first_seen is > 5 days old
@@ -62,6 +82,20 @@ def _item_line(n: int, it: WorkItem, first_seen: Optional[str] = None,
             line += f" ⏳{age_days}d"
 
     return line
+
+
+_HANDOFF_HEADER = "**Handed off (no action):**"
+
+
+def _group_handoff_last(numbered: List[tuple]) -> List[tuple]:
+    """Split (number, item, first_seen?) tuples into (non_handoff, handoff),
+    each preserving relative order. Numbers are untouched (stable-numbering
+    contract) -- only render order moves handoff items to a trailing group,
+    so the curator/reader can tell "ready to merge, no action" apart from
+    the actionable list."""
+    non_handoff = [t for t in numbered if t[1].kind != "handoff"]
+    handoff = [t for t in numbered if t[1].kind == "handoff"]
+    return non_handoff, handoff
 
 
 def _numbered(items: List[WorkItem]) -> List[tuple]:
@@ -92,7 +126,18 @@ def _format_messages_numbered(numbered: List[tuple],
     cont = f"{_HEADER} *(cont.)*"
     msgs: List[str] = []
     cur = head
-    for item_tuple in numbered:
+
+    def _append_line(line: str) -> None:
+        nonlocal cur
+        candidate = f"{cur}\n{line}"
+        if len(candidate.encode("utf-8")) > cap:
+            msgs.append(cur)
+            cur = f"{cont}\n{line}"
+        else:
+            cur = candidate
+
+    non_handoff, handoff = _group_handoff_last(numbered)
+    for item_tuple in non_handoff:
         n = item_tuple[0]
         it = item_tuple[1]
         first_seen = item_tuple[2] if len(item_tuple) > 2 else None
@@ -100,12 +145,16 @@ def _format_messages_numbered(numbered: List[tuple],
         # continuation header without breaching the cap.
         line = _truncate_bytes(_item_line(n, it, first_seen=first_seen, now=now),
                                max_bytes - 80)
-        candidate = f"{cur}\n{line}"
-        if len(candidate.encode("utf-8")) > cap:
-            msgs.append(cur)
-            cur = f"{cont}\n{line}"
-        else:
-            cur = candidate
+        _append_line(line)
+    if handoff:
+        _append_line(_HANDOFF_HEADER)
+        for item_tuple in handoff:
+            n = item_tuple[0]
+            it = item_tuple[1]
+            first_seen = item_tuple[2] if len(item_tuple) > 2 else None
+            line = _truncate_bytes(_item_line(n, it, first_seen=first_seen, now=now),
+                                   max_bytes - 80)
+            _append_line(line)
     with_footer = f"{cur}\n\n{_FOOTER}"
     if len(with_footer.encode("utf-8")) <= cap:
         msgs.append(with_footer)
@@ -123,11 +172,19 @@ def _format_digest_numbered(numbered: List[tuple], now: Optional[str] = None) ->
     if not numbered:
         return _ALL_CLEAR
     lines = [f"{_HEADER} — {len(numbered)} item(s) need you:"]
-    for item_tuple in numbered:
+    non_handoff, handoff = _group_handoff_last(numbered)
+    for item_tuple in non_handoff:
         n = item_tuple[0]
         it = item_tuple[1]
         first_seen = item_tuple[2] if len(item_tuple) > 2 else None
         lines.append(_item_line(n, it, first_seen=first_seen, now=now))
+    if handoff:
+        lines.append(_HANDOFF_HEADER)
+        for item_tuple in handoff:
+            n = item_tuple[0]
+            it = item_tuple[1]
+            first_seen = item_tuple[2] if len(item_tuple) > 2 else None
+            lines.append(_item_line(n, it, first_seen=first_seen, now=now))
     lines.append(f"\n{_FOOTER}")
     return "\n".join(lines)
 

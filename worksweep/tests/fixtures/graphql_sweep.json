@@ -1,1 +1,777 @@
-{"data":{"currentUser":{"username":"chandler.hardy","reviewRequestedMergeRequests":{"nodes":[{"iid":"4061","title":"Record animals.applied_costs in typical-format (#1348)","draft":false,"webUrl":"https://gitlab.com/performancelivestock/pb-www/-/merge_requests/4061","diffHeadSha":"c62fc074e0612584c810ec14bb1791dc76a12ec8","updatedAt":"2026-08-17T14:29:24Z","project":{"fullPath":"performancelivestock/pb-www"},"author":{"username":"LeifPedersen"},"reviewers":{"nodes":[{"username":"chandler.hardy","mergeRequestInteraction":{"reviewState":"REQUESTED_CHANGES"}}]},"headPipeline":{"status":"SUCCESS"}},{"iid":"4010","title":"fix(invoices): stop a blank invoice form from overwriting an invoice","draft":false,"webUrl":"https://gitlab.com/performancelivestock/pb-www/-/merge_requests/4010","diffHeadSha":"5c76b2edfed1f1926d8df36dfb2b3b50653b6ae5","updatedAt":"2026-08-17T13:54:58Z","project":{"fullPath":"performancelivestock/pb-www"},"author":{"username":"leyang"},"reviewers":{"nodes":[{"username":"alliecather","mergeRequestInteraction":{"reviewState":"UNREVIEWED"}},{"username":"chandler.hardy","mergeRequestInteraction":{"reviewState":"UNREVIEWED"}}]},"headPipeline":{"status":"SUCCESS"}}]},"authoredMergeRequests":{"nodes":[{"iid":"4007","title":"feat(#1701): Add Usage column to the feed inventory emailed report","draft":false,"webUrl":"https://gitlab.com/performancelivestock/pb-www/-/merge_requests/4007","diffHeadSha":"38f869933960f31cd0d89a707aad5844d79a77ad","updatedAt":"2026-08-14T15:12:31Z","description":"### Available on [dev5](https://dev5.chandlerhardy-dev.performancebeef.com/)\n### Closes #1701\n\nAdds a **Usage** column to the emailed inventory alert report, between **Amount Remaining** and **Estimated Days Left**, showing that work-date's usage for each alertable item (`InventoryLedger::getItemUsageForPeriod`, single-day window). Displays **\"No recent usage\"** when the day's usage is zero — including when a small positive usage would *round* to a displayed \"0\" (weight rounding settings). Formatting/pluralization mirrors the Amount Remaining cell exactly (separators, cc/mL exemption); email cells copy the sibling inline styles byte-for-byte.\n\n**Verify:** 13 exact-assertion unit tests on the extracted `formatUsageCell` helper with mutation falsification (guard inversion, cc/mL exemption deletion, RED→GREEN on the rounding fix). MAGI tribunal (Claude/Codex/Seneschal): SHIP 3/3 after 1 fix round. Live QA on dev5 (Allie): report preview renders `Feed | Amount Remaining | Usage | Estimated Days Left` with real values (\"2,973 lbs\", \"28 lbs\") and \"No recent usage\" empty states across both categories.\n\n\u003c!-- This is an auto-generated comment: release notes by coderabbit.ai --\u003e\n## Summary by CodeRabbit\n\n* **New Features**\n  * Inventory report emails now include a separate Usage column for alertable items.\n  * Usage reflects consumption over the previous day and follows configured number formatting.\n  * Zero or negligible usage is displayed as “No recent usage.”\n  * Measurement labels are formatted consistently, including correct singular and plural forms across supported units.\n\n* **Style**\n  * Improved mobile readability by reducing horizontal padding in report tables.\n\u003c!-- end of auto-generated comment: release notes by coderabbit.ai --\u003e","project":{"fullPath":"performancelivestock/pb-www"},"author":{"username":"chandler.hardy"},"reviewers":{"nodes":[{"username":"leyang","mergeRequestInteraction":{"reviewState":"APPROVED"}},{"username":"alliecather","mergeRequestInteraction":{"reviewState":"UNREVIEWED"}}]},"headPipeline":{"status":"SUCCESS"},"resolvableDiscussionsCount":3,"resolvedDiscussionsCount":0},{"iid":"4006","title":"feat(#1700): Add ability to hide Kill Sheet information","draft":false,"webUrl":"https://gitlab.com/performancelivestock/pb-www/-/merge_requests/4006","diffHeadSha":"719acc6b8cd1e22289e779116811bf012f47ed32","updatedAt":"2026-08-14T17:21:57Z","description":"### Available on [dev4](https://dev4.chandlerhardy-dev.performancebeef.com/)\n### Closes #1700\n\nAdds a **Kill Sheet Data Points** dropdown (Show/Hide, default Show) to Account Settings \u003e System Settings. When set to Hide:\n\n- The **Expand Dressed** button + kill sheet section are not rendered in the +/- Head Sell form and the Edit Sale form (shared `_sold_fields.php` gate — fields absent from the DOM, not CSS-hidden).\n- The 28 packer-derived columns are omitted from the read-only **Sheets \u003e Sold Head** view (`Head_sold::setHideKillSheetColumns`, mirroring the #1489 `include_edit_button` flag; filters by name/key so the two flags compose in either order).\n- Save paths treat an **absent** packer key as \"no change\": head-count edits recalibrate stored per-head hot weight/base price from the original total, and Destination stays required while a hidden packer record exists — an existing `group_packer_info` record can never be wiped or orphaned by a Hide-mode save.\n\n**Known limitations (by design):** the CSV export keeps the full column set (data extract, not a display surface); the gate is render-time, so a tab opened before flipping the setting can still post packer values (the absent-key save tolerance keeps such posts from corrupting stored records). The bulk Edit sheet is now gated too (review round, R-1).\n\n**Verify:** 133 targeted PHPUnit tests (exact-array column assertions, child-process partial renders in both modes/hosts, 16-row per-head-source truth table, source-scan wiring guards) + mutation falsification on every new guard. MAGI tribunal (Claude/Codex/Seneschal + 3-agent specialist panel): SHIP after 1 fix round. Browser QA on dev5 (Allie): setting renders, saves, persists, both directions. Live sheet/form checks were blocked by pre-existing dev5 data corruption (`work_dates` doc `6a6c3388a405abcd00000000` has double-typed `target_pounds`; pb-api 500s on decode — repair script ready, unrelated to this MR). Not verified on a metric (kg) account: the per-head recompute unit round-trip.\n\n\u003c!-- This is an auto-generated comment: release notes by coderabbit.ai --\u003e\n## Summary by CodeRabbit\n\n- **New Features**\n  - Added a Kill Sheet Data Points setting to show or hide optional Kill Sheet fields.\n  - Applied the preference across sales forms, read-only views, tables, and saved records.\n  - Event-related information remains visible when optional fields are hidden.\n\n- **Bug Fixes**\n  - Omitted optional fields now retain existing values instead of being cleared.\n  - Improved destination validation and per-head recalculation when quantities change.\n  - Save failures now show row-level errors and remain retryable.\n\u003c!-- end of auto-generated comment: release notes by coderabbit.ai --\u003e","project":{"fullPath":"performancelivestock/pb-www"},"author":{"username":"chandler.hardy"},"reviewers":{"nodes":[{"username":"randywu","mergeRequestInteraction":{"reviewState":"APPROVED"}},{"username":"alliecather","mergeRequestInteraction":{"reviewState":"UNREVIEWED"}}]},"headPipeline":{"status":"SUCCESS"},"resolvableDiscussionsCount":7,"resolvedDiscussionsCount":7},{"iid":"3997","title":"Draft: refactor(#1681): analytics feed-data debt — compute seam (M10), shared snapshot, work-date cache, breakdown guards","draft":true,"webUrl":"https://gitlab.com/performancelivestock/pb-www/-/merge_requests/3997","diffHeadSha":"3fe4d4cb5d4b1e6f9047f4ae25b2735ccde604c1","updatedAt":"2026-08-17T03:19:15Z","description":"Addresses #1681 (items 1, 2, 4 + the two optional guard candidates; item 3 — mongodb ext on dev/CI — is runner-host ops and stays open on the issue).\n\n**Stacked on !3995** (`feat/796-nem-neg-analytics`): items 1–2 modify code that only exists there. This MR targets that branch so the diff shows only #1681 work; GitLab auto-retargets to `master` when !3995 merges. **Hold merge until !3995 lands.**\n\n## Summary\n\n- **Item 2 — compute seam (M10):** the per-date feed compute loop is extracted from `Analytics::getDailyFeedData` into `AnalyticsFeedDaily::compute` (statically callable, no DB/session deps — sibling pattern `AnalyticsNEmNEg`). `getDailyFeedData` is now fetch-then-delegate. Surviving mutation M10 is dead **by execution**: substituting the head-divided energy at the `dailySeries` call site fails 5 tests (`14.0` vs `56.0` — off by exactly the fixture's head count).\n- **Item 1 — torn read:** the reshaped growth CSV export now fetches ONE raw FeedSheets snapshot and threads it into both `GrowthModel::buildModel` and `getDailyFeedData` (new trailing optional `$sheetData` param). Root-cause prerequisite: `buildModel`'s fallback `$groups` fetch now projects `field=status` — previously the closed-group end-date narrowing (`Sheets.php:137`) could never fire on the model-fed read (undefined `'status'` key on PHP 8) while it did fire on Analytics' own read, making the two reads non-equivalent for closed+0-head groups. A 21-row call-site characterization found no consumer affected beyond the narrowing semantics (`AddedCost` computes but never reads its range; the added key is shape-safe everywhere).\n- **Item 4 — P×D→D:** `PenMongo::getRationsForDate` now passes `add_to_cache: true` (sibling: `getRations`, PenMongo:102) so the per-feedyard-day work-date document is fetched once per date instead of once per (pen × date) — ~5,000 → ~250 fetches for a 20-pen/250-day group. Deliberately **no field projection**: the shared identity map records nothing about projections, so caching a projected doc would hand later consumers incomplete documents (`RationSheet.php:146` already does a projected, non-cached read).\n- **Guards:** the DMAF and health `chartTypeChanged` breakdown-default lookups get the same null-safe guard shape as NEm/NEg (6ae6697fbc); the inverted tripwire test is flipped to assert all three branches guarded.\n\n## Key decisions\n\n- Extraction over DI: `Analytics`' constructor is DB-bound even with `$build=false`, so no injected collaborator could reach the unit env — a pure static compute unit can.\n- `buildModel`'s loose `$sheetData == null` gate is intentionally preserved (14 other call sites depend on empty-array-refetch semantics); `getDailyFeedData` uses strict `??=`.\n- `getTargetData`'s FeedData read stays a separate read set — full multi-collection snapshot consistency needs machinery that doesn't exist; residual window documented.\n\n## Verification\n\n- UnitTests: 936 → 957 tests; Errors 69 / Failures 1 / Skipped 80 / Risky 38 — unchanged from baseline (pre-existing API-connectivity).\n- Mutation receipts: M10 (1→6→1 failures across apply/revert); ordering falsifier (snapshot fetched before model build); `field=status` revert; `??=`→`==` swap; projection-added and cache-arg-dropped mutants for item 4; per-branch guard reverts. All killed.\n- **dev2 (base) vs dev3 (this branch), shared Mongo, 12-probe SHA-256 battery: 12/12 byte-identical** — NEm/NEg/DMAFBW/DMAFH charts and reshaped + raw CSVs, on open AND closed groups. The closed-group identity shows the `field=status` change produces no output delta on real data (the narrowed post-closure window holds no emitted rows), so nightly-cron model rebuilds converge as a no-op here.\n- Live guard check on dev3: five chart-type switches (NEm/DMAF/health/health_compared/NEg), correct breakdown defaults, zero JS errors.\n\n## Known / carried forward\n\n- `WorkDateMongo::$cache_by_work_date` has no `feedyard_id` component — safe per-request, but `cron/update_sheets_for_users.php` iterates all feedyards in one process. Pre-existing hazard (multiple populate sites already exist), widened by this MR's third; **now tracked as #1681 item 5** (filed 2026-07-29 with the cron trace from review).\n- `Group.php:2244`'s \"stop at today to catch post-sale feeding\" comment already disagreed with its own code; the narrowing convergence brushes against it — worth a follow-up read, not blocking.","project":{"fullPath":"performancelivestock/pb-www"},"author":{"username":"chandler.hardy"},"reviewers":{"nodes":[{"username":"alliecather","mergeRequestInteraction":{"reviewState":"UNREVIEWED"}},{"username":"edmundlim","mergeRequestInteraction":{"reviewState":"UNREVIEWED"}}]},"headPipeline":{"status":"SUCCESS"},"resolvableDiscussionsCount":1,"resolvedDiscussionsCount":0},{"iid":"3995","title":"feat(#796): NEm and NEg Analytics Adjustments","draft":false,"webUrl":"https://gitlab.com/performancelivestock/pb-www/-/merge_requests/3995","diffHeadSha":"8b8733bccfb6169f98de19c0db8ce026df844f3a","updatedAt":"2026-08-14T15:12:38Z","description":"### Available on [https://dev2.chandlerhardy-dev.performancebeef.com](https://dev2.chandlerhardy-dev.performancebeef.com)\n### Closes #796\n\n## Summary\n\n- NEm/NEg charts gain a **Per CWT / Per Head** breakdown, defaulting to **Per CWT** (delivered ration energy density, Mcal per CWT of dry-matter intake — matches the as-entered ration NEm convention). Per-Head behavior unchanged, including its Target line.\n- Chart-type labels stripped of \"(per Head)\"; titles and axis units are breakdown-aware (`NEm - {group/pen} - {breakdown}`).\n- The admin **NEm/NEg** CSV export (only — the other six growth charts keep the raw model dump) is reshaped into a consultant worksheet: removed Ideal/Breed/Gender/Temperature/Wind/Model Gender; added **Target As Fed, DMI Target, Ration**; retitled Start→Projected Weight, DMI→DMI As Fed, NEm→NEm As Fed, NEg→NEg As Fed, with each Target column beside its As-Fed counterpart in matching units (raw-lb basis; metric feedyards' targets reconciled by the delivery conversion factor).\n\n## Deliberate deviation from the issue (product please confirm)\n\nThe issue's CSV add-list included **Target NEm / Target NEg**, and the original implementation shipped them — the review panel then proved the per-CWT target math is **degenerate**: the pipeline has no formulated target-energy source (`getTargetData` returns weight targets only), so the \"Target\" density algebraically ≈ the actual density whenever the ration is fed near its card. Decision (user-gated 2026-07-29): **drop the Target series on Per CWT** (chart) and the two energy Target columns (CSV) rather than ship two near-identical columns that read as \"always on target\". A real target-energy series would need the ration card's formulated composition — its own issue if wanted.\n\n## Hardening picked up by the review panel (this MR)\n\n- CSV formula injection (CWE-1236) neutralized on **all three** export branches of `downloadAnalytics.php` (Ration cells, pie first-cell/series headers, generic headers) — tenant-authored free text reaches higher-privileged consultants' spreadsheets.\n- `Content-Disposition` filename sanitized (quote/control-char/path stripping; pre-existing gap).\n- Join-miss vs genuine-zero distinguishable in the CSV (blank vs `0.0` — survives `fputcsv` to the byte level).\n- Re-clicking the already-active NEm/NEg tile no longer silently resets a deliberate Per Head choice.\n- `FeedData` per-pen loaders memoized (P× unbounded Mongo finds → 1×); `memory_limit` raised only for the growth-model branch; weight factor read through the live `Analytics` instance (kills a hidden-static ordering trap that would have silently broken metric feedyards under future refactors).\n\n## Verification\n\n- `php -l` clean on all changed files. Full UnitTests suite: **914 tests — 69 errors / 1 failure, byte-identical to the pre-MR baseline** (pre-existing API-connectivity cases; verify tail on request).\n- 77 targeted PHPUnit tests (RED→GREEN TDD ordering), **15 mutation classes applied to real source and observed to fail** — full per-mutant receipts (mutant → diff → failing assertion) posted as an MR note.\n- One surviving mutation is **declared, not hidden** (M10: a deliberate wrong-variable substitution at the unit-unreachable `getDailyFeedData` call site; compensating characterization test exists).\n- Full 8-lane review panel (architect, security, data-integrity, test-quality, design, perf, simplifier, frontend-ux) + scoped re-reviews; TQS 63→72.\n- **Not yet browser-verified on dev2** (menu default, rendered title, per-CWT axis magnitude ≈ as-entered ration NEm, live CSV pull) — flagged for QA before merge.\n- Val gate: `VAL_UNAVAILABLE` (Val binary not yet deployed); waived with the mutation receipts standing in.\n\n## Known accepted gaps / follow-ups — tracked in #1681\n\n1. **Torn read on the CSV export**: three independent Mongo reads merged per request (GrowthModel sheets, Analytics sheets, targets FeedData) — a mid-request ration edit can produce a self-contradictory row. Narrow window, admin-only path; a shared-snapshot fix is a real refactor, not a patch.\n2. **Pre-existing P×D work-date fetch** under `getTargetData` (`PenMongo::getRationsForDate` doesn't populate the WorkDateMongo cache): ~5,000 unprojected full-document fetches per large-group export — and the production chart paths already pay this today. Fix touches shared caching machinery; needs its own issue.\n3. `getPropertiesForFeedItems` remains unbounded-lower-date **by design** (carry-forward history semantics — a naive bound silently zeroes unchanged items; documented in-code).\n4. `MicroRationData` copy-paste twin of the memoized FeedData loaders not updated (kept surgical).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)","project":{"fullPath":"performancelivestock/pb-www"},"author":{"username":"chandler.hardy"},"reviewers":{"nodes":[{"username":"alliecather","mergeRequestInteraction":{"reviewState":"UNREVIEWED"}},{"username":"edmundlim","mergeRequestInteraction":{"reviewState":"UNAPPROVED"}}]},"headPipeline":{"status":"SUCCESS"},"resolvableDiscussionsCount":11,"resolvedDiscussionsCount":11},{"iid":"3985","title":"Draft: feat(#1599): yard sheets — ranch data point columns, filters, and group aggregation","draft":true,"webUrl":"https://gitlab.com/performancelivestock/pb-www/-/merge_requests/3985","diffHeadSha":"77326ecd25d0e501f01b1028edfdfb1fa3abf15c","updatedAt":"2026-08-14T15:12:59Z","description":"Resolves #1599 (milestone %\"Ranch Data Points\")\n\nAvailable on https://dev0.chandlerhardy-dev.performancebeef.com — Reports \u003e Yard Sheets (saved sheet \"QA Ranch Fields\" demonstrates all columns; group \"09/23/2025 Carson\" carries uniform seeded values).\n\n## Summary\n\n- Adds the 9 ranch data points to Yard Sheets as data-point columns and filters (alphabetical ordering preserved): enum filters for Birth Vigor / Calving Ease / Color / Dam BCS at Birth / Horned Status (full #1596 label lists), range filters for Birthdate (date) and Birth Weight (numeric), Brand/Tattoo as data points.\n- Group-level value semantics: shows the **single uniform value** across the group's active animals (\"03/14/2024\", \"2 - Nursed on own, but slowly\", \"Red\", \"Polled\"…) or **\"- - -\"** when absent/mixed — new `Group::getRanchDataPoints()` fetches the group's animals from the existing pb-api animals endpoint (projected `field=` params, per-group, recompute-path only, memoized) and aggregates in PHP.\n- **15 new PHPUnit tests** (DB-free, injectable fetcher seam): aggregation uniform/mixed/absent/departed-excluded, type canonicalization, display resolution, and a zero-fetch guarantee for non-yardsheet closeout paths.\n\n## Notes for reviewers\n\n- **Aggregation semantics were a product gap** — nothing existing maps per-animal fields to a group row. \"Uniform-or-dashes\" matches the mockup (values on uniform groups, \"- - -\" otherwise). Adjustable.\n- Tribunal/QA hardening in-branch: display finalization into the report cache read-path; fetch gated so Closeout/MDC/dashboard never trigger animal fetches (unit-proven); int-vs-string canonicalization; the client date filter treats \"- - -\" as absent (would otherwise hide such groups whenever a birthdate filter exists).\n- Deliberate deferrals (documented): free-text filters for Brand/Tattoo; per-sheet fetch skip when no ranch column selected; ranch fields visible-but-valueless in the closeout picker.\n- **Ops:** existing cached sheets need a recompute (`Report_Yard::setDirtyAllForFeedyard` or the nightly `cron/daily_yardsheets.php`) before values appear.\n- **Depends on pb-api ranch fields** (dev contract branch on dev0). Draft until the real pb-api implementation lands.\n\n## Verification\n\n- Live on dev0: modal data points + filter types, uniform vs \"- - -\" rendering, filter retention of dash-groups (19+1 fixture, all 20 render) — `.planning/qa-reports/1599-yardsheets-ranch-data/QA-REPORT.md`\n- MAGI tribunal SHIP 3/3 after 3 fix rounds (`.magi/tribunal-report-1599-2026-07-18.md`); PHPUnit 15/15.","project":{"fullPath":"performancelivestock/pb-www"},"author":{"username":"chandler.hardy"},"reviewers":{"nodes":[{"username":"adamsoper","mergeRequestInteraction":{"reviewState":"UNREVIEWED"}}]},"headPipeline":{"status":"SUCCESS"},"resolvableDiscussionsCount":1,"resolvedDiscussionsCount":0},{"iid":"3984","title":"Draft: feat(#1598): bulk edit — ranch data point blocks with mass edit toggles","draft":true,"webUrl":"https://gitlab.com/performancelivestock/pb-www/-/merge_requests/3984","diffHeadSha":"b45678d1b62b7a5d1db9335b559dd813f29562ef","updatedAt":"2026-08-14T15:13:42Z","description":"Resolves #1598 (milestone %\"Ranch Data Points\")\n\nAvailable on: **dev site pending** — dev0–dev5 are all occupied (dev0 serves !3985; dev1/dev2 host other open MRs; dev3–5 host !3981/!3982/!3983). Will be assigned to whichever frees first — Health \u003e All Feedyard Animals \u003e select animals \u003e Edit.\n\n## Summary\n\n- Adds 9 edit blocks (Birthdate, Birth Weight, Brand, Tattoo, Birth Vigor, Dam BCS at Birth, Color, Horned Status, Calving Ease) to Bulk Edit in mockup order, each with a \"Mass Edit?\" toggle + per-animal inputs.\n- Enum lists are **byte-identical** to #1590's `health.enums.js` block (empty-diff receipt) — the two branches merge cleanly whichever lands first.\n- Int fields PATCH as bare ints via the same guard pattern #1590's tribunal approved; cleared inputs / \"Select\" placeholders PATCH null.\n\n## Notes for reviewers\n\n- Two QA/tribunal-caught fixes are in the branch: (1) the optional Birthdate/Birth Weight inputs originally inherited Past Weights' `individual-pounds*` classes and were being marked *required*, silently blocking Save; (2) the Mass Edit toggles no longer auto-fire the bulk control's change on toggle — unlike gender, our bulk selects have an empty placeholder, so the cloned pattern would have nulled the field on every selected animal just by flipping the switch (divergence documented in-code).\n- **Depends on pb-api ranch fields** (dev contract branch on dev0). Draft until the real pb-api implementation lands.\n\n## Verification\n\n- Live on dev0: pristine-form save validity, toggle-sweep no-op, mass-apply ×3 animals, individual int write, Mongo type check — `.planning/qa-reports/1598-bulk-edit-ranch-data/QA-REPORT.md`\n- MAGI tribunal SHIP 3/3 after 2 fix rounds (`.magi/tribunal-report-1598-2026-07-17.md`).","project":{"fullPath":"performancelivestock/pb-www"},"author":{"username":"chandler.hardy"},"reviewers":{"nodes":[]},"headPipeline":{"status":"SUCCESS"},"resolvableDiscussionsCount":0,"resolvedDiscussionsCount":0},{"iid":"3983","title":"Draft: feat(#1597): all animals table — Sex label, Birthdate column, merged Safe to Ship cell","draft":true,"webUrl":"https://gitlab.com/performancelivestock/pb-www/-/merge_requests/3983","diffHeadSha":"53036b30f2e6cc658b62a86ecd3d5fc16d32286d","updatedAt":"2026-08-14T15:13:38Z","description":"Resolves #1597 (milestone %\"Ranch Data Points\")\n\nAvailable on: **dev site pending** (was dev5; displaced by another MR) — will take the next free dev slot. Page: Health \u003e All Feedyard Animals.\n\n## Summary\n\n- Adds a **Birthdate** column (MM/DD/YYYY, `n/a` when unset, chronological sort with n/a pinned last) between Sex and Last Diagnosis.\n- Removes the standalone **Days to Clear** column; the count renders as a stacked secondary line inside **Safe to Ship** (same treatment as the group page in !3981).\n- Renames the \"Gender\" header to **\"Sex\"** per the mockup (label only — data binding unchanged).\n- DataTables columnDefs indices re-synced (date-sort plugin covers the new column; Last Processed unchanged at its new index).\n\n## Notes for reviewers\n\n- The issue/mockup's changes target the live DataTables path (`overall.html` + `health.utility.js`); `bulk_animal_table.html` turned out to be dead code (zero consumers of its jsViews tag) and is deliberately untouched — a cleanup issue may be worth filing.\n- **Depends on pb-api ranch fields** (dev contract branch on dev0). Draft until the real pb-api implementation lands.\n- Heads-up from QA: dev DB snapshots containing legacy `type:\"converted\"` applied costs 500 every animal GET on current pb-api master (pre-existing; we hit and fixed it on dev0's data). Prod presumably migrated these long ago.\n\n## Verification\n\n- Browser QA on dev0: structure, seeded birthdates (no TZ off-by-one), both-direction sorting, Departed/Clear states across 573 rows — `.planning/qa-reports/1597-all-animals-ranch-data/QA-REPORT.md`\n- MAGI tribunal SHIP 3/3, zero findings (`.magi/tribunal-report-1597-2026-07-17.md`).","project":{"fullPath":"performancelivestock/pb-www"},"author":{"username":"chandler.hardy"},"reviewers":{"nodes":[]},"headPipeline":{"status":"SUCCESS"},"resolvableDiscussionsCount":0,"resolvedDiscussionsCount":0},{"iid":"3982","title":"Draft: feat(#1590): edit animal — collect and edit ranch data points in Animal Stats","draft":true,"webUrl":"https://gitlab.com/performancelivestock/pb-www/-/merge_requests/3982","diffHeadSha":"a10b4906a2eb2e4a59305c06a98614624aef3312","updatedAt":"2026-08-14T15:13:33Z","description":"Resolves #1590 (milestone %\"Ranch Data Points\")\n\nUnavailable on any dev right now, on hold\nHealth \u003e group \u003e Edit an animal. Tag 5218 in \"6/5/25 Johnson Steers\" has all 9 values saved\n\n\u003e **If you looked between Jul 18–21 and saw empty fields:** the dev Mongo was rebuilt from production snapshots on Jul 18, which wiped the demo values saved during QA (dev-only data). Values were re-saved through the UI on Jul 21, re-verifying the full write path against the dev4 API in the process.\n\n## Summary\n\n- Adds 9 editable rows to the Animal Stats panel in mockup order: Birthdate (date), Birth Weight (number, lbs), Brand, Tattoo (text), and Birth Vigor / Dam BCS at Birth / Color / Horned Status / Calving Ease (dropdowns).\n- Enum option lists live in one place (`health.enums.js`, labels verbatim from #1596) — #1598 bulk edit will reuse them, and the eventual rename pass against the real pb-api field names touches one file.\n- Wiring follows the existing `gender` pattern end-to-end (observe → change-handler → existing top-level PATCH). New `~toIntOrNull`/`~emptyToNull` convertBack helpers guarantee ints PATCH as bare ints and cleared fields PATCH as null.\n\n## Notes for reviewers\n\n- **Depends on pb-api ranch fields** (dev contract branch `pb-api@chardy/ranch-data-points-dev`, deployed on dev0 and dev4). Draft until the real pb-api implementation lands.\n- Tribunal caught and fixed an int-coercion bug pre-push (\"12.9\" would have silently PATCHed as 12; now `step=\"1\"` + native validation blocks it, with a null-not-corrupted fallback).\n- `d52cef6f70` fixes a styling miss from the first cut: the three free-entry inputs (Birth Weight, Brand, Tattoo) shipped with bare `form-control`, but the theme's input styling keys off `.textbox`/`.date-input`, so they rendered as unstyled white boxes. Now `textbox` (+ `numeric` for the number field), matching the template's existing inputs; `script_version` → wagyu29 to bust the `?v=` template cache.\n\n## Verification\n\n- Full write path verified on dev0 (Jul 17) and re-verified on dev4 (Jul 21): UI → PATCH → pb-api validation → Mongo shows exact contract types (ints as NumberLong, nulls on clear); reload round-trips every field. `.planning/qa-reports/1590-edit-animal-ranch-data/QA-REPORT.md`\n- Styling fix verified on dev4 via computed styles (inputs pick up the dark-theme `.textbox` background) — see report screenshot `04-dev4-styled-inputs-resaved-values.png`.\n- MAGI tribunal SHIP 3/3 after one fix round (`.magi/tribunal-report-1590-2026-07-17.md`).","project":{"fullPath":"performancelivestock/pb-www"},"author":{"username":"chandler.hardy"},"reviewers":{"nodes":[{"username":"adamsoper","mergeRequestInteraction":{"reviewState":"UNREVIEWED"}}]},"headPipeline":{"status":"SUCCESS"},"resolvableDiscussionsCount":0,"resolvedDiscussionsCount":0},{"iid":"3981","title":"Draft: feat(#1588): group page — Sex + Birthdate columns, merged Safe to Ship cell","draft":true,"webUrl":"https://gitlab.com/performancelivestock/pb-www/-/merge_requests/3981","diffHeadSha":"f4212dfbb5f3d75c1f380d05565a7acda731d403","updatedAt":"2026-08-14T15:13:26Z","description":"Resolves #1588 (milestone %\"Ranch Data Points\")\n\n**On hold awaiting the pb-api ranch-fields implementation — not currently available on a dev server** (previously previewed on dev3; that environment has been reassigned while this waits).\n\n## Summary\n\n- Adds **Sex** and **Birthdate** columns to the group page's individual-animal table.\n- Removes the standalone **Days to Clear** column; the day count now renders as a stacked secondary line inside **Safe to Ship** (\"Withdrawal / N Days to Clear\"), per the issue mockup.\n- Birthdate uses the repo's date-only normalizer (`~stringToDate`) to avoid the UTC-midnight off-by-one on `YYYY-MM-DD` values (caught in browser QA).\n\n## Notes for reviewers\n\n- **Sex column is mockup-derived** — the issue's Changes list only names birthdate + the cell merge, but the approved mockup shows Sex (the All-Animals table already has it). Cell copied verbatim from `bulk_animal_table.html`.\n- **Depends on pb-api ranch fields** (`birth_date` on animal documents). A dev-only contract branch (`pb-api@chardy/ranch-data-points-dev`, deployed on dev0) serves it for review; **draft until the real pb-api implementation lands** — field names may need a rename pass to match it.\n- Known minor (tribunal-flagged, non-gating): \"1 Days to Clear\" pluralization.\n\n## Verification\n\n- MAGI tribunal SHIP 3/3 (report: `.magi/tribunal-report-working-tree-2026-07-17.md` on the branch context).\n- Browser QA on dev0 with seeded birth dates: all three Safe-to-Ship states + null/date rendering verified — `.planning/qa-reports/1588-group-page-ranch-data/QA-REPORT.md`.\n- `php -l` clean; local PHPUnit deltas are pre-existing devbox-config failures (CI is authoritative).","project":{"fullPath":"performancelivestock/pb-www"},"author":{"username":"chandler.hardy"},"reviewers":{"nodes":[{"username":"adamsoper","mergeRequestInteraction":{"reviewState":"UNREVIEWED"}}]},"headPipeline":{"status":"SUCCESS"},"resolvableDiscussionsCount":0,"resolvedDiscussionsCount":0}]},"assignedMergeRequests":{"nodes":[{"iid":"4007","title":"feat(#1701): Add Usage column to the feed inventory emailed report","draft":false,"webUrl":"https://gitlab.com/performancelivestock/pb-www/-/merge_requests/4007","diffHeadSha":"38f869933960f31cd0d89a707aad5844d79a77ad","updatedAt":"2026-08-14T15:12:31Z","description":"### Available on [dev5](https://dev5.chandlerhardy-dev.performancebeef.com/)\n### Closes #1701\n\nAdds a **Usage** column to the emailed inventory alert report, between **Amount Remaining** and **Estimated Days Left**, showing that work-date's usage for each alertable item (`InventoryLedger::getItemUsageForPeriod`, single-day window). Displays **\"No recent usage\"** when the day's usage is zero — including when a small positive usage would *round* to a displayed \"0\" (weight rounding settings). Formatting/pluralization mirrors the Amount Remaining cell exactly (separators, cc/mL exemption); email cells copy the sibling inline styles byte-for-byte.\n\n**Verify:** 13 exact-assertion unit tests on the extracted `formatUsageCell` helper with mutation falsification (guard inversion, cc/mL exemption deletion, RED→GREEN on the rounding fix). MAGI tribunal (Claude/Codex/Seneschal): SHIP 3/3 after 1 fix round. Live QA on dev5 (Allie): report preview renders `Feed | Amount Remaining | Usage | Estimated Days Left` with real values (\"2,973 lbs\", \"28 lbs\") and \"No recent usage\" empty states across both categories.\n\n\u003c!-- This is an auto-generated comment: release notes by coderabbit.ai --\u003e\n## Summary by CodeRabbit\n\n* **New Features**\n  * Inventory report emails now include a separate Usage column for alertable items.\n  * Usage reflects consumption over the previous day and follows configured number formatting.\n  * Zero or negligible usage is displayed as “No recent usage.”\n  * Measurement labels are formatted consistently, including correct singular and plural forms across supported units.\n\n* **Style**\n  * Improved mobile readability by reducing horizontal padding in report tables.\n\u003c!-- end of auto-generated comment: release notes by coderabbit.ai --\u003e","project":{"fullPath":"performancelivestock/pb-www"},"author":{"username":"chandler.hardy"},"reviewers":{"nodes":[{"username":"leyang","mergeRequestInteraction":{"reviewState":"APPROVED"}},{"username":"alliecather","mergeRequestInteraction":{"reviewState":"UNREVIEWED"}}]},"headPipeline":{"status":"SUCCESS"},"resolvableDiscussionsCount":3,"resolvedDiscussionsCount":0},{"iid":"4006","title":"feat(#1700): Add ability to hide Kill Sheet information","draft":false,"webUrl":"https://gitlab.com/performancelivestock/pb-www/-/merge_requests/4006","diffHeadSha":"719acc6b8cd1e22289e779116811bf012f47ed32","updatedAt":"2026-08-14T17:21:57Z","description":"### Available on [dev4](https://dev4.chandlerhardy-dev.performancebeef.com/)\n### Closes #1700\n\nAdds a **Kill Sheet Data Points** dropdown (Show/Hide, default Show) to Account Settings \u003e System Settings. When set to Hide:\n\n- The **Expand Dressed** button + kill sheet section are not rendered in the +/- Head Sell form and the Edit Sale form (shared `_sold_fields.php` gate — fields absent from the DOM, not CSS-hidden).\n- The 28 packer-derived columns are omitted from the read-only **Sheets \u003e Sold Head** view (`Head_sold::setHideKillSheetColumns`, mirroring the #1489 `include_edit_button` flag; filters by name/key so the two flags compose in either order).\n- Save paths treat an **absent** packer key as \"no change\": head-count edits recalibrate stored per-head hot weight/base price from the original total, and Destination stays required while a hidden packer record exists — an existing `group_packer_info` record can never be wiped or orphaned by a Hide-mode save.\n\n**Known limitations (by design):** the CSV export keeps the full column set (data extract, not a display surface); the gate is render-time, so a tab opened before flipping the setting can still post packer values (the absent-key save tolerance keeps such posts from corrupting stored records). The bulk Edit sheet is now gated too (review round, R-1).\n\n**Verify:** 133 targeted PHPUnit tests (exact-array column assertions, child-process partial renders in both modes/hosts, 16-row per-head-source truth table, source-scan wiring guards) + mutation falsification on every new guard. MAGI tribunal (Claude/Codex/Seneschal + 3-agent specialist panel): SHIP after 1 fix round. Browser QA on dev5 (Allie): setting renders, saves, persists, both directions. Live sheet/form checks were blocked by pre-existing dev5 data corruption (`work_dates` doc `6a6c3388a405abcd00000000` has double-typed `target_pounds`; pb-api 500s on decode — repair script ready, unrelated to this MR). Not verified on a metric (kg) account: the per-head recompute unit round-trip.\n\n\u003c!-- This is an auto-generated comment: release notes by coderabbit.ai --\u003e\n## Summary by CodeRabbit\n\n- **New Features**\n  - Added a Kill Sheet Data Points setting to show or hide optional Kill Sheet fields.\n  - Applied the preference across sales forms, read-only views, tables, and saved records.\n  - Event-related information remains visible when optional fields are hidden.\n\n- **Bug Fixes**\n  - Omitted optional fields now retain existing values instead of being cleared.\n  - Improved destination validation and per-head recalculation when quantities change.\n  - Save failures now show row-level errors and remain retryable.\n\u003c!-- end of auto-generated comment: release notes by coderabbit.ai --\u003e","project":{"fullPath":"performancelivestock/pb-www"},"author":{"username":"chandler.hardy"},"reviewers":{"nodes":[{"username":"randywu","mergeRequestInteraction":{"reviewState":"APPROVED"}},{"username":"alliecather","mergeRequestInteraction":{"reviewState":"UNREVIEWED"}}]},"headPipeline":{"status":"SUCCESS"},"resolvableDiscussionsCount":7,"resolvedDiscussionsCount":7},{"iid":"3997","title":"Draft: refactor(#1681): analytics feed-data debt — compute seam (M10), shared snapshot, work-date cache, breakdown guards","draft":true,"webUrl":"https://gitlab.com/performancelivestock/pb-www/-/merge_requests/3997","diffHeadSha":"3fe4d4cb5d4b1e6f9047f4ae25b2735ccde604c1","updatedAt":"2026-08-17T03:19:15Z","description":"Addresses #1681 (items 1, 2, 4 + the two optional guard candidates; item 3 — mongodb ext on dev/CI — is runner-host ops and stays open on the issue).\n\n**Stacked on !3995** (`feat/796-nem-neg-analytics`): items 1–2 modify code that only exists there. This MR targets that branch so the diff shows only #1681 work; GitLab auto-retargets to `master` when !3995 merges. **Hold merge until !3995 lands.**\n\n## Summary\n\n- **Item 2 — compute seam (M10):** the per-date feed compute loop is extracted from `Analytics::getDailyFeedData` into `AnalyticsFeedDaily::compute` (statically callable, no DB/session deps — sibling pattern `AnalyticsNEmNEg`). `getDailyFeedData` is now fetch-then-delegate. Surviving mutation M10 is dead **by execution**: substituting the head-divided energy at the `dailySeries` call site fails 5 tests (`14.0` vs `56.0` — off by exactly the fixture's head count).\n- **Item 1 — torn read:** the reshaped growth CSV export now fetches ONE raw FeedSheets snapshot and threads it into both `GrowthModel::buildModel` and `getDailyFeedData` (new trailing optional `$sheetData` param). Root-cause prerequisite: `buildModel`'s fallback `$groups` fetch now projects `field=status` — previously the closed-group end-date narrowing (`Sheets.php:137`) could never fire on the model-fed read (undefined `'status'` key on PHP 8) while it did fire on Analytics' own read, making the two reads non-equivalent for closed+0-head groups. A 21-row call-site characterization found no consumer affected beyond the narrowing semantics (`AddedCost` computes but never reads its range; the added key is shape-safe everywhere).\n- **Item 4 — P×D→D:** `PenMongo::getRationsForDate` now passes `add_to_cache: true` (sibling: `getRations`, PenMongo:102) so the per-feedyard-day work-date document is fetched once per date instead of once per (pen × date) — ~5,000 → ~250 fetches for a 20-pen/250-day group. Deliberately **no field projection**: the shared identity map records nothing about projections, so caching a projected doc would hand later consumers incomplete documents (`RationSheet.php:146` already does a projected, non-cached read).\n- **Guards:** the DMAF and health `chartTypeChanged` breakdown-default lookups get the same null-safe guard shape as NEm/NEg (6ae6697fbc); the inverted tripwire test is flipped to assert all three branches guarded.\n\n## Key decisions\n\n- Extraction over DI: `Analytics`' constructor is DB-bound even with `$build=false`, so no injected collaborator could reach the unit env — a pure static compute unit can.\n- `buildModel`'s loose `$sheetData == null` gate is intentionally preserved (14 other call sites depend on empty-array-refetch semantics); `getDailyFeedData` uses strict `??=`.\n- `getTargetData`'s FeedData read stays a separate read set — full multi-collection snapshot consistency needs machinery that doesn't exist; residual window documented.\n\n## Verification\n\n- UnitTests: 936 → 957 tests; Errors 69 / Failures 1 / Skipped 80 / Risky 38 — unchanged from baseline (pre-existing API-connectivity).\n- Mutation receipts: M10 (1→6→1 failures across apply/revert); ordering falsifier (snapshot fetched before model build); `field=status` revert; `??=`→`==` swap; projection-added and cache-arg-dropped mutants for item 4; per-branch guard reverts. All killed.\n- **dev2 (base) vs dev3 (this branch), shared Mongo, 12-probe SHA-256 battery: 12/12 byte-identical** — NEm/NEg/DMAFBW/DMAFH charts and reshaped + raw CSVs, on open AND closed groups. The closed-group identity shows the `field=status` change produces no output delta on real data (the narrowed post-closure window holds no emitted rows), so nightly-cron model rebuilds converge as a no-op here.\n- Live guard check on dev3: five chart-type switches (NEm/DMAF/health/health_compared/NEg), correct breakdown defaults, zero JS errors.\n\n## Known / carried forward\n\n- `WorkDateMongo::$cache_by_work_date` has no `feedyard_id` component — safe per-request, but `cron/update_sheets_for_users.php` iterates all feedyards in one process. Pre-existing hazard (multiple populate sites already exist), widened by this MR's third; **now tracked as #1681 item 5** (filed 2026-07-29 with the cron trace from review).\n- `Group.php:2244`'s \"stop at today to catch post-sale feeding\" comment already disagreed with its own code; the narrowing convergence brushes against it — worth a follow-up read, not blocking.","project":{"fullPath":"performancelivestock/pb-www"},"author":{"username":"chandler.hardy"},"reviewers":{"nodes":[{"username":"alliecather","mergeRequestInteraction":{"reviewState":"UNREVIEWED"}},{"username":"edmundlim","mergeRequestInteraction":{"reviewState":"UNREVIEWED"}}]},"headPipeline":{"status":"SUCCESS"},"resolvableDiscussionsCount":1,"resolvedDiscussionsCount":0},{"iid":"3995","title":"feat(#796): NEm and NEg Analytics Adjustments","draft":false,"webUrl":"https://gitlab.com/performancelivestock/pb-www/-/merge_requests/3995","diffHeadSha":"8b8733bccfb6169f98de19c0db8ce026df844f3a","updatedAt":"2026-08-14T15:12:38Z","description":"### Available on [https://dev2.chandlerhardy-dev.performancebeef.com](https://dev2.chandlerhardy-dev.performancebeef.com)\n### Closes #796\n\n## Summary\n\n- NEm/NEg charts gain a **Per CWT / Per Head** breakdown, defaulting to **Per CWT** (delivered ration energy density, Mcal per CWT of dry-matter intake — matches the as-entered ration NEm convention). Per-Head behavior unchanged, including its Target line.\n- Chart-type labels stripped of \"(per Head)\"; titles and axis units are breakdown-aware (`NEm - {group/pen} - {breakdown}`).\n- The admin **NEm/NEg** CSV export (only — the other six growth charts keep the raw model dump) is reshaped into a consultant worksheet: removed Ideal/Breed/Gender/Temperature/Wind/Model Gender; added **Target As Fed, DMI Target, Ration**; retitled Start→Projected Weight, DMI→DMI As Fed, NEm→NEm As Fed, NEg→NEg As Fed, with each Target column beside its As-Fed counterpart in matching units (raw-lb basis; metric feedyards' targets reconciled by the delivery conversion factor).\n\n## Deliberate deviation from the issue (product please confirm)\n\nThe issue's CSV add-list included **Target NEm / Target NEg**, and the original implementation shipped them — the review panel then proved the per-CWT target math is **degenerate**: the pipeline has no formulated target-energy source (`getTargetData` returns weight targets only), so the \"Target\" density algebraically ≈ the actual density whenever the ration is fed near its card. Decision (user-gated 2026-07-29): **drop the Target series on Per CWT** (chart) and the two energy Target columns (CSV) rather than ship two near-identical columns that read as \"always on target\". A real target-energy series would need the ration card's formulated composition — its own issue if wanted.\n\n## Hardening picked up by the review panel (this MR)\n\n- CSV formula injection (CWE-1236) neutralized on **all three** export branches of `downloadAnalytics.php` (Ration cells, pie first-cell/series headers, generic headers) — tenant-authored free text reaches higher-privileged consultants' spreadsheets.\n- `Content-Disposition` filename sanitized (quote/control-char/path stripping; pre-existing gap).\n- Join-miss vs genuine-zero distinguishable in the CSV (blank vs `0.0` — survives `fputcsv` to the byte level).\n- Re-clicking the already-active NEm/NEg tile no longer silently resets a deliberate Per Head choice.\n- `FeedData` per-pen loaders memoized (P× unbounded Mongo finds → 1×); `memory_limit` raised only for the growth-model branch; weight factor read through the live `Analytics` instance (kills a hidden-static ordering trap that would have silently broken metric feedyards under future refactors).\n\n## Verification\n\n- `php -l` clean on all changed files. Full UnitTests suite: **914 tests — 69 errors / 1 failure, byte-identical to the pre-MR baseline** (pre-existing API-connectivity cases; verify tail on request).\n- 77 targeted PHPUnit tests (RED→GREEN TDD ordering), **15 mutation classes applied to real source and observed to fail** — full per-mutant receipts (mutant → diff → failing assertion) posted as an MR note.\n- One surviving mutation is **declared, not hidden** (M10: a deliberate wrong-variable substitution at the unit-unreachable `getDailyFeedData` call site; compensating characterization test exists).\n- Full 8-lane review panel (architect, security, data-integrity, test-quality, design, perf, simplifier, frontend-ux) + scoped re-reviews; TQS 63→72.\n- **Not yet browser-verified on dev2** (menu default, rendered title, per-CWT axis magnitude ≈ as-entered ration NEm, live CSV pull) — flagged for QA before merge.\n- Val gate: `VAL_UNAVAILABLE` (Val binary not yet deployed); waived with the mutation receipts standing in.\n\n## Known accepted gaps / follow-ups — tracked in #1681\n\n1. **Torn read on the CSV export**: three independent Mongo reads merged per request (GrowthModel sheets, Analytics sheets, targets FeedData) — a mid-request ration edit can produce a self-contradictory row. Narrow window, admin-only path; a shared-snapshot fix is a real refactor, not a patch.\n2. **Pre-existing P×D work-date fetch** under `getTargetData` (`PenMongo::getRationsForDate` doesn't populate the WorkDateMongo cache): ~5,000 unprojected full-document fetches per large-group export — and the production chart paths already pay this today. Fix touches shared caching machinery; needs its own issue.\n3. `getPropertiesForFeedItems` remains unbounded-lower-date **by design** (carry-forward history semantics — a naive bound silently zeroes unchanged items; documented in-code).\n4. `MicroRationData` copy-paste twin of the memoized FeedData loaders not updated (kept surgical).\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)","project":{"fullPath":"performancelivestock/pb-www"},"author":{"username":"chandler.hardy"},"reviewers":{"nodes":[{"username":"alliecather","mergeRequestInteraction":{"reviewState":"UNREVIEWED"}},{"username":"edmundlim","mergeRequestInteraction":{"reviewState":"UNAPPROVED"}}]},"headPipeline":{"status":"SUCCESS"},"resolvableDiscussionsCount":11,"resolvedDiscussionsCount":11},{"iid":"3985","title":"Draft: feat(#1599): yard sheets — ranch data point columns, filters, and group aggregation","draft":true,"webUrl":"https://gitlab.com/performancelivestock/pb-www/-/merge_requests/3985","diffHeadSha":"77326ecd25d0e501f01b1028edfdfb1fa3abf15c","updatedAt":"2026-08-14T15:12:59Z","description":"Resolves #1599 (milestone %\"Ranch Data Points\")\n\nAvailable on https://dev0.chandlerhardy-dev.performancebeef.com — Reports \u003e Yard Sheets (saved sheet \"QA Ranch Fields\" demonstrates all columns; group \"09/23/2025 Carson\" carries uniform seeded values).\n\n## Summary\n\n- Adds the 9 ranch data points to Yard Sheets as data-point columns and filters (alphabetical ordering preserved): enum filters for Birth Vigor / Calving Ease / Color / Dam BCS at Birth / Horned Status (full #1596 label lists), range filters for Birthdate (date) and Birth Weight (numeric), Brand/Tattoo as data points.\n- Group-level value semantics: shows the **single uniform value** across the group's active animals (\"03/14/2024\", \"2 - Nursed on own, but slowly\", \"Red\", \"Polled\"…) or **\"- - -\"** when absent/mixed — new `Group::getRanchDataPoints()` fetches the group's animals from the existing pb-api animals endpoint (projected `field=` params, per-group, recompute-path only, memoized) and aggregates in PHP.\n- **15 new PHPUnit tests** (DB-free, injectable fetcher seam): aggregation uniform/mixed/absent/departed-excluded, type canonicalization, display resolution, and a zero-fetch guarantee for non-yardsheet closeout paths.\n\n## Notes for reviewers\n\n- **Aggregation semantics were a product gap** — nothing existing maps per-animal fields to a group row. \"Uniform-or-dashes\" matches the mockup (values on uniform groups, \"- - -\" otherwise). Adjustable.\n- Tribunal/QA hardening in-branch: display finalization into the report cache read-path; fetch gated so Closeout/MDC/dashboard never trigger animal fetches (unit-proven); int-vs-string canonicalization; the client date filter treats \"- - -\" as absent (would otherwise hide such groups whenever a birthdate filter exists).\n- Deliberate deferrals (documented): free-text filters for Brand/Tattoo; per-sheet fetch skip when no ranch column selected; ranch fields visible-but-valueless in the closeout picker.\n- **Ops:** existing cached sheets need a recompute (`Report_Yard::setDirtyAllForFeedyard` or the nightly `cron/daily_yardsheets.php`) before values appear.\n- **Depends on pb-api ranch fields** (dev contract branch on dev0). Draft until the real pb-api implementation lands.\n\n## Verification\n\n- Live on dev0: modal data points + filter types, uniform vs \"- - -\" rendering, filter retention of dash-groups (19+1 fixture, all 20 render) — `.planning/qa-reports/1599-yardsheets-ranch-data/QA-REPORT.md`\n- MAGI tribunal SHIP 3/3 after 3 fix rounds (`.magi/tribunal-report-1599-2026-07-18.md`); PHPUnit 15/15.","project":{"fullPath":"performancelivestock/pb-www"},"author":{"username":"chandler.hardy"},"reviewers":{"nodes":[{"username":"adamsoper","mergeRequestInteraction":{"reviewState":"UNREVIEWED"}}]},"headPipeline":{"status":"SUCCESS"},"resolvableDiscussionsCount":1,"resolvedDiscussionsCount":0},{"iid":"3984","title":"Draft: feat(#1598): bulk edit — ranch data point blocks with mass edit toggles","draft":true,"webUrl":"https://gitlab.com/performancelivestock/pb-www/-/merge_requests/3984","diffHeadSha":"b45678d1b62b7a5d1db9335b559dd813f29562ef","updatedAt":"2026-08-14T15:13:42Z","description":"Resolves #1598 (milestone %\"Ranch Data Points\")\n\nAvailable on: **dev site pending** — dev0–dev5 are all occupied (dev0 serves !3985; dev1/dev2 host other open MRs; dev3–5 host !3981/!3982/!3983). Will be assigned to whichever frees first — Health \u003e All Feedyard Animals \u003e select animals \u003e Edit.\n\n## Summary\n\n- Adds 9 edit blocks (Birthdate, Birth Weight, Brand, Tattoo, Birth Vigor, Dam BCS at Birth, Color, Horned Status, Calving Ease) to Bulk Edit in mockup order, each with a \"Mass Edit?\" toggle + per-animal inputs.\n- Enum lists are **byte-identical** to #1590's `health.enums.js` block (empty-diff receipt) — the two branches merge cleanly whichever lands first.\n- Int fields PATCH as bare ints via the same guard pattern #1590's tribunal approved; cleared inputs / \"Select\" placeholders PATCH null.\n\n## Notes for reviewers\n\n- Two QA/tribunal-caught fixes are in the branch: (1) the optional Birthdate/Birth Weight inputs originally inherited Past Weights' `individual-pounds*` classes and were being marked *required*, silently blocking Save; (2) the Mass Edit toggles no longer auto-fire the bulk control's change on toggle — unlike gender, our bulk selects have an empty placeholder, so the cloned pattern would have nulled the field on every selected animal just by flipping the switch (divergence documented in-code).\n- **Depends on pb-api ranch fields** (dev contract branch on dev0). Draft until the real pb-api implementation lands.\n\n## Verification\n\n- Live on dev0: pristine-form save validity, toggle-sweep no-op, mass-apply ×3 animals, individual int write, Mongo type check — `.planning/qa-reports/1598-bulk-edit-ranch-data/QA-REPORT.md`\n- MAGI tribunal SHIP 3/3 after 2 fix rounds (`.magi/tribunal-report-1598-2026-07-17.md`).","project":{"fullPath":"performancelivestock/pb-www"},"author":{"username":"chandler.hardy"},"reviewers":{"nodes":[]},"headPipeline":{"status":"SUCCESS"},"resolvableDiscussionsCount":0,"resolvedDiscussionsCount":0},{"iid":"3982","title":"Draft: feat(#1590): edit animal — collect and edit ranch data points in Animal Stats","draft":true,"webUrl":"https://gitlab.com/performancelivestock/pb-www/-/merge_requests/3982","diffHeadSha":"a10b4906a2eb2e4a59305c06a98614624aef3312","updatedAt":"2026-08-14T15:13:33Z","description":"Resolves #1590 (milestone %\"Ranch Data Points\")\n\nUnavailable on any dev right now, on hold\nHealth \u003e group \u003e Edit an animal. Tag 5218 in \"6/5/25 Johnson Steers\" has all 9 values saved\n\n\u003e **If you looked between Jul 18–21 and saw empty fields:** the dev Mongo was rebuilt from production snapshots on Jul 18, which wiped the demo values saved during QA (dev-only data). Values were re-saved through the UI on Jul 21, re-verifying the full write path against the dev4 API in the process.\n\n## Summary\n\n- Adds 9 editable rows to the Animal Stats panel in mockup order: Birthdate (date), Birth Weight (number, lbs), Brand, Tattoo (text), and Birth Vigor / Dam BCS at Birth / Color / Horned Status / Calving Ease (dropdowns).\n- Enum option lists live in one place (`health.enums.js`, labels verbatim from #1596) — #1598 bulk edit will reuse them, and the eventual rename pass against the real pb-api field names touches one file.\n- Wiring follows the existing `gender` pattern end-to-end (observe → change-handler → existing top-level PATCH). New `~toIntOrNull`/`~emptyToNull` convertBack helpers guarantee ints PATCH as bare ints and cleared fields PATCH as null.\n\n## Notes for reviewers\n\n- **Depends on pb-api ranch fields** (dev contract branch `pb-api@chardy/ranch-data-points-dev`, deployed on dev0 and dev4). Draft until the real pb-api implementation lands.\n- Tribunal caught and fixed an int-coercion bug pre-push (\"12.9\" would have silently PATCHed as 12; now `step=\"1\"` + native validation blocks it, with a null-not-corrupted fallback).\n- `d52cef6f70` fixes a styling miss from the first cut: the three free-entry inputs (Birth Weight, Brand, Tattoo) shipped with bare `form-control`, but the theme's input styling keys off `.textbox`/`.date-input`, so they rendered as unstyled white boxes. Now `textbox` (+ `numeric` for the number field), matching the template's existing inputs; `script_version` → wagyu29 to bust the `?v=` template cache.\n\n## Verification\n\n- Full write path verified on dev0 (Jul 17) and re-verified on dev4 (Jul 21): UI → PATCH → pb-api validation → Mongo shows exact contract types (ints as NumberLong, nulls on clear); reload round-trips every field. `.planning/qa-reports/1590-edit-animal-ranch-data/QA-REPORT.md`\n- Styling fix verified on dev4 via computed styles (inputs pick up the dark-theme `.textbox` background) — see report screenshot `04-dev4-styled-inputs-resaved-values.png`.\n- MAGI tribunal SHIP 3/3 after one fix round (`.magi/tribunal-report-1590-2026-07-17.md`).","project":{"fullPath":"performancelivestock/pb-www"},"author":{"username":"chandler.hardy"},"reviewers":{"nodes":[{"username":"adamsoper","mergeRequestInteraction":{"reviewState":"UNREVIEWED"}}]},"headPipeline":{"status":"SUCCESS"},"resolvableDiscussionsCount":0,"resolvedDiscussionsCount":0},{"iid":"3981","title":"Draft: feat(#1588): group page — Sex + Birthdate columns, merged Safe to Ship cell","draft":true,"webUrl":"https://gitlab.com/performancelivestock/pb-www/-/merge_requests/3981","diffHeadSha":"f4212dfbb5f3d75c1f380d05565a7acda731d403","updatedAt":"2026-08-14T15:13:26Z","description":"Resolves #1588 (milestone %\"Ranch Data Points\")\n\n**On hold awaiting the pb-api ranch-fields implementation — not currently available on a dev server** (previously previewed on dev3; that environment has been reassigned while this waits).\n\n## Summary\n\n- Adds **Sex** and **Birthdate** columns to the group page's individual-animal table.\n- Removes the standalone **Days to Clear** column; the day count now renders as a stacked secondary line inside **Safe to Ship** (\"Withdrawal / N Days to Clear\"), per the issue mockup.\n- Birthdate uses the repo's date-only normalizer (`~stringToDate`) to avoid the UTC-midnight off-by-one on `YYYY-MM-DD` values (caught in browser QA).\n\n## Notes for reviewers\n\n- **Sex column is mockup-derived** — the issue's Changes list only names birthdate + the cell merge, but the approved mockup shows Sex (the All-Animals table already has it). Cell copied verbatim from `bulk_animal_table.html`.\n- **Depends on pb-api ranch fields** (`birth_date` on animal documents). A dev-only contract branch (`pb-api@chardy/ranch-data-points-dev`, deployed on dev0) serves it for review; **draft until the real pb-api implementation lands** — field names may need a rename pass to match it.\n- Known minor (tribunal-flagged, non-gating): \"1 Days to Clear\" pluralization.\n\n## Verification\n\n- MAGI tribunal SHIP 3/3 (report: `.magi/tribunal-report-working-tree-2026-07-17.md` on the branch context).\n- Browser QA on dev0 with seeded birth dates: all three Safe-to-Ship states + null/date rendering verified — `.planning/qa-reports/1588-group-page-ranch-data/QA-REPORT.md`.\n- `php -l` clean; local PHPUnit deltas are pre-existing devbox-config failures (CI is authoritative).","project":{"fullPath":"performancelivestock/pb-www"},"author":{"username":"chandler.hardy"},"reviewers":{"nodes":[{"username":"adamsoper","mergeRequestInteraction":{"reviewState":"UNREVIEWED"}}]},"headPipeline":{"status":"SUCCESS"},"resolvableDiscussionsCount":0,"resolvedDiscussionsCount":0}]}}}}
+{
+  "data": {
+    "currentUser": {
+      "username": "chandler.hardy",
+      "reviewRequestedMergeRequests": {
+        "nodes": [
+          {
+            "iid": "4061",
+            "title": "Record animals.applied_costs in typical-format (#1348)",
+            "draft": false,
+            "webUrl": "https://gitlab.com/performancelivestock/pb-www/-/merge_requests/4061",
+            "diffHeadSha": "c62fc074e0612584c810ec14bb1791dc76a12ec8",
+            "updatedAt": "2026-08-17T14:29:24Z",
+            "project": {
+              "fullPath": "performancelivestock/pb-www"
+            },
+            "author": {
+              "username": "LeifPedersen"
+            },
+            "reviewers": {
+              "nodes": [
+                {
+                  "username": "chandler.hardy",
+                  "mergeRequestInteraction": {
+                    "reviewState": "REQUESTED_CHANGES"
+                  }
+                }
+              ]
+            },
+            "headPipeline": {
+              "status": "SUCCESS"
+            }
+          },
+          {
+            "iid": "4010",
+            "title": "fix(invoices): stop a blank invoice form from overwriting an invoice",
+            "draft": false,
+            "webUrl": "https://gitlab.com/performancelivestock/pb-www/-/merge_requests/4010",
+            "diffHeadSha": "5c76b2edfed1f1926d8df36dfb2b3b50653b6ae5",
+            "updatedAt": "2026-08-17T13:54:58Z",
+            "project": {
+              "fullPath": "performancelivestock/pb-www"
+            },
+            "author": {
+              "username": "leyang"
+            },
+            "reviewers": {
+              "nodes": [
+                {
+                  "username": "alliecather",
+                  "mergeRequestInteraction": {
+                    "reviewState": "UNREVIEWED"
+                  }
+                },
+                {
+                  "username": "chandler.hardy",
+                  "mergeRequestInteraction": {
+                    "reviewState": "UNREVIEWED"
+                  }
+                }
+              ]
+            },
+            "headPipeline": {
+              "status": "SUCCESS"
+            }
+          }
+        ]
+      },
+      "authoredMergeRequests": {
+        "nodes": [
+          {
+            "iid": "4007",
+            "title": "feat(#1701): Add Usage column to the feed inventory emailed report",
+            "draft": false,
+            "webUrl": "https://gitlab.com/performancelivestock/pb-www/-/merge_requests/4007",
+            "diffHeadSha": "e01d349e63f78547117b36470c165892ded0ad02",
+            "updatedAt": "2026-08-18T04:27:11Z",
+            "description": "### Available on [dev5](https://dev5.chandlerhardy-dev.performancebeef.com/)\n### Closes #1701\n\nAdds a **Usage** column to the emailed inventory alert report, between **Amount Remaining** and **Estimated Days Left**, showing that work-date's usage for each alertable item (`InventoryLedger::getItemUsageForPeriod`, single-day window). Displays **\"No recent usage\"** when the day's usage is zero \u2014 including when a small positive usage would *round* to a displayed \"0\" (weight rounding settings). Formatting/pluralization mirrors the Amount Remaining cell exactly (separators, cc/mL exemption); email cells copy the sibling inline styles byte-for-byte.\n\n**Verify:** 13 exact-assertion unit tests on the extracted `formatUsageCell` helper with mutation falsification (guard inversion, cc/mL exemption deletion, RED\u2192GREEN on the rounding fix). MAGI tribunal (Claude/Codex/Seneschal): SHIP 3/3 after 1 fix round. Live QA on dev5 (Allie): report preview renders `Feed | Amount Remaining | Usage | Estimated Days Left` with real values (\"2,973 lbs\", \"28 lbs\") and \"No recent usage\" empty states across both categories.\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n## Summary by CodeRabbit\n\n* **New Features**\n  * Inventory report emails now include a separate Usage column for alertable items.\n  * Usage reflects consumption over the previous day and follows configured number formatting.\n  * Zero or negligible usage is displayed as \u201cNo recent usage.\u201d\n  * Measurement labels are formatted consistently, including correct singular and plural forms across supported units.\n\n* **Style**\n  * Improved mobile readability by reducing horizontal padding in report tables.\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+            "approved": true,
+            "detailedMergeStatus": "MERGEABLE",
+            "assignees": {
+              "nodes": [
+                {
+                  "username": "leyang"
+                },
+                {
+                  "username": "chandler.hardy"
+                }
+              ]
+            },
+            "project": {
+              "fullPath": "performancelivestock/pb-www"
+            },
+            "author": {
+              "username": "chandler.hardy"
+            },
+            "reviewers": {
+              "nodes": [
+                {
+                  "username": "leyang",
+                  "mergeRequestInteraction": {
+                    "reviewState": "APPROVED"
+                  }
+                },
+                {
+                  "username": "alliecather",
+                  "mergeRequestInteraction": {
+                    "reviewState": "UNREVIEWED"
+                  }
+                }
+              ]
+            },
+            "headPipeline": {
+              "status": "SUCCESS"
+            },
+            "resolvableDiscussionsCount": 4,
+            "resolvedDiscussionsCount": 0
+          },
+          {
+            "iid": "4006",
+            "title": "feat(#1700): Add ability to hide Kill Sheet information",
+            "draft": false,
+            "webUrl": "https://gitlab.com/performancelivestock/pb-www/-/merge_requests/4006",
+            "diffHeadSha": "c90079b5876f3783c8b0398ca34daf2e9ef7f374",
+            "updatedAt": "2026-08-18T04:29:33Z",
+            "description": "### Available on [dev4](https://dev4.chandlerhardy-dev.performancebeef.com/)\n### Closes #1700\n\nAdds a **Kill Sheet Data Points** dropdown (Show/Hide, default Show) to Account Settings > System Settings. When set to Hide:\n\n- The **Expand Dressed** button + kill sheet section are not rendered in the +/- Head Sell form and the Edit Sale form (shared `_sold_fields.php` gate \u2014 fields absent from the DOM, not CSS-hidden).\n- The 28 packer-derived columns are omitted from the read-only **Sheets > Sold Head** view (`Head_sold::setHideKillSheetColumns`, mirroring the #1489 `include_edit_button` flag; filters by name/key so the two flags compose in either order).\n- Save paths treat an **absent** packer key as \"no change\": head-count edits recalibrate stored per-head hot weight/base price from the original total, and Destination stays required while a hidden packer record exists \u2014 an existing `group_packer_info` record can never be wiped or orphaned by a Hide-mode save.\n\n**Known limitations (by design):** the CSV export keeps the full column set (data extract, not a display surface); the gate is render-time, so a tab opened before flipping the setting can still post packer values (the absent-key save tolerance keeps such posts from corrupting stored records). The bulk Edit sheet is now gated too (review round, R-1).\n\n**Verify:** 133 targeted PHPUnit tests (exact-array column assertions, child-process partial renders in both modes/hosts, 16-row per-head-source truth table, source-scan wiring guards) + mutation falsification on every new guard. MAGI tribunal (Claude/Codex/Seneschal + 3-agent specialist panel): SHIP after 1 fix round. Browser QA on dev5 (Allie): setting renders, saves, persists, both directions. Live sheet/form checks were blocked by pre-existing dev5 data corruption (`work_dates` doc `6a6c3388a405abcd00000000` has double-typed `target_pounds`; pb-api 500s on decode \u2014 repair script ready, unrelated to this MR). Not verified on a metric (kg) account: the per-head recompute unit round-trip.\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n## Summary by CodeRabbit\n\n- **New Features**\n  - Added a Kill Sheet Data Points setting to show or hide optional Kill Sheet fields.\n  - Applied the preference across sales forms, read-only views, tables, and saved records.\n  - Event-related information remains visible when optional fields are hidden.\n\n- **Bug Fixes**\n  - Omitted optional fields now retain existing values instead of being cleared.\n  - Improved destination validation and per-head recalculation when quantities change.\n  - Save failures now show row-level errors and remain retryable.\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+            "approved": true,
+            "detailedMergeStatus": "MERGEABLE",
+            "assignees": {
+              "nodes": [
+                {
+                  "username": "leyang"
+                },
+                {
+                  "username": "chandler.hardy"
+                }
+              ]
+            },
+            "project": {
+              "fullPath": "performancelivestock/pb-www"
+            },
+            "author": {
+              "username": "chandler.hardy"
+            },
+            "reviewers": {
+              "nodes": [
+                {
+                  "username": "randywu",
+                  "mergeRequestInteraction": {
+                    "reviewState": "APPROVED"
+                  }
+                },
+                {
+                  "username": "alliecather",
+                  "mergeRequestInteraction": {
+                    "reviewState": "UNREVIEWED"
+                  }
+                }
+              ]
+            },
+            "headPipeline": {
+              "status": "SUCCESS"
+            },
+            "resolvableDiscussionsCount": 7,
+            "resolvedDiscussionsCount": 7
+          },
+          {
+            "iid": "3997",
+            "title": "Draft: refactor(#1681): analytics feed-data debt \u2014 compute seam (M10), shared snapshot, work-date cache, breakdown guards",
+            "draft": true,
+            "webUrl": "https://gitlab.com/performancelivestock/pb-www/-/merge_requests/3997",
+            "diffHeadSha": "ccde124a0e3c921e6880ac36ca2b1ac1663b7642",
+            "updatedAt": "2026-08-18T04:29:16Z",
+            "description": "Addresses #1681 (items 1, 2, 4 + the two optional guard candidates; item 3 \u2014 mongodb ext on dev/CI \u2014 is runner-host ops and stays open on the issue).\n\n**Stacked on !3995** (`feat/796-nem-neg-analytics`): items 1\u20132 modify code that only exists there. This MR targets that branch so the diff shows only #1681 work; GitLab auto-retargets to `master` when !3995 merges. **Hold merge until !3995 lands.**\n\n## Summary\n\n- **Item 2 \u2014 compute seam (M10):** the per-date feed compute loop is extracted from `Analytics::getDailyFeedData` into `AnalyticsFeedDaily::compute` (statically callable, no DB/session deps \u2014 sibling pattern `AnalyticsNEmNEg`). `getDailyFeedData` is now fetch-then-delegate. Surviving mutation M10 is dead **by execution**: substituting the head-divided energy at the `dailySeries` call site fails 5 tests (`14.0` vs `56.0` \u2014 off by exactly the fixture's head count).\n- **Item 1 \u2014 torn read:** the reshaped growth CSV export now fetches ONE raw FeedSheets snapshot and threads it into both `GrowthModel::buildModel` and `getDailyFeedData` (new trailing optional `$sheetData` param). Root-cause prerequisite: `buildModel`'s fallback `$groups` fetch now projects `field=status` \u2014 previously the closed-group end-date narrowing (`Sheets.php:137`) could never fire on the model-fed read (undefined `'status'` key on PHP 8) while it did fire on Analytics' own read, making the two reads non-equivalent for closed+0-head groups. A 21-row call-site characterization found no consumer affected beyond the narrowing semantics (`AddedCost` computes but never reads its range; the added key is shape-safe everywhere).\n- **Item 4 \u2014 P\u00d7D\u2192D:** `PenMongo::getRationsForDate` now passes `add_to_cache: true` (sibling: `getRations`, PenMongo:102) so the per-feedyard-day work-date document is fetched once per date instead of once per (pen \u00d7 date) \u2014 ~5,000 \u2192 ~250 fetches for a 20-pen/250-day group. Deliberately **no field projection**: the shared identity map records nothing about projections, so caching a projected doc would hand later consumers incomplete documents (`RationSheet.php:146` already does a projected, non-cached read).\n- **Guards:** the DMAF and health `chartTypeChanged` breakdown-default lookups get the same null-safe guard shape as NEm/NEg (6ae6697fbc); the inverted tripwire test is flipped to assert all three branches guarded.\n\n## Key decisions\n\n- Extraction over DI: `Analytics`' constructor is DB-bound even with `$build=false`, so no injected collaborator could reach the unit env \u2014 a pure static compute unit can.\n- `buildModel`'s loose `$sheetData == null` gate is intentionally preserved (14 other call sites depend on empty-array-refetch semantics); `getDailyFeedData` uses strict `??=`.\n- `getTargetData`'s FeedData read stays a separate read set \u2014 full multi-collection snapshot consistency needs machinery that doesn't exist; residual window documented.\n\n## Verification\n\n- UnitTests: 936 \u2192 957 tests; Errors 69 / Failures 1 / Skipped 80 / Risky 38 \u2014 unchanged from baseline (pre-existing API-connectivity).\n- Mutation receipts: M10 (1\u21926\u21921 failures across apply/revert); ordering falsifier (snapshot fetched before model build); `field=status` revert; `??=`\u2192`==` swap; projection-added and cache-arg-dropped mutants for item 4; per-branch guard reverts. All killed.\n- **dev2 (base) vs dev3 (this branch), shared Mongo, 12-probe SHA-256 battery: 12/12 byte-identical** \u2014 NEm/NEg/DMAFBW/DMAFH charts and reshaped + raw CSVs, on open AND closed groups. The closed-group identity shows the `field=status` change produces no output delta on real data (the narrowed post-closure window holds no emitted rows), so nightly-cron model rebuilds converge as a no-op here.\n- Live guard check on dev3: five chart-type switches (NEm/DMAF/health/health_compared/NEg), correct breakdown defaults, zero JS errors.\n\n## Known / carried forward\n\n- `WorkDateMongo::$cache_by_work_date` has no `feedyard_id` component \u2014 safe per-request, but `cron/update_sheets_for_users.php` iterates all feedyards in one process. Pre-existing hazard (multiple populate sites already exist), widened by this MR's third; **now tracked as #1681 item 5** (filed 2026-07-29 with the cron trace from review).\n- `Group.php:2244`'s \"stop at today to catch post-sale feeding\" comment already disagreed with its own code; the narrowing convergence brushes against it \u2014 worth a follow-up read, not blocking.",
+            "approved": true,
+            "detailedMergeStatus": "DRAFT_STATUS",
+            "assignees": {
+              "nodes": [
+                {
+                  "username": "chandler.hardy"
+                }
+              ]
+            },
+            "project": {
+              "fullPath": "performancelivestock/pb-www"
+            },
+            "author": {
+              "username": "chandler.hardy"
+            },
+            "reviewers": {
+              "nodes": [
+                {
+                  "username": "alliecather",
+                  "mergeRequestInteraction": {
+                    "reviewState": "UNREVIEWED"
+                  }
+                },
+                {
+                  "username": "edmundlim",
+                  "mergeRequestInteraction": {
+                    "reviewState": "UNREVIEWED"
+                  }
+                }
+              ]
+            },
+            "headPipeline": {
+              "status": "SUCCESS"
+            },
+            "resolvableDiscussionsCount": 1,
+            "resolvedDiscussionsCount": 0
+          },
+          {
+            "iid": "3995",
+            "title": "feat(#796): NEm and NEg Analytics Adjustments",
+            "draft": false,
+            "webUrl": "https://gitlab.com/performancelivestock/pb-www/-/merge_requests/3995",
+            "diffHeadSha": "c0e83bafdb9075ef02464822882f32d6fd183341",
+            "updatedAt": "2026-08-18T04:27:53Z",
+            "description": "### Available on [https://dev2.chandlerhardy-dev.performancebeef.com](https://dev2.chandlerhardy-dev.performancebeef.com)\n### Closes #796\n\n## Summary\n\n- NEm/NEg charts gain a **Per CWT / Per Head** breakdown, defaulting to **Per CWT** (delivered ration energy density, Mcal per CWT of dry-matter intake \u2014 matches the as-entered ration NEm convention). Per-Head behavior unchanged, including its Target line.\n- Chart-type labels stripped of \"(per Head)\"; titles and axis units are breakdown-aware (`NEm - {group/pen} - {breakdown}`).\n- The admin **NEm/NEg** CSV export (only \u2014 the other six growth charts keep the raw model dump) is reshaped into a consultant worksheet: removed Ideal/Breed/Gender/Temperature/Wind/Model Gender; added **Target As Fed, DMI Target, Ration**; retitled Start\u2192Projected Weight, DMI\u2192DMI As Fed, NEm\u2192NEm As Fed, NEg\u2192NEg As Fed, with each Target column beside its As-Fed counterpart in matching units (raw-lb basis; metric feedyards' targets reconciled by the delivery conversion factor).\n\n## Deliberate deviation from the issue (product please confirm)\n\nThe issue's CSV add-list included **Target NEm / Target NEg**, and the original implementation shipped them \u2014 the review panel then proved the per-CWT target math is **degenerate**: the pipeline has no formulated target-energy source (`getTargetData` returns weight targets only), so the \"Target\" density algebraically \u2248 the actual density whenever the ration is fed near its card. Decision (user-gated 2026-07-29): **drop the Target series on Per CWT** (chart) and the two energy Target columns (CSV) rather than ship two near-identical columns that read as \"always on target\". A real target-energy series would need the ration card's formulated composition \u2014 its own issue if wanted.\n\n## Hardening picked up by the review panel (this MR)\n\n- CSV formula injection (CWE-1236) neutralized on **all three** export branches of `downloadAnalytics.php` (Ration cells, pie first-cell/series headers, generic headers) \u2014 tenant-authored free text reaches higher-privileged consultants' spreadsheets.\n- `Content-Disposition` filename sanitized (quote/control-char/path stripping; pre-existing gap).\n- Join-miss vs genuine-zero distinguishable in the CSV (blank vs `0.0` \u2014 survives `fputcsv` to the byte level).\n- Re-clicking the already-active NEm/NEg tile no longer silently resets a deliberate Per Head choice.\n- `FeedData` per-pen loaders memoized (P\u00d7 unbounded Mongo finds \u2192 1\u00d7); `memory_limit` raised only for the growth-model branch; weight factor read through the live `Analytics` instance (kills a hidden-static ordering trap that would have silently broken metric feedyards under future refactors).\n\n## Verification\n\n- `php -l` clean on all changed files. Full UnitTests suite: **914 tests \u2014 69 errors / 1 failure, byte-identical to the pre-MR baseline** (pre-existing API-connectivity cases; verify tail on request).\n- 77 targeted PHPUnit tests (RED\u2192GREEN TDD ordering), **15 mutation classes applied to real source and observed to fail** \u2014 full per-mutant receipts (mutant \u2192 diff \u2192 failing assertion) posted as an MR note.\n- One surviving mutation is **declared, not hidden** (M10: a deliberate wrong-variable substitution at the unit-unreachable `getDailyFeedData` call site; compensating characterization test exists).\n- Full 8-lane review panel (architect, security, data-integrity, test-quality, design, perf, simplifier, frontend-ux) + scoped re-reviews; TQS 63\u219272.\n- **Not yet browser-verified on dev2** (menu default, rendered title, per-CWT axis magnitude \u2248 as-entered ration NEm, live CSV pull) \u2014 flagged for QA before merge.\n- Val gate: `VAL_UNAVAILABLE` (Val binary not yet deployed); waived with the mutation receipts standing in.\n\n## Known accepted gaps / follow-ups \u2014 tracked in #1681\n\n1. **Torn read on the CSV export**: three independent Mongo reads merged per request (GrowthModel sheets, Analytics sheets, targets FeedData) \u2014 a mid-request ration edit can produce a self-contradictory row. Narrow window, admin-only path; a shared-snapshot fix is a real refactor, not a patch.\n2. **Pre-existing P\u00d7D work-date fetch** under `getTargetData` (`PenMongo::getRationsForDate` doesn't populate the WorkDateMongo cache): ~5,000 unprojected full-document fetches per large-group export \u2014 and the production chart paths already pay this today. Fix touches shared caching machinery; needs its own issue.\n3. `getPropertiesForFeedItems` remains unbounded-lower-date **by design** (carry-forward history semantics \u2014 a naive bound silently zeroes unchanged items; documented in-code).\n4. `MicroRationData` copy-paste twin of the memoized FeedData loaders not updated (kept surgical).\n\n\ud83e\udd16 Generated with [Claude Code](https://claude.com/claude-code)",
+            "approved": true,
+            "detailedMergeStatus": "MERGEABLE",
+            "assignees": {
+              "nodes": [
+                {
+                  "username": "chandler.hardy"
+                }
+              ]
+            },
+            "project": {
+              "fullPath": "performancelivestock/pb-www"
+            },
+            "author": {
+              "username": "chandler.hardy"
+            },
+            "reviewers": {
+              "nodes": [
+                {
+                  "username": "alliecather",
+                  "mergeRequestInteraction": {
+                    "reviewState": "UNREVIEWED"
+                  }
+                },
+                {
+                  "username": "edmundlim",
+                  "mergeRequestInteraction": {
+                    "reviewState": "UNAPPROVED"
+                  }
+                }
+              ]
+            },
+            "headPipeline": {
+              "status": "SUCCESS"
+            },
+            "resolvableDiscussionsCount": 11,
+            "resolvedDiscussionsCount": 11
+          },
+          {
+            "iid": "3985",
+            "title": "Draft: feat(#1599): yard sheets \u2014 ranch data point columns, filters, and group aggregation",
+            "draft": true,
+            "webUrl": "https://gitlab.com/performancelivestock/pb-www/-/merge_requests/3985",
+            "diffHeadSha": "9ce540aa6c398ddbc31a6f47e0919ecfc19a32fc",
+            "updatedAt": "2026-08-18T04:28:03Z",
+            "description": "Resolves #1599 (milestone %\"Ranch Data Points\")\n\nAvailable on https://dev0.chandlerhardy-dev.performancebeef.com \u2014 Reports > Yard Sheets (saved sheet \"QA Ranch Fields\" demonstrates all columns; group \"09/23/2025 Carson\" carries uniform seeded values).\n\n## Summary\n\n- Adds the 9 ranch data points to Yard Sheets as data-point columns and filters (alphabetical ordering preserved): enum filters for Birth Vigor / Calving Ease / Color / Dam BCS at Birth / Horned Status (full #1596 label lists), range filters for Birthdate (date) and Birth Weight (numeric), Brand/Tattoo as data points.\n- Group-level value semantics: shows the **single uniform value** across the group's active animals (\"03/14/2024\", \"2 - Nursed on own, but slowly\", \"Red\", \"Polled\"\u2026) or **\"- - -\"** when absent/mixed \u2014 new `Group::getRanchDataPoints()` fetches the group's animals from the existing pb-api animals endpoint (projected `field=` params, per-group, recompute-path only, memoized) and aggregates in PHP.\n- **15 new PHPUnit tests** (DB-free, injectable fetcher seam): aggregation uniform/mixed/absent/departed-excluded, type canonicalization, display resolution, and a zero-fetch guarantee for non-yardsheet closeout paths.\n\n## Notes for reviewers\n\n- **Aggregation semantics were a product gap** \u2014 nothing existing maps per-animal fields to a group row. \"Uniform-or-dashes\" matches the mockup (values on uniform groups, \"- - -\" otherwise). Adjustable.\n- Tribunal/QA hardening in-branch: display finalization into the report cache read-path; fetch gated so Closeout/MDC/dashboard never trigger animal fetches (unit-proven); int-vs-string canonicalization; the client date filter treats \"- - -\" as absent (would otherwise hide such groups whenever a birthdate filter exists).\n- Deliberate deferrals (documented): free-text filters for Brand/Tattoo; per-sheet fetch skip when no ranch column selected; ranch fields visible-but-valueless in the closeout picker.\n- **Ops:** existing cached sheets need a recompute (`Report_Yard::setDirtyAllForFeedyard` or the nightly `cron/daily_yardsheets.php`) before values appear.\n- **Depends on pb-api ranch fields** (dev contract branch on dev0). Draft until the real pb-api implementation lands.\n\n## Verification\n\n- Live on dev0: modal data points + filter types, uniform vs \"- - -\" rendering, filter retention of dash-groups (19+1 fixture, all 20 render) \u2014 `.planning/qa-reports/1599-yardsheets-ranch-data/QA-REPORT.md`\n- MAGI tribunal SHIP 3/3 after 3 fix rounds (`.magi/tribunal-report-1599-2026-07-18.md`); PHPUnit 15/15.",
+            "approved": true,
+            "detailedMergeStatus": "DRAFT_STATUS",
+            "assignees": {
+              "nodes": [
+                {
+                  "username": "chandler.hardy"
+                }
+              ]
+            },
+            "project": {
+              "fullPath": "performancelivestock/pb-www"
+            },
+            "author": {
+              "username": "chandler.hardy"
+            },
+            "reviewers": {
+              "nodes": [
+                {
+                  "username": "adamsoper",
+                  "mergeRequestInteraction": {
+                    "reviewState": "UNREVIEWED"
+                  }
+                }
+              ]
+            },
+            "headPipeline": {
+              "status": "SUCCESS"
+            },
+            "resolvableDiscussionsCount": 1,
+            "resolvedDiscussionsCount": 0
+          },
+          {
+            "iid": "3984",
+            "title": "Draft: feat(#1598): bulk edit \u2014 ranch data point blocks with mass edit toggles",
+            "draft": true,
+            "webUrl": "https://gitlab.com/performancelivestock/pb-www/-/merge_requests/3984",
+            "diffHeadSha": "cb9b4f5d27e551128f8ae175814fada963e860a9",
+            "updatedAt": "2026-08-18T04:28:28Z",
+            "description": "Resolves #1598 (milestone %\"Ranch Data Points\")\n\nAvailable on: **dev site pending** \u2014 dev0\u2013dev5 are all occupied (dev0 serves !3985; dev1/dev2 host other open MRs; dev3\u20135 host !3981/!3982/!3983). Will be assigned to whichever frees first \u2014 Health > All Feedyard Animals > select animals > Edit.\n\n## Summary\n\n- Adds 9 edit blocks (Birthdate, Birth Weight, Brand, Tattoo, Birth Vigor, Dam BCS at Birth, Color, Horned Status, Calving Ease) to Bulk Edit in mockup order, each with a \"Mass Edit?\" toggle + per-animal inputs.\n- Enum lists are **byte-identical** to #1590's `health.enums.js` block (empty-diff receipt) \u2014 the two branches merge cleanly whichever lands first.\n- Int fields PATCH as bare ints via the same guard pattern #1590's tribunal approved; cleared inputs / \"Select\" placeholders PATCH null.\n\n## Notes for reviewers\n\n- Two QA/tribunal-caught fixes are in the branch: (1) the optional Birthdate/Birth Weight inputs originally inherited Past Weights' `individual-pounds*` classes and were being marked *required*, silently blocking Save; (2) the Mass Edit toggles no longer auto-fire the bulk control's change on toggle \u2014 unlike gender, our bulk selects have an empty placeholder, so the cloned pattern would have nulled the field on every selected animal just by flipping the switch (divergence documented in-code).\n- **Depends on pb-api ranch fields** (dev contract branch on dev0). Draft until the real pb-api implementation lands.\n\n## Verification\n\n- Live on dev0: pristine-form save validity, toggle-sweep no-op, mass-apply \u00d73 animals, individual int write, Mongo type check \u2014 `.planning/qa-reports/1598-bulk-edit-ranch-data/QA-REPORT.md`\n- MAGI tribunal SHIP 3/3 after 2 fix rounds (`.magi/tribunal-report-1598-2026-07-17.md`).",
+            "approved": true,
+            "detailedMergeStatus": "DRAFT_STATUS",
+            "assignees": {
+              "nodes": [
+                {
+                  "username": "chandler.hardy"
+                }
+              ]
+            },
+            "project": {
+              "fullPath": "performancelivestock/pb-www"
+            },
+            "author": {
+              "username": "chandler.hardy"
+            },
+            "reviewers": {
+              "nodes": []
+            },
+            "headPipeline": {
+              "status": "SUCCESS"
+            },
+            "resolvableDiscussionsCount": 0,
+            "resolvedDiscussionsCount": 0
+          },
+          {
+            "iid": "3983",
+            "title": "Draft: feat(#1597): all animals table \u2014 Sex label, Birthdate column, merged Safe to Ship cell",
+            "draft": true,
+            "webUrl": "https://gitlab.com/performancelivestock/pb-www/-/merge_requests/3983",
+            "diffHeadSha": "06f8524e9e259c66a272f11c061cbb2fee53f542",
+            "updatedAt": "2026-08-18T04:28:34Z",
+            "description": "Resolves #1597 (milestone %\"Ranch Data Points\")\n\nAvailable on: **dev site pending** (was dev5; displaced by another MR) \u2014 will take the next free dev slot. Page: Health > All Feedyard Animals.\n\n## Summary\n\n- Adds a **Birthdate** column (MM/DD/YYYY, `n/a` when unset, chronological sort with n/a pinned last) between Sex and Last Diagnosis.\n- Removes the standalone **Days to Clear** column; the count renders as a stacked secondary line inside **Safe to Ship** (same treatment as the group page in !3981).\n- Renames the \"Gender\" header to **\"Sex\"** per the mockup (label only \u2014 data binding unchanged).\n- DataTables columnDefs indices re-synced (date-sort plugin covers the new column; Last Processed unchanged at its new index).\n\n## Notes for reviewers\n\n- The issue/mockup's changes target the live DataTables path (`overall.html` + `health.utility.js`); `bulk_animal_table.html` turned out to be dead code (zero consumers of its jsViews tag) and is deliberately untouched \u2014 a cleanup issue may be worth filing.\n- **Depends on pb-api ranch fields** (dev contract branch on dev0). Draft until the real pb-api implementation lands.\n- Heads-up from QA: dev DB snapshots containing legacy `type:\"converted\"` applied costs 500 every animal GET on current pb-api master (pre-existing; we hit and fixed it on dev0's data). Prod presumably migrated these long ago.\n\n## Verification\n\n- Browser QA on dev0: structure, seeded birthdates (no TZ off-by-one), both-direction sorting, Departed/Clear states across 573 rows \u2014 `.planning/qa-reports/1597-all-animals-ranch-data/QA-REPORT.md`\n- MAGI tribunal SHIP 3/3, zero findings (`.magi/tribunal-report-1597-2026-07-17.md`).",
+            "approved": true,
+            "detailedMergeStatus": "DRAFT_STATUS",
+            "assignees": {
+              "nodes": []
+            },
+            "project": {
+              "fullPath": "performancelivestock/pb-www"
+            },
+            "author": {
+              "username": "chandler.hardy"
+            },
+            "reviewers": {
+              "nodes": []
+            },
+            "headPipeline": {
+              "status": "SUCCESS"
+            },
+            "resolvableDiscussionsCount": 0,
+            "resolvedDiscussionsCount": 0
+          },
+          {
+            "iid": "3982",
+            "title": "Draft: feat(#1590): edit animal \u2014 collect and edit ranch data points in Animal Stats",
+            "draft": true,
+            "webUrl": "https://gitlab.com/performancelivestock/pb-www/-/merge_requests/3982",
+            "diffHeadSha": "a04cf59a77eb756057829dbd6868de82906d8dbd",
+            "updatedAt": "2026-08-18T04:28:37Z",
+            "description": "Resolves #1590 (milestone %\"Ranch Data Points\")\n\nUnavailable on any dev right now, on hold\nHealth > group > Edit an animal. Tag 5218 in \"6/5/25 Johnson Steers\" has all 9 values saved\n\n> **If you looked between Jul 18\u201321 and saw empty fields:** the dev Mongo was rebuilt from production snapshots on Jul 18, which wiped the demo values saved during QA (dev-only data). Values were re-saved through the UI on Jul 21, re-verifying the full write path against the dev4 API in the process.\n\n## Summary\n\n- Adds 9 editable rows to the Animal Stats panel in mockup order: Birthdate (date), Birth Weight (number, lbs), Brand, Tattoo (text), and Birth Vigor / Dam BCS at Birth / Color / Horned Status / Calving Ease (dropdowns).\n- Enum option lists live in one place (`health.enums.js`, labels verbatim from #1596) \u2014 #1598 bulk edit will reuse them, and the eventual rename pass against the real pb-api field names touches one file.\n- Wiring follows the existing `gender` pattern end-to-end (observe \u2192 change-handler \u2192 existing top-level PATCH). New `~toIntOrNull`/`~emptyToNull` convertBack helpers guarantee ints PATCH as bare ints and cleared fields PATCH as null.\n\n## Notes for reviewers\n\n- **Depends on pb-api ranch fields** (dev contract branch `pb-api@chardy/ranch-data-points-dev`, deployed on dev0 and dev4). Draft until the real pb-api implementation lands.\n- Tribunal caught and fixed an int-coercion bug pre-push (\"12.9\" would have silently PATCHed as 12; now `step=\"1\"` + native validation blocks it, with a null-not-corrupted fallback).\n- `d52cef6f70` fixes a styling miss from the first cut: the three free-entry inputs (Birth Weight, Brand, Tattoo) shipped with bare `form-control`, but the theme's input styling keys off `.textbox`/`.date-input`, so they rendered as unstyled white boxes. Now `textbox` (+ `numeric` for the number field), matching the template's existing inputs; `script_version` \u2192 wagyu29 to bust the `?v=` template cache.\n\n## Verification\n\n- Full write path verified on dev0 (Jul 17) and re-verified on dev4 (Jul 21): UI \u2192 PATCH \u2192 pb-api validation \u2192 Mongo shows exact contract types (ints as NumberLong, nulls on clear); reload round-trips every field. `.planning/qa-reports/1590-edit-animal-ranch-data/QA-REPORT.md`\n- Styling fix verified on dev4 via computed styles (inputs pick up the dark-theme `.textbox` background) \u2014 see report screenshot `04-dev4-styled-inputs-resaved-values.png`.\n- MAGI tribunal SHIP 3/3 after one fix round (`.magi/tribunal-report-1590-2026-07-17.md`).",
+            "approved": true,
+            "detailedMergeStatus": "DRAFT_STATUS",
+            "assignees": {
+              "nodes": [
+                {
+                  "username": "chandler.hardy"
+                }
+              ]
+            },
+            "project": {
+              "fullPath": "performancelivestock/pb-www"
+            },
+            "author": {
+              "username": "chandler.hardy"
+            },
+            "reviewers": {
+              "nodes": [
+                {
+                  "username": "adamsoper",
+                  "mergeRequestInteraction": {
+                    "reviewState": "UNREVIEWED"
+                  }
+                }
+              ]
+            },
+            "headPipeline": {
+              "status": "SUCCESS"
+            },
+            "resolvableDiscussionsCount": 0,
+            "resolvedDiscussionsCount": 0
+          },
+          {
+            "iid": "3981",
+            "title": "Draft: feat(#1588): group page \u2014 Sex + Birthdate columns, merged Safe to Ship cell",
+            "draft": true,
+            "webUrl": "https://gitlab.com/performancelivestock/pb-www/-/merge_requests/3981",
+            "diffHeadSha": "0236125bda0070fec703ffe286b9639222dd6746",
+            "updatedAt": "2026-08-18T04:28:43Z",
+            "description": "Resolves #1588 (milestone %\"Ranch Data Points\")\n\n**On hold awaiting the pb-api ranch-fields implementation \u2014 not currently available on a dev server** (previously previewed on dev3; that environment has been reassigned while this waits).\n\n## Summary\n\n- Adds **Sex** and **Birthdate** columns to the group page's individual-animal table.\n- Removes the standalone **Days to Clear** column; the day count now renders as a stacked secondary line inside **Safe to Ship** (\"Withdrawal / N Days to Clear\"), per the issue mockup.\n- Birthdate uses the repo's date-only normalizer (`~stringToDate`) to avoid the UTC-midnight off-by-one on `YYYY-MM-DD` values (caught in browser QA).\n\n## Notes for reviewers\n\n- **Sex column is mockup-derived** \u2014 the issue's Changes list only names birthdate + the cell merge, but the approved mockup shows Sex (the All-Animals table already has it). Cell copied verbatim from `bulk_animal_table.html`.\n- **Depends on pb-api ranch fields** (`birth_date` on animal documents). A dev-only contract branch (`pb-api@chardy/ranch-data-points-dev`, deployed on dev0) serves it for review; **draft until the real pb-api implementation lands** \u2014 field names may need a rename pass to match it.\n- Known minor (tribunal-flagged, non-gating): \"1 Days to Clear\" pluralization.\n\n## Verification\n\n- MAGI tribunal SHIP 3/3 (report: `.magi/tribunal-report-working-tree-2026-07-17.md` on the branch context).\n- Browser QA on dev0 with seeded birth dates: all three Safe-to-Ship states + null/date rendering verified \u2014 `.planning/qa-reports/1588-group-page-ranch-data/QA-REPORT.md`.\n- `php -l` clean; local PHPUnit deltas are pre-existing devbox-config failures (CI is authoritative).",
+            "approved": true,
+            "detailedMergeStatus": "DRAFT_STATUS",
+            "assignees": {
+              "nodes": [
+                {
+                  "username": "chandler.hardy"
+                }
+              ]
+            },
+            "project": {
+              "fullPath": "performancelivestock/pb-www"
+            },
+            "author": {
+              "username": "chandler.hardy"
+            },
+            "reviewers": {
+              "nodes": [
+                {
+                  "username": "adamsoper",
+                  "mergeRequestInteraction": {
+                    "reviewState": "UNREVIEWED"
+                  }
+                }
+              ]
+            },
+            "headPipeline": {
+              "status": "SUCCESS"
+            },
+            "resolvableDiscussionsCount": 0,
+            "resolvedDiscussionsCount": 0
+          }
+        ]
+      },
+      "assignedMergeRequests": {
+        "nodes": [
+          {
+            "iid": "4007",
+            "title": "feat(#1701): Add Usage column to the feed inventory emailed report",
+            "draft": false,
+            "webUrl": "https://gitlab.com/performancelivestock/pb-www/-/merge_requests/4007",
+            "diffHeadSha": "e01d349e63f78547117b36470c165892ded0ad02",
+            "updatedAt": "2026-08-18T04:27:11Z",
+            "description": "### Available on [dev5](https://dev5.chandlerhardy-dev.performancebeef.com/)\n### Closes #1701\n\nAdds a **Usage** column to the emailed inventory alert report, between **Amount Remaining** and **Estimated Days Left**, showing that work-date's usage for each alertable item (`InventoryLedger::getItemUsageForPeriod`, single-day window). Displays **\"No recent usage\"** when the day's usage is zero \u2014 including when a small positive usage would *round* to a displayed \"0\" (weight rounding settings). Formatting/pluralization mirrors the Amount Remaining cell exactly (separators, cc/mL exemption); email cells copy the sibling inline styles byte-for-byte.\n\n**Verify:** 13 exact-assertion unit tests on the extracted `formatUsageCell` helper with mutation falsification (guard inversion, cc/mL exemption deletion, RED\u2192GREEN on the rounding fix). MAGI tribunal (Claude/Codex/Seneschal): SHIP 3/3 after 1 fix round. Live QA on dev5 (Allie): report preview renders `Feed | Amount Remaining | Usage | Estimated Days Left` with real values (\"2,973 lbs\", \"28 lbs\") and \"No recent usage\" empty states across both categories.\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n## Summary by CodeRabbit\n\n* **New Features**\n  * Inventory report emails now include a separate Usage column for alertable items.\n  * Usage reflects consumption over the previous day and follows configured number formatting.\n  * Zero or negligible usage is displayed as \u201cNo recent usage.\u201d\n  * Measurement labels are formatted consistently, including correct singular and plural forms across supported units.\n\n* **Style**\n  * Improved mobile readability by reducing horizontal padding in report tables.\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+            "approved": true,
+            "detailedMergeStatus": "MERGEABLE",
+            "assignees": {
+              "nodes": [
+                {
+                  "username": "leyang"
+                },
+                {
+                  "username": "chandler.hardy"
+                }
+              ]
+            },
+            "project": {
+              "fullPath": "performancelivestock/pb-www"
+            },
+            "author": {
+              "username": "chandler.hardy"
+            },
+            "reviewers": {
+              "nodes": [
+                {
+                  "username": "leyang",
+                  "mergeRequestInteraction": {
+                    "reviewState": "APPROVED"
+                  }
+                },
+                {
+                  "username": "alliecather",
+                  "mergeRequestInteraction": {
+                    "reviewState": "UNREVIEWED"
+                  }
+                }
+              ]
+            },
+            "headPipeline": {
+              "status": "SUCCESS"
+            },
+            "resolvableDiscussionsCount": 4,
+            "resolvedDiscussionsCount": 0
+          },
+          {
+            "iid": "4006",
+            "title": "feat(#1700): Add ability to hide Kill Sheet information",
+            "draft": false,
+            "webUrl": "https://gitlab.com/performancelivestock/pb-www/-/merge_requests/4006",
+            "diffHeadSha": "c90079b5876f3783c8b0398ca34daf2e9ef7f374",
+            "updatedAt": "2026-08-18T04:29:33Z",
+            "description": "### Available on [dev4](https://dev4.chandlerhardy-dev.performancebeef.com/)\n### Closes #1700\n\nAdds a **Kill Sheet Data Points** dropdown (Show/Hide, default Show) to Account Settings > System Settings. When set to Hide:\n\n- The **Expand Dressed** button + kill sheet section are not rendered in the +/- Head Sell form and the Edit Sale form (shared `_sold_fields.php` gate \u2014 fields absent from the DOM, not CSS-hidden).\n- The 28 packer-derived columns are omitted from the read-only **Sheets > Sold Head** view (`Head_sold::setHideKillSheetColumns`, mirroring the #1489 `include_edit_button` flag; filters by name/key so the two flags compose in either order).\n- Save paths treat an **absent** packer key as \"no change\": head-count edits recalibrate stored per-head hot weight/base price from the original total, and Destination stays required while a hidden packer record exists \u2014 an existing `group_packer_info` record can never be wiped or orphaned by a Hide-mode save.\n\n**Known limitations (by design):** the CSV export keeps the full column set (data extract, not a display surface); the gate is render-time, so a tab opened before flipping the setting can still post packer values (the absent-key save tolerance keeps such posts from corrupting stored records). The bulk Edit sheet is now gated too (review round, R-1).\n\n**Verify:** 133 targeted PHPUnit tests (exact-array column assertions, child-process partial renders in both modes/hosts, 16-row per-head-source truth table, source-scan wiring guards) + mutation falsification on every new guard. MAGI tribunal (Claude/Codex/Seneschal + 3-agent specialist panel): SHIP after 1 fix round. Browser QA on dev5 (Allie): setting renders, saves, persists, both directions. Live sheet/form checks were blocked by pre-existing dev5 data corruption (`work_dates` doc `6a6c3388a405abcd00000000` has double-typed `target_pounds`; pb-api 500s on decode \u2014 repair script ready, unrelated to this MR). Not verified on a metric (kg) account: the per-head recompute unit round-trip.\n\n<!-- This is an auto-generated comment: release notes by coderabbit.ai -->\n## Summary by CodeRabbit\n\n- **New Features**\n  - Added a Kill Sheet Data Points setting to show or hide optional Kill Sheet fields.\n  - Applied the preference across sales forms, read-only views, tables, and saved records.\n  - Event-related information remains visible when optional fields are hidden.\n\n- **Bug Fixes**\n  - Omitted optional fields now retain existing values instead of being cleared.\n  - Improved destination validation and per-head recalculation when quantities change.\n  - Save failures now show row-level errors and remain retryable.\n<!-- end of auto-generated comment: release notes by coderabbit.ai -->",
+            "approved": true,
+            "detailedMergeStatus": "MERGEABLE",
+            "assignees": {
+              "nodes": [
+                {
+                  "username": "leyang"
+                },
+                {
+                  "username": "chandler.hardy"
+                }
+              ]
+            },
+            "project": {
+              "fullPath": "performancelivestock/pb-www"
+            },
+            "author": {
+              "username": "chandler.hardy"
+            },
+            "reviewers": {
+              "nodes": [
+                {
+                  "username": "randywu",
+                  "mergeRequestInteraction": {
+                    "reviewState": "APPROVED"
+                  }
+                },
+                {
+                  "username": "alliecather",
+                  "mergeRequestInteraction": {
+                    "reviewState": "UNREVIEWED"
+                  }
+                }
+              ]
+            },
+            "headPipeline": {
+              "status": "SUCCESS"
+            },
+            "resolvableDiscussionsCount": 7,
+            "resolvedDiscussionsCount": 7
+          },
+          {
+            "iid": "3997",
+            "title": "Draft: refactor(#1681): analytics feed-data debt \u2014 compute seam (M10), shared snapshot, work-date cache, breakdown guards",
+            "draft": true,
+            "webUrl": "https://gitlab.com/performancelivestock/pb-www/-/merge_requests/3997",
+            "diffHeadSha": "ccde124a0e3c921e6880ac36ca2b1ac1663b7642",
+            "updatedAt": "2026-08-18T04:29:16Z",
+            "description": "Addresses #1681 (items 1, 2, 4 + the two optional guard candidates; item 3 \u2014 mongodb ext on dev/CI \u2014 is runner-host ops and stays open on the issue).\n\n**Stacked on !3995** (`feat/796-nem-neg-analytics`): items 1\u20132 modify code that only exists there. This MR targets that branch so the diff shows only #1681 work; GitLab auto-retargets to `master` when !3995 merges. **Hold merge until !3995 lands.**\n\n## Summary\n\n- **Item 2 \u2014 compute seam (M10):** the per-date feed compute loop is extracted from `Analytics::getDailyFeedData` into `AnalyticsFeedDaily::compute` (statically callable, no DB/session deps \u2014 sibling pattern `AnalyticsNEmNEg`). `getDailyFeedData` is now fetch-then-delegate. Surviving mutation M10 is dead **by execution**: substituting the head-divided energy at the `dailySeries` call site fails 5 tests (`14.0` vs `56.0` \u2014 off by exactly the fixture's head count).\n- **Item 1 \u2014 torn read:** the reshaped growth CSV export now fetches ONE raw FeedSheets snapshot and threads it into both `GrowthModel::buildModel` and `getDailyFeedData` (new trailing optional `$sheetData` param). Root-cause prerequisite: `buildModel`'s fallback `$groups` fetch now projects `field=status` \u2014 previously the closed-group end-date narrowing (`Sheets.php:137`) could never fire on the model-fed read (undefined `'status'` key on PHP 8) while it did fire on Analytics' own read, making the two reads non-equivalent for closed+0-head groups. A 21-row call-site characterization found no consumer affected beyond the narrowing semantics (`AddedCost` computes but never reads its range; the added key is shape-safe everywhere).\n- **Item 4 \u2014 P\u00d7D\u2192D:** `PenMongo::getRationsForDate` now passes `add_to_cache: true` (sibling: `getRations`, PenMongo:102) so the per-feedyard-day work-date document is fetched once per date instead of once per (pen \u00d7 date) \u2014 ~5,000 \u2192 ~250 fetches for a 20-pen/250-day group. Deliberately **no field projection**: the shared identity map records nothing about projections, so caching a projected doc would hand later consumers incomplete documents (`RationSheet.php:146` already does a projected, non-cached read).\n- **Guards:** the DMAF and health `chartTypeChanged` breakdown-default lookups get the same null-safe guard shape as NEm/NEg (6ae6697fbc); the inverted tripwire test is flipped to assert all three branches guarded.\n\n## Key decisions\n\n- Extraction over DI: `Analytics`' constructor is DB-bound even with `$build=false`, so no injected collaborator could reach the unit env \u2014 a pure static compute unit can.\n- `buildModel`'s loose `$sheetData == null` gate is intentionally preserved (14 other call sites depend on empty-array-refetch semantics); `getDailyFeedData` uses strict `??=`.\n- `getTargetData`'s FeedData read stays a separate read set \u2014 full multi-collection snapshot consistency needs machinery that doesn't exist; residual window documented.\n\n## Verification\n\n- UnitTests: 936 \u2192 957 tests; Errors 69 / Failures 1 / Skipped 80 / Risky 38 \u2014 unchanged from baseline (pre-existing API-connectivity).\n- Mutation receipts: M10 (1\u21926\u21921 failures across apply/revert); ordering falsifier (snapshot fetched before model build); `field=status` revert; `??=`\u2192`==` swap; projection-added and cache-arg-dropped mutants for item 4; per-branch guard reverts. All killed.\n- **dev2 (base) vs dev3 (this branch), shared Mongo, 12-probe SHA-256 battery: 12/12 byte-identical** \u2014 NEm/NEg/DMAFBW/DMAFH charts and reshaped + raw CSVs, on open AND closed groups. The closed-group identity shows the `field=status` change produces no output delta on real data (the narrowed post-closure window holds no emitted rows), so nightly-cron model rebuilds converge as a no-op here.\n- Live guard check on dev3: five chart-type switches (NEm/DMAF/health/health_compared/NEg), correct breakdown defaults, zero JS errors.\n\n## Known / carried forward\n\n- `WorkDateMongo::$cache_by_work_date` has no `feedyard_id` component \u2014 safe per-request, but `cron/update_sheets_for_users.php` iterates all feedyards in one process. Pre-existing hazard (multiple populate sites already exist), widened by this MR's third; **now tracked as #1681 item 5** (filed 2026-07-29 with the cron trace from review).\n- `Group.php:2244`'s \"stop at today to catch post-sale feeding\" comment already disagreed with its own code; the narrowing convergence brushes against it \u2014 worth a follow-up read, not blocking.",
+            "approved": true,
+            "detailedMergeStatus": "DRAFT_STATUS",
+            "assignees": {
+              "nodes": [
+                {
+                  "username": "chandler.hardy"
+                }
+              ]
+            },
+            "project": {
+              "fullPath": "performancelivestock/pb-www"
+            },
+            "author": {
+              "username": "chandler.hardy"
+            },
+            "reviewers": {
+              "nodes": [
+                {
+                  "username": "alliecather",
+                  "mergeRequestInteraction": {
+                    "reviewState": "UNREVIEWED"
+                  }
+                },
+                {
+                  "username": "edmundlim",
+                  "mergeRequestInteraction": {
+                    "reviewState": "UNREVIEWED"
+                  }
+                }
+              ]
+            },
+            "headPipeline": {
+              "status": "SUCCESS"
+            },
+            "resolvableDiscussionsCount": 1,
+            "resolvedDiscussionsCount": 0
+          },
+          {
+            "iid": "3995",
+            "title": "feat(#796): NEm and NEg Analytics Adjustments",
+            "draft": false,
+            "webUrl": "https://gitlab.com/performancelivestock/pb-www/-/merge_requests/3995",
+            "diffHeadSha": "c0e83bafdb9075ef02464822882f32d6fd183341",
+            "updatedAt": "2026-08-18T04:27:53Z",
+            "description": "### Available on [https://dev2.chandlerhardy-dev.performancebeef.com](https://dev2.chandlerhardy-dev.performancebeef.com)\n### Closes #796\n\n## Summary\n\n- NEm/NEg charts gain a **Per CWT / Per Head** breakdown, defaulting to **Per CWT** (delivered ration energy density, Mcal per CWT of dry-matter intake \u2014 matches the as-entered ration NEm convention). Per-Head behavior unchanged, including its Target line.\n- Chart-type labels stripped of \"(per Head)\"; titles and axis units are breakdown-aware (`NEm - {group/pen} - {breakdown}`).\n- The admin **NEm/NEg** CSV export (only \u2014 the other six growth charts keep the raw model dump) is reshaped into a consultant worksheet: removed Ideal/Breed/Gender/Temperature/Wind/Model Gender; added **Target As Fed, DMI Target, Ration**; retitled Start\u2192Projected Weight, DMI\u2192DMI As Fed, NEm\u2192NEm As Fed, NEg\u2192NEg As Fed, with each Target column beside its As-Fed counterpart in matching units (raw-lb basis; metric feedyards' targets reconciled by the delivery conversion factor).\n\n## Deliberate deviation from the issue (product please confirm)\n\nThe issue's CSV add-list included **Target NEm / Target NEg**, and the original implementation shipped them \u2014 the review panel then proved the per-CWT target math is **degenerate**: the pipeline has no formulated target-energy source (`getTargetData` returns weight targets only), so the \"Target\" density algebraically \u2248 the actual density whenever the ration is fed near its card. Decision (user-gated 2026-07-29): **drop the Target series on Per CWT** (chart) and the two energy Target columns (CSV) rather than ship two near-identical columns that read as \"always on target\". A real target-energy series would need the ration card's formulated composition \u2014 its own issue if wanted.\n\n## Hardening picked up by the review panel (this MR)\n\n- CSV formula injection (CWE-1236) neutralized on **all three** export branches of `downloadAnalytics.php` (Ration cells, pie first-cell/series headers, generic headers) \u2014 tenant-authored free text reaches higher-privileged consultants' spreadsheets.\n- `Content-Disposition` filename sanitized (quote/control-char/path stripping; pre-existing gap).\n- Join-miss vs genuine-zero distinguishable in the CSV (blank vs `0.0` \u2014 survives `fputcsv` to the byte level).\n- Re-clicking the already-active NEm/NEg tile no longer silently resets a deliberate Per Head choice.\n- `FeedData` per-pen loaders memoized (P\u00d7 unbounded Mongo finds \u2192 1\u00d7); `memory_limit` raised only for the growth-model branch; weight factor read through the live `Analytics` instance (kills a hidden-static ordering trap that would have silently broken metric feedyards under future refactors).\n\n## Verification\n\n- `php -l` clean on all changed files. Full UnitTests suite: **914 tests \u2014 69 errors / 1 failure, byte-identical to the pre-MR baseline** (pre-existing API-connectivity cases; verify tail on request).\n- 77 targeted PHPUnit tests (RED\u2192GREEN TDD ordering), **15 mutation classes applied to real source and observed to fail** \u2014 full per-mutant receipts (mutant \u2192 diff \u2192 failing assertion) posted as an MR note.\n- One surviving mutation is **declared, not hidden** (M10: a deliberate wrong-variable substitution at the unit-unreachable `getDailyFeedData` call site; compensating characterization test exists).\n- Full 8-lane review panel (architect, security, data-integrity, test-quality, design, perf, simplifier, frontend-ux) + scoped re-reviews; TQS 63\u219272.\n- **Not yet browser-verified on dev2** (menu default, rendered title, per-CWT axis magnitude \u2248 as-entered ration NEm, live CSV pull) \u2014 flagged for QA before merge.\n- Val gate: `VAL_UNAVAILABLE` (Val binary not yet deployed); waived with the mutation receipts standing in.\n\n## Known accepted gaps / follow-ups \u2014 tracked in #1681\n\n1. **Torn read on the CSV export**: three independent Mongo reads merged per request (GrowthModel sheets, Analytics sheets, targets FeedData) \u2014 a mid-request ration edit can produce a self-contradictory row. Narrow window, admin-only path; a shared-snapshot fix is a real refactor, not a patch.\n2. **Pre-existing P\u00d7D work-date fetch** under `getTargetData` (`PenMongo::getRationsForDate` doesn't populate the WorkDateMongo cache): ~5,000 unprojected full-document fetches per large-group export \u2014 and the production chart paths already pay this today. Fix touches shared caching machinery; needs its own issue.\n3. `getPropertiesForFeedItems` remains unbounded-lower-date **by design** (carry-forward history semantics \u2014 a naive bound silently zeroes unchanged items; documented in-code).\n4. `MicroRationData` copy-paste twin of the memoized FeedData loaders not updated (kept surgical).\n\n\ud83e\udd16 Generated with [Claude Code](https://claude.com/claude-code)",
+            "approved": true,
+            "detailedMergeStatus": "MERGEABLE",
+            "assignees": {
+              "nodes": [
+                {
+                  "username": "chandler.hardy"
+                }
+              ]
+            },
+            "project": {
+              "fullPath": "performancelivestock/pb-www"
+            },
+            "author": {
+              "username": "chandler.hardy"
+            },
+            "reviewers": {
+              "nodes": [
+                {
+                  "username": "alliecather",
+                  "mergeRequestInteraction": {
+                    "reviewState": "UNREVIEWED"
+                  }
+                },
+                {
+                  "username": "edmundlim",
+                  "mergeRequestInteraction": {
+                    "reviewState": "UNAPPROVED"
+                  }
+                }
+              ]
+            },
+            "headPipeline": {
+              "status": "SUCCESS"
+            },
+            "resolvableDiscussionsCount": 11,
+            "resolvedDiscussionsCount": 11
+          },
+          {
+            "iid": "3985",
+            "title": "Draft: feat(#1599): yard sheets \u2014 ranch data point columns, filters, and group aggregation",
+            "draft": true,
+            "webUrl": "https://gitlab.com/performancelivestock/pb-www/-/merge_requests/3985",
+            "diffHeadSha": "9ce540aa6c398ddbc31a6f47e0919ecfc19a32fc",
+            "updatedAt": "2026-08-18T04:28:03Z",
+            "description": "Resolves #1599 (milestone %\"Ranch Data Points\")\n\nAvailable on https://dev0.chandlerhardy-dev.performancebeef.com \u2014 Reports > Yard Sheets (saved sheet \"QA Ranch Fields\" demonstrates all columns; group \"09/23/2025 Carson\" carries uniform seeded values).\n\n## Summary\n\n- Adds the 9 ranch data points to Yard Sheets as data-point columns and filters (alphabetical ordering preserved): enum filters for Birth Vigor / Calving Ease / Color / Dam BCS at Birth / Horned Status (full #1596 label lists), range filters for Birthdate (date) and Birth Weight (numeric), Brand/Tattoo as data points.\n- Group-level value semantics: shows the **single uniform value** across the group's active animals (\"03/14/2024\", \"2 - Nursed on own, but slowly\", \"Red\", \"Polled\"\u2026) or **\"- - -\"** when absent/mixed \u2014 new `Group::getRanchDataPoints()` fetches the group's animals from the existing pb-api animals endpoint (projected `field=` params, per-group, recompute-path only, memoized) and aggregates in PHP.\n- **15 new PHPUnit tests** (DB-free, injectable fetcher seam): aggregation uniform/mixed/absent/departed-excluded, type canonicalization, display resolution, and a zero-fetch guarantee for non-yardsheet closeout paths.\n\n## Notes for reviewers\n\n- **Aggregation semantics were a product gap** \u2014 nothing existing maps per-animal fields to a group row. \"Uniform-or-dashes\" matches the mockup (values on uniform groups, \"- - -\" otherwise). Adjustable.\n- Tribunal/QA hardening in-branch: display finalization into the report cache read-path; fetch gated so Closeout/MDC/dashboard never trigger animal fetches (unit-proven); int-vs-string canonicalization; the client date filter treats \"- - -\" as absent (would otherwise hide such groups whenever a birthdate filter exists).\n- Deliberate deferrals (documented): free-text filters for Brand/Tattoo; per-sheet fetch skip when no ranch column selected; ranch fields visible-but-valueless in the closeout picker.\n- **Ops:** existing cached sheets need a recompute (`Report_Yard::setDirtyAllForFeedyard` or the nightly `cron/daily_yardsheets.php`) before values appear.\n- **Depends on pb-api ranch fields** (dev contract branch on dev0). Draft until the real pb-api implementation lands.\n\n## Verification\n\n- Live on dev0: modal data points + filter types, uniform vs \"- - -\" rendering, filter retention of dash-groups (19+1 fixture, all 20 render) \u2014 `.planning/qa-reports/1599-yardsheets-ranch-data/QA-REPORT.md`\n- MAGI tribunal SHIP 3/3 after 3 fix rounds (`.magi/tribunal-report-1599-2026-07-18.md`); PHPUnit 15/15.",
+            "approved": true,
+            "detailedMergeStatus": "DRAFT_STATUS",
+            "assignees": {
+              "nodes": [
+                {
+                  "username": "chandler.hardy"
+                }
+              ]
+            },
+            "project": {
+              "fullPath": "performancelivestock/pb-www"
+            },
+            "author": {
+              "username": "chandler.hardy"
+            },
+            "reviewers": {
+              "nodes": [
+                {
+                  "username": "adamsoper",
+                  "mergeRequestInteraction": {
+                    "reviewState": "UNREVIEWED"
+                  }
+                }
+              ]
+            },
+            "headPipeline": {
+              "status": "SUCCESS"
+            },
+            "resolvableDiscussionsCount": 1,
+            "resolvedDiscussionsCount": 0
+          },
+          {
+            "iid": "3984",
+            "title": "Draft: feat(#1598): bulk edit \u2014 ranch data point blocks with mass edit toggles",
+            "draft": true,
+            "webUrl": "https://gitlab.com/performancelivestock/pb-www/-/merge_requests/3984",
+            "diffHeadSha": "cb9b4f5d27e551128f8ae175814fada963e860a9",
+            "updatedAt": "2026-08-18T04:28:28Z",
+            "description": "Resolves #1598 (milestone %\"Ranch Data Points\")\n\nAvailable on: **dev site pending** \u2014 dev0\u2013dev5 are all occupied (dev0 serves !3985; dev1/dev2 host other open MRs; dev3\u20135 host !3981/!3982/!3983). Will be assigned to whichever frees first \u2014 Health > All Feedyard Animals > select animals > Edit.\n\n## Summary\n\n- Adds 9 edit blocks (Birthdate, Birth Weight, Brand, Tattoo, Birth Vigor, Dam BCS at Birth, Color, Horned Status, Calving Ease) to Bulk Edit in mockup order, each with a \"Mass Edit?\" toggle + per-animal inputs.\n- Enum lists are **byte-identical** to #1590's `health.enums.js` block (empty-diff receipt) \u2014 the two branches merge cleanly whichever lands first.\n- Int fields PATCH as bare ints via the same guard pattern #1590's tribunal approved; cleared inputs / \"Select\" placeholders PATCH null.\n\n## Notes for reviewers\n\n- Two QA/tribunal-caught fixes are in the branch: (1) the optional Birthdate/Birth Weight inputs originally inherited Past Weights' `individual-pounds*` classes and were being marked *required*, silently blocking Save; (2) the Mass Edit toggles no longer auto-fire the bulk control's change on toggle \u2014 unlike gender, our bulk selects have an empty placeholder, so the cloned pattern would have nulled the field on every selected animal just by flipping the switch (divergence documented in-code).\n- **Depends on pb-api ranch fields** (dev contract branch on dev0). Draft until the real pb-api implementation lands.\n\n## Verification\n\n- Live on dev0: pristine-form save validity, toggle-sweep no-op, mass-apply \u00d73 animals, individual int write, Mongo type check \u2014 `.planning/qa-reports/1598-bulk-edit-ranch-data/QA-REPORT.md`\n- MAGI tribunal SHIP 3/3 after 2 fix rounds (`.magi/tribunal-report-1598-2026-07-17.md`).",
+            "approved": true,
+            "detailedMergeStatus": "DRAFT_STATUS",
+            "assignees": {
+              "nodes": [
+                {
+                  "username": "chandler.hardy"
+                }
+              ]
+            },
+            "project": {
+              "fullPath": "performancelivestock/pb-www"
+            },
+            "author": {
+              "username": "chandler.hardy"
+            },
+            "reviewers": {
+              "nodes": []
+            },
+            "headPipeline": {
+              "status": "SUCCESS"
+            },
+            "resolvableDiscussionsCount": 0,
+            "resolvedDiscussionsCount": 0
+          },
+          {
+            "iid": "3982",
+            "title": "Draft: feat(#1590): edit animal \u2014 collect and edit ranch data points in Animal Stats",
+            "draft": true,
+            "webUrl": "https://gitlab.com/performancelivestock/pb-www/-/merge_requests/3982",
+            "diffHeadSha": "a04cf59a77eb756057829dbd6868de82906d8dbd",
+            "updatedAt": "2026-08-18T04:28:37Z",
+            "description": "Resolves #1590 (milestone %\"Ranch Data Points\")\n\nUnavailable on any dev right now, on hold\nHealth > group > Edit an animal. Tag 5218 in \"6/5/25 Johnson Steers\" has all 9 values saved\n\n> **If you looked between Jul 18\u201321 and saw empty fields:** the dev Mongo was rebuilt from production snapshots on Jul 18, which wiped the demo values saved during QA (dev-only data). Values were re-saved through the UI on Jul 21, re-verifying the full write path against the dev4 API in the process.\n\n## Summary\n\n- Adds 9 editable rows to the Animal Stats panel in mockup order: Birthdate (date), Birth Weight (number, lbs), Brand, Tattoo (text), and Birth Vigor / Dam BCS at Birth / Color / Horned Status / Calving Ease (dropdowns).\n- Enum option lists live in one place (`health.enums.js`, labels verbatim from #1596) \u2014 #1598 bulk edit will reuse them, and the eventual rename pass against the real pb-api field names touches one file.\n- Wiring follows the existing `gender` pattern end-to-end (observe \u2192 change-handler \u2192 existing top-level PATCH). New `~toIntOrNull`/`~emptyToNull` convertBack helpers guarantee ints PATCH as bare ints and cleared fields PATCH as null.\n\n## Notes for reviewers\n\n- **Depends on pb-api ranch fields** (dev contract branch `pb-api@chardy/ranch-data-points-dev`, deployed on dev0 and dev4). Draft until the real pb-api implementation lands.\n- Tribunal caught and fixed an int-coercion bug pre-push (\"12.9\" would have silently PATCHed as 12; now `step=\"1\"` + native validation blocks it, with a null-not-corrupted fallback).\n- `d52cef6f70` fixes a styling miss from the first cut: the three free-entry inputs (Birth Weight, Brand, Tattoo) shipped with bare `form-control`, but the theme's input styling keys off `.textbox`/`.date-input`, so they rendered as unstyled white boxes. Now `textbox` (+ `numeric` for the number field), matching the template's existing inputs; `script_version` \u2192 wagyu29 to bust the `?v=` template cache.\n\n## Verification\n\n- Full write path verified on dev0 (Jul 17) and re-verified on dev4 (Jul 21): UI \u2192 PATCH \u2192 pb-api validation \u2192 Mongo shows exact contract types (ints as NumberLong, nulls on clear); reload round-trips every field. `.planning/qa-reports/1590-edit-animal-ranch-data/QA-REPORT.md`\n- Styling fix verified on dev4 via computed styles (inputs pick up the dark-theme `.textbox` background) \u2014 see report screenshot `04-dev4-styled-inputs-resaved-values.png`.\n- MAGI tribunal SHIP 3/3 after one fix round (`.magi/tribunal-report-1590-2026-07-17.md`).",
+            "approved": true,
+            "detailedMergeStatus": "DRAFT_STATUS",
+            "assignees": {
+              "nodes": [
+                {
+                  "username": "chandler.hardy"
+                }
+              ]
+            },
+            "project": {
+              "fullPath": "performancelivestock/pb-www"
+            },
+            "author": {
+              "username": "chandler.hardy"
+            },
+            "reviewers": {
+              "nodes": [
+                {
+                  "username": "adamsoper",
+                  "mergeRequestInteraction": {
+                    "reviewState": "UNREVIEWED"
+                  }
+                }
+              ]
+            },
+            "headPipeline": {
+              "status": "SUCCESS"
+            },
+            "resolvableDiscussionsCount": 0,
+            "resolvedDiscussionsCount": 0
+          },
+          {
+            "iid": "3981",
+            "title": "Draft: feat(#1588): group page \u2014 Sex + Birthdate columns, merged Safe to Ship cell",
+            "draft": true,
+            "webUrl": "https://gitlab.com/performancelivestock/pb-www/-/merge_requests/3981",
+            "diffHeadSha": "0236125bda0070fec703ffe286b9639222dd6746",
+            "updatedAt": "2026-08-18T04:28:43Z",
+            "description": "Resolves #1588 (milestone %\"Ranch Data Points\")\n\n**On hold awaiting the pb-api ranch-fields implementation \u2014 not currently available on a dev server** (previously previewed on dev3; that environment has been reassigned while this waits).\n\n## Summary\n\n- Adds **Sex** and **Birthdate** columns to the group page's individual-animal table.\n- Removes the standalone **Days to Clear** column; the day count now renders as a stacked secondary line inside **Safe to Ship** (\"Withdrawal / N Days to Clear\"), per the issue mockup.\n- Birthdate uses the repo's date-only normalizer (`~stringToDate`) to avoid the UTC-midnight off-by-one on `YYYY-MM-DD` values (caught in browser QA).\n\n## Notes for reviewers\n\n- **Sex column is mockup-derived** \u2014 the issue's Changes list only names birthdate + the cell merge, but the approved mockup shows Sex (the All-Animals table already has it). Cell copied verbatim from `bulk_animal_table.html`.\n- **Depends on pb-api ranch fields** (`birth_date` on animal documents). A dev-only contract branch (`pb-api@chardy/ranch-data-points-dev`, deployed on dev0) serves it for review; **draft until the real pb-api implementation lands** \u2014 field names may need a rename pass to match it.\n- Known minor (tribunal-flagged, non-gating): \"1 Days to Clear\" pluralization.\n\n## Verification\n\n- MAGI tribunal SHIP 3/3 (report: `.magi/tribunal-report-working-tree-2026-07-17.md` on the branch context).\n- Browser QA on dev0 with seeded birth dates: all three Safe-to-Ship states + null/date rendering verified \u2014 `.planning/qa-reports/1588-group-page-ranch-data/QA-REPORT.md`.\n- `php -l` clean; local PHPUnit deltas are pre-existing devbox-config failures (CI is authoritative).",
+            "approved": true,
+            "detailedMergeStatus": "DRAFT_STATUS",
+            "assignees": {
+              "nodes": [
+                {
+                  "username": "chandler.hardy"
+                }
+              ]
+            },
+            "project": {
+              "fullPath": "performancelivestock/pb-www"
+            },
+            "author": {
+              "username": "chandler.hardy"
+            },
+            "reviewers": {
+              "nodes": [
+                {
+                  "username": "adamsoper",
+                  "mergeRequestInteraction": {
+                    "reviewState": "UNREVIEWED"
+                  }
+                }
+              ]
+            },
+            "headPipeline": {
+              "status": "SUCCESS"
+            },
+            "resolvableDiscussionsCount": 0,
+            "resolvedDiscussionsCount": 0
+          }
+        ]
+      }
+    }
+  }
+}

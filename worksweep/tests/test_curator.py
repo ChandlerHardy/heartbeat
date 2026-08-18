@@ -29,9 +29,11 @@ def _rec(number, wi, first_seen=NOW):
 # --- build_prompt --------------------------------------------------------
 
 def test_build_prompt_includes_one_line_per_record_with_all_fields():
+    # Task E: record lines gain a trailing `| title` field (blank when the
+    # WorkItem has no title, as here).
     recs = [_rec(1, _wi(why="review requested"))]
     prompt = build_prompt(recs, NOW)
-    line = "1 | review_request | magi-review | pb-www | 4061 | review requested | 0 | proposed"
+    line = "1 | review_request | magi-review | pb-www | 4061 | review requested | 0 | proposed | "
     assert line in prompt
 
 
@@ -39,13 +41,13 @@ def test_build_prompt_computes_age_days_from_first_seen():
     old = "2026-08-05T12:00:00+00:00"  # 12 days before NOW
     recs = [_rec(2, _wi(iid=99), first_seen=old)]
     prompt = build_prompt(recs, NOW)
-    assert "2 | review_request | magi-review | pb-www | 99 | review requested | 12 | proposed" in prompt
+    assert "2 | review_request | magi-review | pb-www | 99 | review requested | 12 | proposed | " in prompt
 
 
 def test_build_prompt_unparseable_first_seen_leaves_age_blank():
     recs = [_rec(3, _wi(iid=5), first_seen="not-a-date")]
     prompt = build_prompt(recs, NOW)
-    assert "3 | review_request | magi-review | pb-www | 5 | review requested |  | proposed" in prompt
+    assert "3 | review_request | magi-review | pb-www | 5 | review requested |  | proposed | " in prompt
 
 
 # --- validate --------------------------------------------------------------

@@ -54,36 +54,71 @@ def assess_review_request(mr: MergeRequest, username: str) -> List[WorkItem]:
     return [WorkItem(
         schema_version=1, id=f"review:{mr.repo}!{mr.iid}",
         repo=mr.repo, kind="review_request", executor="magi-review",
-        risk="low", why=why, web_url=mr.web_url, sha=mr.sha)]
+        risk="low", why=why, web_url=mr.web_url, sha=mr.sha, title=mr.title)]
 
 
-def resolutions(review_mrs: List[MergeRequest], username: str) -> dict:
+def resolutions(review_mrs: List[MergeRequest], username: str,
+               authored: List[MergeRequest] = ()) -> dict:
     """ids the sensor says are settled: review items where my state is a
-    waiting-on-author state. reconcile() flips matching queue records done."""
+    waiting-on-author state, plus a `feedback:{repo}!{iid}` resolution for
+    any authored MR that has become handed-off (see is_handed_off) -- a
+    mid-flight `approved` feedback item would otherwise linger forever
+    (reconcile's _RETAIN_IF_GONE keeps approved records as-is once the fresh
+    sweep no longer proposes them). `authored` defaults to () for backward
+    compat with callers assessing only the review-requested bucket.
+    reconcile() flips matching queue records done."""
     out = {}
     for mr in review_mrs:
         if username in mr.reviewers and mr.my_review_state not in REVIEW_ACTIONABLE_STATES:
             out[f"review:{mr.repo}!{mr.iid}"] = "already-reviewed"
+    for mr in authored:
+        if is_handed_off(mr, username):
+            out[f"feedback:{mr.repo}!{mr.iid}"] = "handed-off"
     return out
+
+
+def is_handed_off(mr: MergeRequest, username: str) -> bool:
+    """True when an authored MR is ready-to-merge and no longer Chandler's
+    work: overall approval satisfied, GitLab says it's mergeable, and it's
+    assigned to someone other than the author (the maintainer who will
+    click merge). `mr.approved` alone (LGTM'd but not yet mergeable) is NOT
+    a handoff -- see assess_own_mr, which still suppresses just the
+    magi-review item in that narrower case."""
+    return (mr.approved and mr.merge_status == "MERGEABLE"
+           and any(a != username for a in mr.assignees))
 
 
 def assess_own_mr(mr: MergeRequest, username: str,
                   has_magi: Callable[[str, int, str], bool]) -> List[WorkItem]:
     if mr.author != username:
         return []
+    if is_handed_off(mr, username):
+        # Ready to merge, handed to a maintainer -- not Chandler's work
+        # anymore. No feedback/magi/hygiene noise, just one informational
+        # item so the digest still shows where the MR landed.
+        others = ", ".join(a for a in mr.assignees if a != username)
+        return [WorkItem(
+            schema_version=1, id=f"handoff:{mr.repo}!{mr.iid}",
+            repo=mr.repo, kind="handoff", executor="none", risk="low",
+            why=f"ready to merge → assigned to {others}",
+            web_url=mr.web_url, sha=mr.sha, title=mr.title)]
     items: List[WorkItem] = []
-    if not has_magi(mr.repo, mr.iid, mr.sha):
+    # `mr.approved` (LGTM'd, even if not yet mergeable) means magi review has
+    # done its job -- magi is pre-review, not post-approval -- so suppress
+    # just the magi item, independent of has_magi's queue-history check.
+    if not mr.approved and not has_magi(mr.repo, mr.iid, mr.sha):
         items.append(WorkItem(
             schema_version=1, id=f"magi:{mr.repo}!{mr.iid}@{mr.sha}",
             repo=mr.repo, kind="mr", executor="magi-review", risk="low",
-            why="no magi-review yet", web_url=mr.web_url, sha=mr.sha))
+            why="no magi-review yet", web_url=mr.web_url, sha=mr.sha, title=mr.title))
     # Drafts often don't have a dev link yet (the environment isn't assigned/
     # ready until the MR leaves draft) -- exempt them from the hygiene nag.
     if not mr.is_draft and not mr.dev_url_present:
         items.append(WorkItem(
             schema_version=1, id=f"hygiene-devurl:{mr.repo}!{mr.iid}",
             repo=mr.repo, kind="mr", executor="mr-hygiene", risk="low",
-            why="description missing dev-server link", web_url=mr.web_url, sha=mr.sha))
+            why="description missing dev-server link", web_url=mr.web_url,
+            sha=mr.sha, title=mr.title))
     if mr.changes_requested or mr.unresolved_count > 0:
         n = mr.unresolved_count
         why = "changes requested" if mr.changes_requested else ""
@@ -92,12 +127,12 @@ def assess_own_mr(mr: MergeRequest, username: str,
         items.append(WorkItem(
             schema_version=1, id=f"feedback:{mr.repo}!{mr.iid}",
             repo=mr.repo, kind="feedback", executor="triage", risk="low",
-            why=why, web_url=mr.web_url, sha=mr.sha))
+            why=why, web_url=mr.web_url, sha=mr.sha, title=mr.title))
     if mr.ci_status == "failed":
         items.append(WorkItem(
             schema_version=1, id=f"ci:{mr.repo}!{mr.iid}",
             repo=mr.repo, kind="ci_red", executor="triage", risk="low",
-            why="head pipeline failed", web_url=mr.web_url, sha=mr.sha))
+            why="head pipeline failed", web_url=mr.web_url, sha=mr.sha, title=mr.title))
     return items
 
 
@@ -118,7 +153,7 @@ def assess_assigned_mr(mr: MergeRequest, username: str,
     return [WorkItem(
         schema_version=1, id=f"assigned:{mr.repo}!{mr.iid}",
         repo=mr.repo, kind="assigned_mr", executor="triage", risk="low",
-        why="assigned to you", web_url=mr.web_url, sha=mr.sha)]
+        why="assigned to you", web_url=mr.web_url, sha=mr.sha, title=mr.title)]
 
 
 def assess_mr(mr: MergeRequest, username: str,
@@ -179,7 +214,8 @@ def assess_issue(issue: Issue,
     return [WorkItem(
         schema_version=1, id=f"issue:{issue.repo}#{issue.iid}", repo=issue.repo,
         kind="issue", executor="triage", risk="low",
-        why=f"assigned issue: {issue.title}", web_url=issue.web_url, sha="")]
+        why=f"assigned issue: {issue.title}", web_url=issue.web_url, sha="",
+        title=issue.title)]
 
 
 def _normalize_todo_url(url: str) -> str:

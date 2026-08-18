@@ -75,21 +75,29 @@ def _record_line(r: QueueRecord, now: str) -> str:
         r.item.why,
         str(age) if age is not None else "",
         r.item.status,
+        r.item.title,
     ]
     return " | ".join(fields)
 
 
 _INSTRUCTIONS = """You are curating Chandler's Worksweep digest into a short Discord briefing.
 
-Below is one line per open queue item: `number | kind | executor | repo | ref | why | age_days | status`.
+Below is one line per open queue item:
+`number | kind | executor | repo | ref | why | age_days | status | title`.
 
 Write the briefing as plain text with these rules, in this order:
 1. "Needs your review:" -- one line per item whose executor is `magi-review`
    and whose status is `proposed` or `approved`. Format each as
-   `{number}. {repo} !{ref} -- {why}`.
+   `{number}. {repo} !{ref} -- {short title} -- {why}`.
 2. "Feedback / CI on your MRs:" -- one line per remaining item whose executor
    is `triage` and whose kind is `feedback` or `ci_red`, same line format.
-3. Collapse every remaining item into exactly one line:
+3. If any item has kind `handoff`, add exactly one trailing informational
+   line for all of them together: "Handed off: !{ref} -> {who}, ..." (read
+   who it's assigned to from that item's `why` column). Never list a
+   handoff item under "Needs your review" -- it's informational, not
+   actionable, and its number does not need to appear anywhere at all.
+4. Collapse every remaining item (excluding any handoff items, already
+   handled by rule 3) into exactly one line:
    "N low-priority items held in queue: <comma-separated queue numbers>"
    where N is the count and the numbers are their exact queue numbers.
 

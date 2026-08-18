@@ -216,7 +216,7 @@ def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
             items += assessor.assess_todo(td)
         items = assessor.dedupe(items)
 
-        resolved = assessor.resolutions(review_mrs, cfg.username)
+        resolved = assessor.resolutions(review_mrs, cfg.username, authored)
         records = reconcile(records0, items, deps["now"](), resolved=resolved)
         try:
             deps["save"](records)

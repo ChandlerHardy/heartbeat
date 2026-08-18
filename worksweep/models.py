@@ -26,6 +26,9 @@ class MergeRequest:
     my_review_state: str = ""       # GitLab reviewState enum for cfg.username, "" = unknown
     changes_requested: bool = False # any reviewer state REQUESTED_CHANGES on my MR
     unresolved_count: int = 0       # resolvable - resolved discussions on my MR
+    approved: bool = False          # GraphQL `approved` -- overall approval satisfied
+    merge_status: str = ""          # upper-cased detailedMergeStatus, e.g. "MERGEABLE"
+    assignees: tuple = ()           # tuple[str, ...] usernames
 
     @property
     def dev_url_present(self) -> bool:
@@ -64,6 +67,7 @@ class WorkItem:
     result_sha: str = ""      # head SHA the executor actually reviewed
     report_path: str = ""     # tribunal report path written by the executor
     error_summary: str = ""   # short failure text (status=error)
+    title: str = ""           # mr.title / issue.title -- "" for todo items
 
 
 @dataclass(frozen=True)

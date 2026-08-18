@@ -147,6 +147,8 @@ query {
     authoredMergeRequests(state: opened, first: 100) {
       nodes {
         iid title draft webUrl diffHeadSha updatedAt description
+        approved detailedMergeStatus
+        assignees { nodes { username } }
         project { fullPath }
         author { username }
         reviewers { nodes { username mergeRequestInteraction { reviewState } } }
@@ -157,6 +159,8 @@ query {
     assignedMergeRequests(state: opened, first: 100) {
       nodes {
         iid title draft webUrl diffHeadSha updatedAt description
+        approved detailedMergeStatus
+        assignees { nodes { username } }
         project { fullPath }
         author { username }
         reviewers { nodes { username mergeRequestInteraction { reviewState } } }
@@ -193,6 +197,8 @@ def _gql_mr(node: dict, username: str) -> "MergeRequest":
     resolvable = int(node.get("resolvableDiscussionsCount") or 0)
     resolved = int(node.get("resolvedDiscussionsCount") or 0)
     pipe = (node.get("headPipeline") or {}).get("status") or "unknown"
+    assignees = tuple((a or {}).get("username", "")
+                      for a in ((node.get("assignees") or {}).get("nodes") or []))
     return MergeRequest(
         repo=repo,
         iid=int(node.get("iid", 0)),
@@ -208,6 +214,9 @@ def _gql_mr(node: dict, username: str) -> "MergeRequest":
         my_review_state=my_state,
         changes_requested=changes_requested,
         unresolved_count=max(0, resolvable - resolved),
+        approved=bool(node.get("approved", False)),
+        merge_status=str(node.get("detailedMergeStatus") or "").upper(),
+        assignees=assignees,
     )
 
 
