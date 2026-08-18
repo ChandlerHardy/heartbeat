@@ -116,3 +116,42 @@ def test_load_config_non_bool_curate_raises_runtime_error():
         with pytest.raises(RuntimeError) as exc:
             load_config(p)
         assert "runner.curate" in str(exc.value)
+
+
+# M4 Task F — runner.dev_boxes: dev-slot sensing config. Empty/absent -> ()
+# (feature off, matches the existing "absent runner block -> graceful" pattern).
+def test_load_config_dev_boxes_defaults_empty_tuple():
+    with tempfile.TemporaryDirectory() as tmp:
+        p = _write(tmp, {"gitlab": {"username": "x", "repos": []}})
+        cfg = load_config(p)
+        assert cfg.dev_boxes == ()
+
+
+def test_load_config_reads_dev_boxes_list_of_dicts():
+    boxes = [
+        {"name": "dev1", "host": "chandlerhardy-dev",
+         "path": "/home/chandlerhardy/dev1.chandlerhardy-dev/pb-www",
+         "url": "https://dev1.chandlerhardy-dev.performancebeef.com/"},
+        {"name": "dev4", "host": "chandlerhardy-dev",
+         "path": "/home/chandlerhardy/dev4.chandlerhardy-dev/pb-www",
+         "url": "https://dev4.chandlerhardy-dev.performancebeef.com/"},
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        p = _write(tmp, {
+            "gitlab": {"username": "x", "repos": []},
+            "runner": {"dev_boxes": boxes},
+        })
+        cfg = load_config(p)
+        assert cfg.dev_boxes == tuple(boxes)
+        assert cfg.dev_boxes[0]["name"] == "dev1"
+
+
+def test_load_config_non_list_dev_boxes_raises_runtime_error():
+    with tempfile.TemporaryDirectory() as tmp:
+        p = _write(tmp, {
+            "gitlab": {"username": "x", "repos": []},
+            "runner": {"dev_boxes": "dev1"},
+        })
+        with pytest.raises(RuntimeError) as exc:
+            load_config(p)
+        assert "runner.dev_boxes" in str(exc.value)

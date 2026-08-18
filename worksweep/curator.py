@@ -119,16 +119,25 @@ Queue:
 """
 
 
-def build_prompt(records: List[QueueRecord], now: str) -> str:
+def build_prompt(records: List[QueueRecord], now: str,
+                 preamble: Optional[str] = None) -> str:
     """The full curator prompt: instructions + one table line per record.
 
     `records` is expected to already be the non-terminal queue (the same
     list __main__.run_sweep's `actionable` filter produces) -- curate()
     treats it as the complete allowed-numbers universe, so passing a
     smaller/different slice would make the validator reject correct output.
+
+    `preamble` (M4 Task F — the dev-slot summary line) is prepended as
+    context BEFORE the instructions when given, so the LLM knows current
+    dev-slot availability while curating `implement`-executor items. It is
+    not required output -- validate() never demands the LLM echo it back
+    (see curator's module docstring: only proposed/approved magi-review
+    numbers are a hard requirement).
     """
     lines = [_record_line(r, now) for r in records]
-    return _INSTRUCTIONS + "\n".join(lines)
+    prefix = f"Context: {preamble}\n\n" if preamble else ""
+    return prefix + _INSTRUCTIONS + "\n".join(lines)
 
 
 # Injection bound: an untrusted MR/issue title riding into the prompt (via
@@ -245,16 +254,20 @@ def validate(output: str, records: List[QueueRecord]) -> bool:
 
 
 def curate(records: List[QueueRecord], now: str,
-          run_llm: Callable[[str], str]) -> Optional[str]:
+          run_llm: Callable[[str], str],
+          preamble: Optional[str] = None) -> Optional[str]:
     """Ask `run_llm` to curate `records` into a Discord-ready briefing.
 
     Never raises. Returns None (fall back to the raw digest) when: there are
     no records, run_llm raises/times out, run_llm returns something that
-    isn't a usable string, or the output fails validate()."""
+    isn't a usable string, or the output fails validate().
+
+    `preamble` (M4 Task F) is forwarded to build_prompt as dev-slot context
+    -- see build_prompt's docstring."""
     if not records:
         return None
     try:
-        prompt = build_prompt(records, now)
+        prompt = build_prompt(records, now, preamble=preamble)
         output = run_llm(prompt)
         if not isinstance(output, str):
             print("worksweep: curator LLM returned non-string output",

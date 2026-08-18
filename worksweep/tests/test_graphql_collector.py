@@ -37,6 +37,15 @@ def test_my_review_state_extracted_uppercase():
     assert all(s == s.upper() and s for s in states)
 
 
+def test_fixture_mrs_carry_source_branch():
+    # M4 Task F -- the 2026-08-18 re-freeze added sourceBranch to the live
+    # query; every MR the live fixture carries should have a non-empty one.
+    reviews, authored, assigned = parse_graphql_sweep(_raw(), _username(),
+                                                       ("pb-www", "pb-api", "jrg"))
+    for mr in reviews + authored + assigned:
+        assert mr.source_branch
+
+
 def test_repo_filter_drops_unlisted_projects():
     reviews, authored, assigned = parse_graphql_sweep(_raw(), _username(), ("pb-api",))
     assert all(mr.repo == "pb-api" for mr in reviews + authored + assigned)
@@ -107,6 +116,43 @@ def test_synthetic_authored_fields():
     assert mr.unresolved_count == 2
     assert mr.ci_status == "failed"
     assert mr.dev_url_present is True
+
+
+# M4 Task F -- sourceBranch feeds devslots.classify.
+def test_source_branch_extracted_from_authored_node():
+    doc = {"data": {"currentUser": {"username": "me",
+        "reviewRequestedMergeRequests": {"nodes": []},
+        "authoredMergeRequests": {"nodes": [{
+            "iid": "7", "title": "t", "draft": False,
+            "webUrl": "https://gitlab.com/performancelivestock/pb-www/-/merge_requests/7",
+            "diffHeadSha": "s7", "updatedAt": "2026-08-07T00:00:00Z",
+            "description": "", "sourceBranch": "feat/1775-thing",
+            "project": {"fullPath": "performancelivestock/pb-www"},
+            "author": {"username": "me"},
+            "reviewers": {"nodes": []},
+            "headPipeline": {"status": "SUCCESS"},
+            "resolvableDiscussionsCount": 0, "resolvedDiscussionsCount": 0}]}}}}
+    _, authored, _ = parse_graphql_sweep(json.dumps(doc), "me", ("pb-www",))
+    assert authored[0].source_branch == "feat/1775-thing"
+
+
+def test_missing_source_branch_key_defaults_empty():
+    # Backward-compat: a raw payload frozen before this field existed (or a
+    # tolerant partial response) must not raise -- just yield "".
+    doc = {"data": {"currentUser": {"username": "me",
+        "reviewRequestedMergeRequests": {"nodes": []},
+        "authoredMergeRequests": {"nodes": [{
+            "iid": "7", "title": "t", "draft": False,
+            "webUrl": "https://gitlab.com/performancelivestock/pb-www/-/merge_requests/7",
+            "diffHeadSha": "s7", "updatedAt": "2026-08-07T00:00:00Z",
+            "description": "",
+            "project": {"fullPath": "performancelivestock/pb-www"},
+            "author": {"username": "me"},
+            "reviewers": {"nodes": []},
+            "headPipeline": {"status": "SUCCESS"},
+            "resolvableDiscussionsCount": 0, "resolvedDiscussionsCount": 0}]}}}}
+    _, authored, _ = parse_graphql_sweep(json.dumps(doc), "me", ("pb-www",))
+    assert authored[0].source_branch == ""
 
 
 def test_malformed_raw_returns_empty_lists():

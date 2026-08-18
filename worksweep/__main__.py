@@ -17,6 +17,7 @@ import argparse
 import datetime
 import json
 import os
+import subprocess
 import sys
 import urllib.error
 import urllib.parse
@@ -28,7 +29,9 @@ from typing import Callable, Dict, Optional
 # a tampered/typo'd webhook from exfiltrating the digest elsewhere.
 _ALLOWED_WEBHOOK_HOSTS = ("discord.com", "discordapp.com")
 
-from . import assessor, collectors, curator
+_SSH_TIMEOUT_SECONDS = 20
+
+from . import assessor, collectors, curator, devslots
 from .approvals import apply_approvals
 from .config import WorksweepConfig, load_config
 from .discord_read import fetch_messages
@@ -107,6 +110,24 @@ def _post_discord(webhook: str, content: str) -> None:
             resp.read()
     except (urllib.error.HTTPError, urllib.error.URLError) as e:
         raise RuntimeError(f"discord post failed: {e}")
+
+
+def run_ssh(host: str, command: str, timeout: int = _SSH_TIMEOUT_SECONDS) -> str:
+    """M4 Task F ssh edge (read-only): run `command` on `host` via the `ssh`
+    binary and return stdout. Raises RuntimeError on timeout, a missing ssh
+    binary, or a non-zero exit -- mirrors collectors._run_glab. Callers
+    (devslots.probe) catch this per-box and degrade to an unknown branch/sha
+    rather than losing the whole sweep to one unreachable box."""
+    try:
+        result = subprocess.run(["ssh", host, command],
+                                capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"ssh {host} timed out after {timeout}s")
+    except FileNotFoundError:
+        raise RuntimeError("ssh not found on PATH")
+    if result.returncode != 0:
+        raise RuntimeError(f"ssh {host} failed: {(result.stderr or '').strip()}")
+    return result.stdout
 
 
 def _run_intake(cfg: WorksweepConfig) -> int:
@@ -229,21 +250,51 @@ def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
         # formatter renders, or "nothing needs you" and an empty digest could
         # disagree.
         actionable = [r for r in records if r.item.status not in ("done", "error")]
+
+        # M4 Task F: dev-slot sensing. Entirely opt-in (cfg.dev_boxes empty
+        # -> deps["ssh"] is never touched, matching every pre-M4 caller/test)
+        # and never fatal to the sweep — a probe failure just means no
+        # preamble line this round, not a failed digest.
+        slot_line: Optional[str] = None
+        if cfg.dev_boxes:
+            ssh_edge = deps.get("ssh")
+            if ssh_edge is None:
+                print("worksweep: runner.dev_boxes configured but no ssh dep "
+                      "provided — skipping dev-slot sensing", file=sys.stderr)
+            else:
+                try:
+                    boxes = devslots.probe(list(cfg.dev_boxes), ssh_edge)
+                    claimed = frozenset(
+                        r.item.dev_box for r in records
+                        if r.item.dev_box and r.item.executor == "implement"
+                        and r.item.status in ("running", "approved"))
+                    tiers = devslots.classify(
+                        boxes, review_mrs + authored + assigned, cfg.username,
+                        claimed=claimed)
+                    slot_line = devslots.summary_line(tiers)
+                except Exception as e:
+                    print(f"worksweep: dev-slot sensing failed: "
+                          f"{type(e).__name__}: {e}", file=sys.stderr)
+                    slot_line = None
+
         if actionable:
             curated = None
             run_llm = deps.get("llm")
             if cfg.curate and run_llm is not None:
-                curated = curator.curate(actionable, deps["now"](), run_llm)
+                curated = curator.curate(actionable, deps["now"](), run_llm,
+                                         preamble=slot_line)
             if curated is not None:
                 n, m = curator.partition_counts(actionable)
                 msg = (f"{_HEADER} (curated) — {n} actionable / {m} held:\n"
-                      f"{curated}\n{_FOOTER}")
+                      + (f"{slot_line}\n" if slot_line else "")
+                      + f"{curated}\n{_FOOTER}")
                 # curated is validated at <= 1700 bytes, but header/footer add
                 # ~140 more bytes on top -- truncate the assembled message as
                 # a hard backstop so it never breaches the Discord-safe cap.
                 _post_all([_truncate_bytes(msg, DISCORD_MAX_CHARS)])
             else:
-                _post_all(format_messages_from_records(actionable, now=deps["now"]()))
+                _post_all(format_messages_from_records(
+                    actionable, now=deps["now"](), preamble=slot_line))
         else:
             _post_all([f"🔍 Worksweep: nothing needs you "
                        f"(checked {len(review_mrs)} review requests, "
@@ -309,6 +360,11 @@ def main(argv=None) -> int:
     # side-effect-free preview); every other invocation gets the real edge.
     if not args.dry_run:
         deps["llm"] = curator.make_run_llm(cfg)
+    # M4 Task F: dev-slot ssh probing is read-only (git branch/rev-parse on
+    # the box), so --dry-run still runs it for real -- unlike the LLM/post
+    # edges above, there's no side effect to preview around. run_sweep only
+    # ever calls this when cfg.dev_boxes is non-empty.
+    deps["ssh"] = run_ssh
     return run_sweep(cfg, deps)
 
 

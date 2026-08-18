@@ -137,7 +137,7 @@ query {
     username
     reviewRequestedMergeRequests(state: opened, first: 100) {
       nodes {
-        iid title draft webUrl diffHeadSha updatedAt
+        iid title draft webUrl diffHeadSha updatedAt sourceBranch
         project { fullPath }
         author { username }
         reviewers { nodes { username mergeRequestInteraction { reviewState } } }
@@ -146,7 +146,7 @@ query {
     }
     authoredMergeRequests(state: opened, first: 100) {
       nodes {
-        iid title draft webUrl diffHeadSha updatedAt description
+        iid title draft webUrl diffHeadSha updatedAt description sourceBranch
         approved detailedMergeStatus
         assignees { nodes { username } }
         project { fullPath }
@@ -158,7 +158,7 @@ query {
     }
     assignedMergeRequests(state: opened, first: 100) {
       nodes {
-        iid title draft webUrl diffHeadSha updatedAt description
+        iid title draft webUrl diffHeadSha updatedAt description sourceBranch
         approved detailedMergeStatus
         assignees { nodes { username } }
         project { fullPath }
@@ -217,6 +217,7 @@ def _gql_mr(node: dict, username: str) -> "MergeRequest":
         approved=bool(node.get("approved", False)),
         merge_status=str(node.get("detailedMergeStatus") or "").upper(),
         assignees=assignees,
+        source_branch=node.get("sourceBranch") or "",
     )
 
 

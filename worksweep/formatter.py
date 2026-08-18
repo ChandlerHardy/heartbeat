@@ -136,18 +136,25 @@ _LABEL_RESERVE = 12
 
 def _format_messages_numbered(numbered: List[tuple],
                               now: Optional[str] = None,
-                              max_bytes: int = DISCORD_MAX_CHARS) -> List[str]:
+                              max_bytes: int = DISCORD_MAX_CHARS,
+                              preamble: Optional[str] = None) -> List[str]:
     """Split a list of (number, WorkItem, first_seen?) pairs into capped messages.
 
     Multi-part digests get a "(i/N)" label on each header line so a reader
     knows a message is a fragment, not the whole sweep. The split itself
     reserves `_LABEL_RESERVE` bytes of headroom up front so adding the label
     afterward can never push a message over `max_bytes`.
+
+    `preamble` (M4 Task F — dev-slot summary line), when given, renders once
+    as its own line directly under the header of the FIRST message only —
+    never repeated on continuation parts.
     """
     if not numbered:
         return [_ALL_CLEAR]
     cap = max_bytes - _LABEL_RESERVE
     head = f"{_HEADER} — {len(numbered)} item(s) need you:"
+    if preamble:
+        head += f"\n{preamble}"
     cont = f"{_HEADER} *(cont.)*"
     msgs: List[str] = []
     cur = head
@@ -193,10 +200,13 @@ def _format_messages_numbered(numbered: List[tuple],
     return msgs
 
 
-def _format_digest_numbered(numbered: List[tuple], now: Optional[str] = None) -> str:
+def _format_digest_numbered(numbered: List[tuple], now: Optional[str] = None,
+                            preamble: Optional[str] = None) -> str:
     if not numbered:
         return _ALL_CLEAR
     lines = [f"{_HEADER} — {len(numbered)} item(s) need you:"]
+    if preamble:
+        lines.append(preamble)
     non_handoff, handoff = _group_handoff_last(numbered)
     for item_tuple in non_handoff:
         n = item_tuple[0]
@@ -214,15 +224,16 @@ def _format_digest_numbered(numbered: List[tuple], now: Optional[str] = None) ->
     return "\n".join(lines)
 
 
-def format_messages(items: List[WorkItem],
-                    max_bytes: int = DISCORD_MAX_CHARS) -> List[str]:
+def format_messages(items: List[WorkItem], max_bytes: int = DISCORD_MAX_CHARS,
+                    preamble: Optional[str] = None) -> List[str]:
     """Split the digest into messages each <= max_bytes (byte-safe)."""
-    return _format_messages_numbered(_numbered(items), max_bytes=max_bytes)
+    return _format_messages_numbered(_numbered(items), max_bytes=max_bytes,
+                                     preamble=preamble)
 
 
-def format_digest(items: List[WorkItem]) -> str:
+def format_digest(items: List[WorkItem], preamble: Optional[str] = None) -> str:
     """The whole digest as a single string (uncapped) — for stdout/dry-run."""
-    return _format_digest_numbered(_numbered(items))
+    return _format_digest_numbered(_numbered(items), preamble=preamble)
 
 
 def _records_numbered(records: List[QueueRecord]) -> List[tuple]:
@@ -239,20 +250,30 @@ def _records_numbered(records: List[QueueRecord]) -> List[tuple]:
 
 def format_messages_from_records(records: List[QueueRecord],
                                  now: Optional[str] = None,
-                                 max_bytes: int = DISCORD_MAX_CHARS) -> List[str]:
+                                 max_bytes: int = DISCORD_MAX_CHARS,
+                                 preamble: Optional[str] = None) -> List[str]:
     """Capped messages rendered from queue records in persisted-number order.
 
     When now is provided, records with first_seen > 5 days before now render with
     an age marker ⏳{d}d. When now=None, no age markers (backward compatible).
+
+    `preamble` (M4 Task F — dev-slot summary line) renders once under the
+    header of the first message; omitted entirely when there are no records
+    (nothing to preface — see _format_messages_numbered's ALL_CLEAR path).
     """
-    return _format_messages_numbered(_records_numbered(records), now, max_bytes)
+    return _format_messages_numbered(_records_numbered(records), now, max_bytes,
+                                     preamble=preamble)
 
 
 def format_digest_from_records(records: List[QueueRecord],
-                               now: Optional[str] = None) -> str:
+                               now: Optional[str] = None,
+                               preamble: Optional[str] = None) -> str:
     """Single-string digest rendered from queue records in number order.
 
     When now is provided, records with first_seen > 5 days before now render with
     an age marker ⏳{d}d. When now=None, no age markers (backward compatible).
+
+    `preamble` (M4 Task F) renders once under the header — see
+    format_messages_from_records.
     """
-    return _format_digest_numbered(_records_numbered(records), now)
+    return _format_digest_numbered(_records_numbered(records), now, preamble=preamble)

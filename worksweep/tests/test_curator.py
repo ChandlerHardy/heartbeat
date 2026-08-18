@@ -245,3 +245,45 @@ def test_make_run_llm_raises_on_timeout():
     run_llm = make_run_llm(_Cfg(), run_subprocess=fake_run)
     with pytest.raises(Exception, match="120"):
         run_llm("prompt")
+
+
+# --- M4 Task F: dev-slot preamble ------------------------------------------
+
+_SLOT_LINE = "Dev slots: dev1 free · dev4, dev5 reclaimable (approved, awaiting merge) · dev0 live"
+
+
+def test_build_prompt_includes_preamble_context_when_given():
+    recs = [_rec(1, _wi())]
+    prompt = build_prompt(recs, NOW, preamble=_SLOT_LINE)
+    assert _SLOT_LINE in prompt
+    # Context must precede the queue table, not get mixed into a record line.
+    assert prompt.index(_SLOT_LINE) < prompt.index("1 | review_request")
+
+
+def test_build_prompt_omits_preamble_block_when_none():
+    recs = [_rec(1, _wi())]
+    prompt = build_prompt(recs, NOW)
+    assert "Dev slots:" not in prompt
+
+
+def test_curate_passes_preamble_through_to_prompt():
+    recs = [_rec(1, _wi())]
+    seen = {}
+
+    def fake_llm(prompt):
+        seen["prompt"] = prompt
+        return "Needs your review:\n1. pb-www !4061 -- t -- review requested"
+
+    out = curate(recs, NOW, fake_llm, preamble=_SLOT_LINE)
+    assert out is not None
+    assert _SLOT_LINE in seen["prompt"]
+
+
+def test_curate_preamble_does_not_break_validation():
+    recs = [_rec(1, _wi())]
+    # An LLM output that never echoes the preamble must still validate fine
+    # -- preamble is context for the LLM, not a required output token.
+    out = curate(recs, NOW,
+                 lambda p: "Needs your review:\n1. pb-www !4061 -- t -- review requested",
+                 preamble=_SLOT_LINE)
+    assert out is not None

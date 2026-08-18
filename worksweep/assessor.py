@@ -213,7 +213,7 @@ def assess_issue(issue: Issue,
         return []
     return [WorkItem(
         schema_version=1, id=f"issue:{issue.repo}#{issue.iid}", repo=issue.repo,
-        kind="issue", executor="triage", risk="low",
+        kind="issue", executor="implement", risk="low",
         why=f"assigned issue: {issue.title}", web_url=issue.web_url, sha="",
         title=issue.title)]
 

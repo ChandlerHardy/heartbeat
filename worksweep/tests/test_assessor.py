@@ -102,10 +102,13 @@ def test_assess_todo_exact_fields():
 
 
 # FIX 10 — assess_issue exact fields
+# M4 Task F: assigned issues drive the `implement` executor now (was
+# `triage` pre-M4) -- an assigned issue is Seneschal's cue to offer a full
+# /do implementation, not just a triage nudge.
 def test_assess_issue_exact_fields():
     it = assess_issue(Issue(repo="pb-www", iid=42, title="bug", web_url="u"))[0]
     assert it.kind == "issue"
-    assert it.executor == "triage"
+    assert it.executor == "implement"
     assert it.why == "assigned issue: bug"
     assert it.id == "issue:pb-www#42"
 

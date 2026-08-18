@@ -26,6 +26,10 @@ class WorksweepConfig:
     # (no separate curator_bin) -- both are just "claude" runs in a
     # subprocess, one against a checkout, one against the repo root.
     curate: bool = True
+    # M4 Task F: dev boxes the implement executor can claim, each
+    # {"name","host","path","url"}. Absent/empty `runner.dev_boxes` -> ()
+    # (dev-slot sensing off, matches the M3 "absent block -> graceful" pattern).
+    dev_boxes: tuple = ()
 
 
 def load_config(path: str | None = None) -> WorksweepConfig:
@@ -50,6 +54,10 @@ def load_config(path: str | None = None) -> WorksweepConfig:
     if not isinstance(curate_raw, bool):
         raise RuntimeError(
             f"config runner.curate must be a boolean, got {curate_raw!r}")
+    dev_boxes_raw = rn.get("dev_boxes") or []
+    if not isinstance(dev_boxes_raw, list):
+        raise RuntimeError(
+            f"config runner.dev_boxes must be a list, got {type(dev_boxes_raw).__name__}")
     return WorksweepConfig(
         repos=tuple(gl.get("repos") or []),
         username=gl.get("username", ""),
@@ -61,4 +69,5 @@ def load_config(path: str | None = None) -> WorksweepConfig:
         claude_bin=rn.get("claude_bin", "claude"),
         runner_timeout=runner_timeout,
         curate=curate_raw,
+        dev_boxes=tuple(dev_boxes_raw),
     )

@@ -187,3 +187,52 @@ def test_format_messages_respects_max_bytes_cap():
     for msg in messages:
         enc = msg.encode("utf-8")
         assert len(enc) <= 200, f"Message exceeds max_bytes=200: {len(enc)} bytes"
+
+
+# M4 Task F — dev-slot preamble line renders once, right under the header.
+_SLOT_LINE = "Dev slots: dev1 free · dev4, dev5 reclaimable (approved, awaiting merge) · dev0 live"
+
+
+def test_digest_from_records_renders_preamble_under_header():
+    rec = _rec(1, _wi(1))
+    out = format_digest_from_records([rec], preamble=_SLOT_LINE)
+    lines = out.splitlines()
+    assert lines[0].startswith("🔭")
+    assert lines[1] == _SLOT_LINE
+
+
+def test_digest_from_records_no_preamble_when_none():
+    rec = _rec(1, _wi(1))
+    out = format_digest_from_records([rec])
+    assert _SLOT_LINE not in out
+
+
+def test_digest_from_records_no_preamble_when_all_clear():
+    # Nothing to preface when there are no items at all.
+    out = format_digest_from_records([], preamble=_SLOT_LINE)
+    assert _SLOT_LINE not in out
+    assert "nothing needs you" in out.lower()
+
+
+def test_messages_from_records_renders_preamble_under_header():
+    rec = _rec(1, _wi(1))
+    msgs = format_messages_from_records([rec], preamble=_SLOT_LINE)
+    lines = msgs[0].splitlines()
+    assert lines[0].startswith("🔭")
+    assert lines[1] == _SLOT_LINE
+
+
+def test_messages_from_records_preamble_survives_multipart_split():
+    items = [_wi(i, why="x" * 50) for i in range(50)]
+    recs = [_rec(i, it) for i, it in enumerate(items, 1)]
+    msgs = format_messages_from_records(recs, max_bytes=300, preamble=_SLOT_LINE)
+    assert len(msgs) > 1
+    assert _SLOT_LINE in msgs[0]
+
+
+def test_format_messages_and_digest_m1_path_accept_preamble():
+    # M1 (no-queue) entry points thread preamble too, for symmetry.
+    out = format_digest([_wi(1)], preamble=_SLOT_LINE)
+    assert out.splitlines()[1] == _SLOT_LINE
+    msgs = format_messages([_wi(1)], preamble=_SLOT_LINE)
+    assert msgs[0].splitlines()[1] == _SLOT_LINE

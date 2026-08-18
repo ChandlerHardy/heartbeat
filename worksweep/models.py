@@ -29,6 +29,7 @@ class MergeRequest:
     approved: bool = False          # GraphQL `approved` -- overall approval satisfied
     merge_status: str = ""          # upper-cased detailedMergeStatus, e.g. "MERGEABLE"
     assignees: tuple = ()           # tuple[str, ...] usernames
+    source_branch: str = ""         # GraphQL `sourceBranch` -- feeds devslots.classify
 
     @property
     def dev_url_present(self) -> bool:
@@ -68,6 +69,7 @@ class WorkItem:
     report_path: str = ""     # tribunal report path written by the executor
     error_summary: str = ""   # short failure text (status=error)
     title: str = ""           # mr.title / issue.title -- "" for todo items
+    dev_box: str = ""         # name of the dev box claimed by an `implement` executor
 
 
 @dataclass(frozen=True)

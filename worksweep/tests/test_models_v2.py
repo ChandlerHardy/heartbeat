@@ -46,3 +46,38 @@ def test_mergerequest_review_state_fields_default():
                       web_url="u", description="", sha="s", is_draft=False,
                       reviewers=(), ci_status="unknown", updated_at="")
     assert (mr.my_review_state, mr.changes_requested, mr.unresolved_count) == ("", False, 0)
+
+
+# M4 Task F -- new fields default cleanly and round-trip the queue.
+def test_mergerequest_source_branch_defaults_empty():
+    mr = MergeRequest(repo="pb-www", iid=1, title="t", author="a",
+                      web_url="u", description="", sha="s", is_draft=False,
+                      reviewers=(), ci_status="unknown", updated_at="")
+    assert mr.source_branch == ""
+
+
+def test_workitem_dev_box_defaults_empty():
+    it = _item()
+    assert it.dev_box == ""
+
+
+def test_workitem_roundtrips_queue_with_dev_box(tmp_path):
+    p = str(tmp_path / "q.json")
+    it = _item(status="running", executor="implement", dev_box="dev1")
+    save_queue(p, [QueueRecord(number=1, item=it, first_seen="t0", last_seen="t1")])
+    loaded = load_queue(p)
+    assert loaded[0].item == it
+
+
+def test_old_queue_record_without_dev_box_loads(tmp_path):
+    # A queue file written before M4 lacks the dev_box key entirely.
+    p = str(tmp_path / "q.json")
+    old = _item()
+    d = dataclasses.asdict(old)
+    d.pop("dev_box")
+    import json
+    (tmp_path / "q.json").write_text(json.dumps(
+        [{"number": 1, "first_seen": "t0", "last_seen": "t0", "item": d}]))
+    loaded = load_queue(p)
+    assert loaded[0].item.id == "review:pb-www!1"
+    assert loaded[0].item.dev_box == ""
