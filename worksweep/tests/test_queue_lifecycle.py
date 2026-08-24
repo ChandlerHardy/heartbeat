@@ -72,3 +72,47 @@ def test_compaction_drops_old_terminal_records():
 def test_compaction_never_drops_unparseable_timestamps():
     weird = _rec(_item(status="done"), last_seen="not-a-date")
     assert len(reconcile([weird], [], NOW)) == 1
+
+
+# ---------------------------------------------------------------------------
+# auto_approve (2026-08-24): keep-current items skip the Discord ✅ gate.
+
+def _rec_for_auto(num, executor, status, kind="stale"):
+    from worksweep.models import QueueRecord, WorkItem
+    return QueueRecord(
+        number=num, first_seen="2026-08-20T00:00:00+00:00",
+        last_seen="2026-08-24T00:00:00+00:00",
+        item=WorkItem(schema_version=1, id=f"x:{num}", repo="pb-www",
+                      kind=kind, executor=executor, risk="low", why="w",
+                      web_url="https://gl/x", sha="s1", status=status))
+
+
+def test_auto_approve_flips_proposed_keep_current():
+    from worksweep.queue import auto_approve
+    recs = [_rec_for_auto(1, "keep-current", "proposed")]
+    out = auto_approve(recs, ("keep-current",))
+    assert out[0].item.status == "approved"
+    assert recs[0].item.status == "proposed"  # input untouched
+
+
+def test_auto_approve_leaves_other_executors_proposed():
+    from worksweep.queue import auto_approve
+    recs = [_rec_for_auto(1, "magi-review", "proposed", kind="review"),
+            _rec_for_auto(2, "implement", "proposed", kind="issue")]
+    out = auto_approve(recs, ("keep-current",))
+    assert [r.item.status for r in out] == ["proposed", "proposed"]
+
+
+def test_auto_approve_only_touches_proposed():
+    from worksweep.queue import auto_approve
+    recs = [_rec_for_auto(1, "keep-current", "needs-input"),
+            _rec_for_auto(2, "keep-current", "running"),
+            _rec_for_auto(3, "keep-current", "done")]
+    out = auto_approve(recs, ("keep-current",))
+    assert [r.item.status for r in out] == ["needs-input", "running", "done"]
+
+
+def test_auto_approve_empty_executors_is_a_noop():
+    from worksweep.queue import auto_approve
+    recs = [_rec_for_auto(1, "keep-current", "proposed")]
+    assert auto_approve(recs, ()) is recs

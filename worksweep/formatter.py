@@ -16,7 +16,7 @@ from .models import QueueRecord, WorkItem
 DISCORD_MAX_CHARS = 1900
 
 _HEADER = "🔭 **Worksweep**"
-_FOOTER = "Reply e.g. `✅ 1,3` to approve (approved magi-review items run automatically)."
+_FOOTER = "Reply e.g. `✅ 1,3` to approve (approved items run automatically; keep-current merges need no ✅)."
 _ALL_CLEAR = "✅ Worksweep: nothing needs you right now."
 
 

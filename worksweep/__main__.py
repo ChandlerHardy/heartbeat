@@ -43,7 +43,7 @@ from .formatter import (
     DISCORD_MAX_CHARS, _FOOTER, _HEADER, _truncate_bytes,
     format_messages_from_records,
 )
-from .queue import load_queue, reconcile, save_queue
+from .queue import auto_approve, load_queue, reconcile, save_queue
 
 _QUEUE_DEFAULT = os.path.expanduser("~/.worksweep/queue.json")
 _CURSOR_DEFAULT = os.path.expanduser("~/.worksweep/intake-cursor")
@@ -305,6 +305,7 @@ def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
 
         resolved = assessor.resolutions(review_mrs, cfg.username, authored)
         records = reconcile(records0, items, deps["now"](), resolved=resolved)
+        records = auto_approve(records, cfg.auto_approve)
         try:
             deps["save"](records)
         except OSError as e:

@@ -39,6 +39,12 @@ class WorksweepConfig:
     # `diverged_commits_count` isn't in the GraphQL MR node, so this is
     # sensed with one REST call per authored MR -- see collectors.
     stale_threshold: int = 5
+    # Executors whose freshly-proposed items skip the Discord ✅ gate and go
+    # straight to `approved` at sweep time. keep-current is the only default:
+    # a master merge is low-risk, aborts cleanly on conflict, and Chandler
+    # okayed full autonomy for it (2026-08-24). Config `runner.auto_approve`
+    # (a list of executor names, [] to disable) overrides.
+    auto_approve: tuple = ("keep-current",)
 
 
 def load_config(path: str | None = None) -> WorksweepConfig:
@@ -81,6 +87,11 @@ def load_config(path: str | None = None) -> WorksweepConfig:
         raise RuntimeError(
             f"config runner.stale_threshold must be an integer, "
             f"got {stale_raw!r}")
+    aa_raw = rn.get("auto_approve", ["keep-current"])
+    if not isinstance(aa_raw, list) or not all(isinstance(x, str) for x in aa_raw):
+        raise RuntimeError(
+            f"config runner.auto_approve must be a list of executor names, "
+            f"got {aa_raw!r}")
     return WorksweepConfig(
         repos=tuple(gl.get("repos") or []),
         username=gl.get("username", ""),
@@ -95,4 +106,5 @@ def load_config(path: str | None = None) -> WorksweepConfig:
         curate=curate_raw,
         dev_boxes=tuple(dev_boxes_raw),
         stale_threshold=stale_threshold,
+        auto_approve=tuple(aa_raw),
     )

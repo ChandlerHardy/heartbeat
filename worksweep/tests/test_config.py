@@ -185,3 +185,24 @@ def test_load_config_non_integer_stale_threshold_raises_runtime_error():
         with pytest.raises(RuntimeError) as exc:
             load_config(p)
         assert "runner.stale_threshold" in str(exc.value)
+
+
+def test_load_config_auto_approve_defaults_to_keep_current():
+    with tempfile.TemporaryDirectory() as tmp:
+        p = _write(tmp, {"discord_webhook": "x"})
+        assert load_config(p).auto_approve == ("keep-current",)
+
+
+def test_load_config_auto_approve_empty_list_disables():
+    with tempfile.TemporaryDirectory() as tmp:
+        p = _write(tmp, {"discord_webhook": "x",
+                         "runner": {"auto_approve": []}})
+        assert load_config(p).auto_approve == ()
+
+
+def test_load_config_auto_approve_non_list_raises():
+    with tempfile.TemporaryDirectory() as tmp:
+        p = _write(tmp, {"discord_webhook": "x",
+                         "runner": {"auto_approve": "keep-current"}})
+        with pytest.raises(RuntimeError, match="auto_approve"):
+            load_config(p)

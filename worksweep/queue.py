@@ -96,6 +96,30 @@ def save_queue(path: str, records: List[QueueRecord]) -> None:
     os.replace(tmp, path)
 
 
+def auto_approve(records: List[QueueRecord],
+                 executors: tuple) -> List[QueueRecord]:
+    """Flip `proposed` records whose executor is in `executors` straight to
+    `approved` -- no Discord ✅ needed (cfg.auto_approve; keep-current by
+    default). Runs right after reconcile, before the queue is saved, so the
+    digest and the runner both see the item already approved.
+
+    Only `proposed` flips: `needs-input` stays a human question, and a failed
+    item keeps the reconcile cadence (error -> proposed at the NEXT sweep),
+    so an auto-approved executor that keeps failing retries at most daily,
+    with a ⚠️ each time -- never a tight loop.
+    """
+    if not executors:
+        return records
+    out: List[QueueRecord] = []
+    for r in records:
+        if r.item.status == "proposed" and r.item.executor in executors:
+            out.append(dataclasses.replace(
+                r, item=dataclasses.replace(r.item, status="approved")))
+        else:
+            out.append(r)
+    return out
+
+
 def reconcile(existing: List[QueueRecord], fresh: List[WorkItem],
               now: str, resolved: dict | None = None) -> List[QueueRecord]:
     """Fold a sweep into the queue. M2 rules plus the M3 lifecycle:

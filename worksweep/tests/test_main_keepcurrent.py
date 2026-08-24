@@ -160,3 +160,28 @@ def test_dry_run_keep_current_touches_nothing():
     assert result.box_name == ""
     assert result.scss_recompiled is False
     assert result.result_sha == "s4020"
+
+
+def test_stale_item_is_auto_approved_in_the_saved_queue():
+    """2026-08-24: keep-current needs no Discord ✅ — a freshly-sensed stale
+    item must land in the saved queue already `approved`, so the runner picks
+    it up on its next pass with no human in the loop."""
+    posts = []
+    rc = run_sweep(_cfg(), _deps(posts, _gql(authored_nodes=[_authored_node()]),
+                                 diverged_commits=lambda repo, iid: 7))
+    assert rc == 0
+    saved = [p for p in posts if isinstance(p, tuple) and p[0] == "saved"]
+    assert saved, "sweep never saved the queue"
+    stale = [r for r in saved[-1][1] if r.item.executor == "keep-current"]
+    assert stale and all(r.item.status == "approved" for r in stale)
+
+
+def test_auto_approve_disabled_leaves_stale_proposed():
+    posts = []
+    rc = run_sweep(_cfg(auto_approve=()),
+                   _deps(posts, _gql(authored_nodes=[_authored_node()]),
+                         diverged_commits=lambda repo, iid: 7))
+    assert rc == 0
+    saved = [p for p in posts if isinstance(p, tuple) and p[0] == "saved"]
+    stale = [r for r in saved[-1][1] if r.item.executor == "keep-current"]
+    assert stale and all(r.item.status == "proposed" for r in stale)

@@ -100,8 +100,9 @@ Write the briefing as plain text with these rules, in this order:
    `{number}. {repo} !{ref} -- {short title} -- {why}`.
 2. "Feedback / CI on your MRs:" -- one line per remaining item whose executor
    is `triage` and whose kind is `feedback` or `ci_red`, OR whose kind is
-   `stale` (executor `keep-current` -- the branch fell behind master and will
-   be merged up automatically), same line format.
+   `stale` (executor `keep-current` -- the branch fell behind master;
+   seneschal merges it up automatically, no ✅ needed -- mark these lines
+   with a trailing "(auto)"), same line format.
 2b. "Assigned issues:" -- one line per item whose kind is `issue`, format
    `{number}. {repo} #{ref} -- {short title}` (an assigned issue is a
    first-class ask; NEVER fold it into the low-priority line). If the
