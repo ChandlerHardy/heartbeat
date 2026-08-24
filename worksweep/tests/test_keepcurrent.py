@@ -87,6 +87,16 @@ class _Edges:
         self.probe_branch = kw.get("probe_branch", "feat/1701-thing")
         self.probe_sha = kw.get("probe_sha", "boxsha")
         self.sync_landed_sha = kw.get("sync_landed_sha", None)
+        # conflict-escalation (2026-08-24): what the claude resolver run does.
+        self.claude_rc = kw.get("claude_rc", 0)
+        self.claude_raises_timeout = kw.get("claude_raises_timeout", False)
+        # post-resolver state the verifier sees:
+        self.resolve_unresolved_out = kw.get("resolve_unresolved_out", "")
+        self.resolve_no_commit = kw.get("resolve_no_commit", False)
+        self.parent2_sha = kw.get("parent2_sha", "mastersha")
+        self.master_sha = kw.get("master_sha", "mastersha")
+        self.resolve_status_out = kw.get("resolve_status_out", "")
+        self.claude_ran = False
         self._rev_parse_n = 0
 
     def run(self, cmd, **kw):
@@ -96,14 +106,23 @@ class _Edges:
             sub = c[3] if len(c) > 3 else ""
             if sub == "rev-parse":
                 if "MERGE_HEAD" in c:
-                    rc = 0 if self.merge_head_present else 1
+                    if self.claude_ran:
+                        rc = 0 if self.resolve_no_commit else 1
+                    else:
+                        rc = 0 if self.merge_head_present else 1
                     return subprocess.CompletedProcess(c, rc, stdout="", stderr="")
+                if "HEAD^2" in c:
+                    return subprocess.CompletedProcess(
+                        c, 0, stdout=self.parent2_sha + "\n", stderr="")
+                if "origin/master" in c:
+                    return subprocess.CompletedProcess(
+                        c, 0, stdout=self.master_sha + "\n", stderr="")
                 self._rev_parse_n += 1
                 sha = self.pre_sha if self._rev_parse_n == 1 else self.head_sha
                 return subprocess.CompletedProcess(c, 0, stdout=sha + "\n", stderr="")
             if sub == "status":
-                return subprocess.CompletedProcess(c, 0, stdout=self.status_out,
-                                                   stderr="")
+                out = self.resolve_status_out if self.claude_ran else self.status_out
+                return subprocess.CompletedProcess(c, 0, stdout=out, stderr="")
             if sub == "rev-list":
                 return subprocess.CompletedProcess(c, 0, stdout=self.rev_list_out,
                                                    stderr="")
@@ -117,8 +136,9 @@ class _Edges:
                                                    stderr=err)
             if sub == "diff":
                 if "--diff-filter=U" in c:
-                    return subprocess.CompletedProcess(c, 0, stdout=self.conflict_files,
-                                                       stderr="")
+                    out = (self.resolve_unresolved_out if self.claude_ran
+                           else self.conflict_files)
+                    return subprocess.CompletedProcess(c, 0, stdout=out, stderr="")
                 if "--cached" in c:
                     return subprocess.CompletedProcess(c, self.staged_diff_rc,
                                                        stdout="", stderr="")
@@ -131,6 +151,11 @@ class _Edges:
         if c and c[0] == "maintenance/compile-css":
             err = "sass error\n" if self.compile_rc else ""
             return subprocess.CompletedProcess(c, self.compile_rc, stdout="", stderr=err)
+        if c and c[0] == "claude":
+            if self.claude_raises_timeout:
+                raise subprocess.TimeoutExpired(c, 900)
+            self.claude_ran = True
+            return subprocess.CompletedProcess(c, self.claude_rc, stdout="", stderr="")
         return subprocess.CompletedProcess(c, 0, stdout="", stderr="")
 
     def ssh(self, host, command):
@@ -252,13 +277,14 @@ def test_execute_no_boxes_configured_is_done_with_no_sync(tmp_path):
 
 def test_execute_merge_conflict_aborts_and_raises_with_file_list(tmp_path):
     edges = _Edges(merge_rc=1, conflict_files="www/home/php/Foo.php\nsrc/Bar.vue\n")
-    with pytest.raises(RunnerError, match="merge conflicts in:"):
+    with pytest.raises(RunnerError, match="merge conflicts outside"):
         _run_execute(tmp_path, edges=edges)
     flat = [" ".join(c) for c, _ in edges.calls]
     assert any("merge --abort" in f for f in flat)
     assert not any(f.endswith("push origin feat/1701-thing") for f in flat)
     assert not any(c[0] == "maintenance/compile-css" for c, _ in edges.calls)
     assert edges.ssh_calls == []      # never got to the box-sync step
+    assert not edges.claude_ran      # source conflicts NEVER escalate
 
 
 def test_execute_merge_conflict_error_names_the_conflicting_files(tmp_path):
@@ -266,6 +292,97 @@ def test_execute_merge_conflict_error_names_the_conflicting_files(tmp_path):
     with pytest.raises(RunnerError) as ei:
         _run_execute(tmp_path, edges=edges)
     assert "a.php" in str(ei.value) and "b.vue" in str(ei.value)
+
+
+# --------------------------------------------------------------------------
+# 2026-08-24: safe-class conflicts escalate to a claude resolver run
+# --------------------------------------------------------------------------
+
+_CACHE_BUSTER = "www/home/php/templates/tab_bar_common_logic.php"
+
+
+def test_safe_conflicts_classification():
+    from worksweep.keepcurrent import safe_conflicts
+    assert safe_conflicts([_CACHE_BUSTER])
+    assert safe_conflicts(["www/home/css/style.css",
+                           "www/home/css/style.css.map"])
+    assert safe_conflicts(["www/home/dealer/acme/style.css",
+                           "www/home/dealer/acme/style.css.map",
+                           _CACHE_BUSTER])
+    assert not safe_conflicts([])                       # unknown, not safe
+    assert not safe_conflicts([_CACHE_BUSTER, "www/home/php/Foo.php"])
+    assert not safe_conflicts(["www/home/scss/style.scss"])
+    assert not safe_conflicts(["www/home/dealer/acme/other.css"])
+
+
+def test_cache_buster_conflict_escalates_resolves_and_pushes(tmp_path):
+    edges = _Edges(merge_rc=1, conflict_files=_CACHE_BUSTER + "\n")
+    result, edges = _run_execute(tmp_path, edges=edges)
+    assert edges.claude_ran
+    claude_calls = [c for c, kw in edges.calls if c[0] == "claude"]
+    assert claude_calls and claude_calls[0][1] == "-p"
+    assert _CACHE_BUSTER in claude_calls[0][2]          # prompt names the file
+    kw = next(kw for c, kw in edges.calls if c[0] == "claude")
+    assert kw.get("cwd") == edges.checkout              # runs IN the worktree
+    flat = [" ".join(c) for c, _ in edges.calls]
+    assert any(f.endswith("push origin feat/1701-thing") for f in flat)
+    assert result.conflicts_resolved == (_CACHE_BUSTER,)
+
+
+def test_resolver_failure_restores_and_raises(tmp_path):
+    edges = _Edges(merge_rc=1, conflict_files=_CACHE_BUSTER + "\n", claude_rc=1)
+    with pytest.raises(RunnerError, match="conflict resolver failed"):
+        _run_execute(tmp_path, edges=edges)
+    flat = [" ".join(c) for c, _ in edges.calls]
+    assert any("reset -q --hard pre123" in f for f in flat)
+    assert not any(f.endswith("push origin feat/1701-thing") for f in flat)
+
+
+def test_resolver_timeout_restores_and_raises(tmp_path):
+    edges = _Edges(merge_rc=1, conflict_files=_CACHE_BUSTER + "\n",
+                   claude_raises_timeout=True)
+    with pytest.raises(RunnerError, match="timed out"):
+        _run_execute(tmp_path, edges=edges)
+    flat = [" ".join(c) for c, _ in edges.calls]
+    assert any("reset -q --hard pre123" in f for f in flat)
+    assert not any(f.endswith("push origin feat/1701-thing") for f in flat)
+
+
+def test_resolver_leaving_unresolved_conflicts_fails_verification(tmp_path):
+    edges = _Edges(merge_rc=1, conflict_files=_CACHE_BUSTER + "\n",
+                   resolve_unresolved_out=_CACHE_BUSTER + "\n")
+    with pytest.raises(RunnerError, match="unresolved"):
+        _run_execute(tmp_path, edges=edges)
+    flat = [" ".join(c) for c, _ in edges.calls]
+    assert not any(f.endswith("push origin feat/1701-thing") for f in flat)
+
+
+def test_resolver_not_committing_fails_verification(tmp_path):
+    edges = _Edges(merge_rc=1, conflict_files=_CACHE_BUSTER + "\n",
+                   resolve_no_commit=True)
+    with pytest.raises(RunnerError, match="did not commit"):
+        _run_execute(tmp_path, edges=edges)
+    flat = [" ".join(c) for c, _ in edges.calls]
+    assert not any(f.endswith("push origin feat/1701-thing") for f in flat)
+
+
+def test_resolver_head_not_a_master_merge_fails_verification(tmp_path):
+    edges = _Edges(merge_rc=1, conflict_files=_CACHE_BUSTER + "\n",
+                   parent2_sha="something-else")
+    with pytest.raises(RunnerError, match="not a merge of origin/master"):
+        _run_execute(tmp_path, edges=edges)
+    flat = [" ".join(c) for c, _ in edges.calls]
+    assert any("reset -q --hard pre123" in f for f in flat)
+    assert not any(f.endswith("push origin feat/1701-thing") for f in flat)
+
+
+def test_resolver_dirty_tree_fails_verification(tmp_path):
+    edges = _Edges(merge_rc=1, conflict_files=_CACHE_BUSTER + "\n",
+                   resolve_status_out=" M www/home/php/other.php\n")
+    with pytest.raises(RunnerError, match="dirty tree"):
+        _run_execute(tmp_path, edges=edges)
+    flat = [" ".join(c) for c, _ in edges.calls]
+    assert not any(f.endswith("push origin feat/1701-thing") for f in flat)
 
 
 # --------------------------------------------------------------------------

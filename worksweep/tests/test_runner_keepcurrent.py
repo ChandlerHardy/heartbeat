@@ -243,3 +243,22 @@ def test_run_once_without_keep_current_deps_still_runs_magi(tmp_path):
                status="approved"))
     deps["load"] = lambda: [magi_rec]
     assert run_once(_cfg(tmp_path), deps, **_locks(tmp_path)) == 0
+
+
+def test_done_message_names_auto_resolved_conflicts():
+    from worksweep.keepcurrent import KeepCurrentResult
+    from worksweep.runner import _keep_current_done_message
+    r = KeepCurrentResult(
+        iid=4020, ahead_count=7, box_name="dev4", scss_recompiled=False,
+        result_sha="s", dev_url="https://dev4/",
+        conflicts_resolved=("www/home/php/templates/tab_bar_common_logic.php",))
+    msg = _keep_current_done_message(r)
+    assert "auto-resolved conflicts: tab_bar_common_logic.php" in msg
+
+
+def test_done_message_omits_conflict_note_on_clean_merge():
+    from worksweep.keepcurrent import KeepCurrentResult
+    from worksweep.runner import _keep_current_done_message
+    r = KeepCurrentResult(iid=4020, ahead_count=7, box_name="dev4",
+                          scss_recompiled=False, result_sha="s")
+    assert "auto-resolved" not in _keep_current_done_message(r)

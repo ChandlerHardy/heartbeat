@@ -23,11 +23,18 @@ write against the ONE box that matched (review fix I5).
 Contract with the runner:
 
 * `RunnerError` -> the item goes `error`, ⚠️ posted, re-proposed next sweep.
-  Merge conflicts are ALWAYS a RunnerError — never auto-resolved (mirrors the
-  merge-master skill's Non-Negotiable 2: only the compiled-CSS-artifact and
-  `$script_version` conflict classes documented there are safe to
-  auto-resolve, and both are out of scope for this v1 -- ANY conflict here
-  stops and reports).
+  Merge conflicts: when EVERY conflicted file is in one of the merge-master
+  skill's two auto-resolvable classes (the `$script_version` cache-buster and
+  compiled-CSS artifacts -- Step 1b of chandler-personal:merge-master, the
+  canonical policy), the executor escalates to a short `claude -p` run in the
+  worktree to resolve them per that skill, then VERIFIES the outcome in
+  Python (no unresolved files, merge committed with origin/master as second
+  parent, clean tree) before continuing. Any conflict outside those classes,
+  a failed resolver run, or a failed verification restores the worktree and
+  raises -- an unattended LLM never resolves source-file conflicts, and
+  nothing is pushed unless verification passed (2026-08-24, replacing the v1
+  any-conflict-aborts rule after the ranch-data stack all tripped on the
+  cache-buster).
 * a returned `KeepCurrentResult` -> the item goes `done`, and the 🔄 post
   names the commits merged in, the SCSS outcome, and the sync outcome (or
   the fact that no dev box currently serves the branch, which is a `done`
@@ -46,6 +53,7 @@ from .models import WorkItem
 from .runner import RunnerError
 
 _FETCH_TIMEOUT = 120
+_RESOLVE_TIMEOUT = 900
 _GIT_TIMEOUT = 120
 _PUSH_TIMEOUT = 300
 _COMPILE_TIMEOUT = 300
@@ -54,6 +62,20 @@ _TAIL_LINES = 15
 # admin app has its own scss under www/admin, a different pipeline this
 # executor must not react to.
 _SCSS_PATHSPEC = "www/home/scss/*"
+# The two conflict classes merge-master Step 1b blesses for auto-resolution.
+# Everything else is a source conflict and must abort.
+_CACHE_BUSTER = "www/home/php/templates/tab_bar_common_logic.php"
+_CSS_ARTIFACT_RE = re.compile(
+    r"^www/home/(css/style\.css(\.map)?|dealer/[^/]+/style\.css(\.map)?)$")
+
+
+def safe_conflicts(files: Sequence[str]) -> bool:
+    """True when every conflicted file is in a merge-master Step 1b
+    auto-resolvable class. Empty list -> False (a failed merge with no
+    conflicted files is something unknown, not something safe)."""
+    files = [f for f in files if f]
+    return bool(files) and all(
+        f == _CACHE_BUSTER or _CSS_ARTIFACT_RE.match(f) for f in files)
 
 
 @dataclass(frozen=True)
@@ -64,6 +86,7 @@ class KeepCurrentResult:
     scss_recompiled: bool
     result_sha: str = ""   # branch HEAD after merge (+ scss commit) and push
     dev_url: str = ""      # the synced box's url, "" when box_name == ""
+    conflicts_resolved: tuple = ()  # files claude auto-resolved, () = clean merge
 
 
 def iid_of(item: WorkItem) -> int:
@@ -114,16 +137,23 @@ def execute(item: WorkItem, cfg, boxes: Sequence[dict],
         ahead = 0
 
     merge = _merge_master(run_subprocess, checkout)
+    conflicts_resolved: tuple = ()
     if merge.returncode != 0:
         conflicts = _git(run_subprocess, checkout,
                          ["diff", "--name-only", "--diff-filter=U"],
                          allow_fail=True)
-        # Best-effort abort -- never let a failed abort mask the real
-        # conflict error the human needs to see.
-        _run(["git", "-C", checkout, "merge", "--abort"], run_subprocess,
-            timeout=_GIT_TIMEOUT)
-        files = ", ".join(conflicts.split()) or "(unknown)"
-        raise RunnerError(f"merge conflicts in: {files}")
+        conflict_files = [f for f in conflicts.split() if f]
+        if not safe_conflicts(conflict_files):
+            # Best-effort abort -- never let a failed abort mask the real
+            # conflict error the human needs to see.
+            _run(["git", "-C", checkout, "merge", "--abort"], run_subprocess,
+                timeout=_GIT_TIMEOUT)
+            files = ", ".join(conflict_files) or "(unknown)"
+            raise RunnerError(f"merge conflicts outside the auto-resolve "
+                              f"classes in: {files}")
+        _resolve_conflicts(run_subprocess, checkout, cfg, conflict_files, pre)
+        _verify_resolution(run_subprocess, checkout, pre)
+        conflicts_resolved = tuple(conflict_files)
 
     scss_changed = _git(run_subprocess, checkout,
                         ["diff", "--name-only", f"{pre}..HEAD", "--",
@@ -177,7 +207,94 @@ def execute(item: WorkItem, cfg, boxes: Sequence[dict],
 
     return KeepCurrentResult(iid=iid, ahead_count=ahead, box_name=box_name,
                              scss_recompiled=scss_recompiled, result_sha=head,
-                             dev_url=dev_url)
+                             dev_url=dev_url,
+                             conflicts_resolved=conflicts_resolved)
+
+
+_RESOLVE_PROMPT = """You are completing a `git merge origin/master` in this \
+pb-www checkout. The merge stopped on conflicts in exactly these files: \
+{files}.
+
+Resolve them per the merge-master skill's Step 1b conflict classes \
+(chandler-personal:merge-master is the canonical policy):
+
+- www/home/php/templates/tab_bar_common_logic.php: the $script_version \
+cache-buster. Resolve each conflict hunk by keeping OUR side (this branch's \
+version bump). Edit the conflict markers in place -- NEVER `git checkout \
+--ours` the whole file, because master-side changes elsewhere in the file \
+must survive the merge.
+- www/home/css/style.css(.map) and www/home/dealer/*/style.css(.map): \
+compiled artifacts. Take master's: `git checkout --theirs -- <paths>`. They \
+are regenerated from source when SCSS changed, by the caller, not by you.
+
+Then `git add` the resolved files and complete the merge with \
+`git commit --no-edit`. Do NOT push. Do NOT edit any file that is not in \
+the list above. Do NOT run maintenance/compile-css."""
+
+
+def _resolve_conflicts(run_subprocess: Callable, checkout: str, cfg,
+                       files: List[str], pre: str) -> None:
+    """Escalate a safe-class conflict set to a `claude -p` run in the
+    worktree (the same unattended-claude pattern the implement executor
+    uses). Any failure restores the worktree to `pre` before raising."""
+    prompt = _RESOLVE_PROMPT.format(files=", ".join(files))
+    try:
+        proc = _run([cfg.claude_bin, "-p", prompt], run_subprocess,
+                    cwd=checkout, timeout=_RESOLVE_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        _restore(run_subprocess, checkout, pre)
+        raise RunnerError(f"conflict resolver timed out after "
+                          f"{_RESOLVE_TIMEOUT}s")
+    if proc.returncode != 0:
+        _restore(run_subprocess, checkout, pre)
+        out = f"{proc.stderr or ''}{proc.stdout or ''}"
+        raise RunnerError(f"conflict resolver failed: {_tail(out)}")
+
+
+def _verify_resolution(run_subprocess: Callable, checkout: str,
+                       pre: str) -> None:
+    """Trust nothing the resolver did until proven: no unresolved files, the
+    merge actually committed with origin/master as second parent, and a
+    clean tree. Any failure restores `pre` -- nothing half-resolved may
+    reach the push."""
+    unresolved = _git(run_subprocess, checkout,
+                      ["diff", "--name-only", "--diff-filter=U"],
+                      allow_fail=True).strip()
+    if unresolved:
+        _restore(run_subprocess, checkout, pre)
+        raise RunnerError(f"resolver left unresolved conflicts: "
+                          f"{', '.join(unresolved.split())}")
+    merge_head = _run(["git", "-C", checkout, "rev-parse", "-q", "--verify",
+                       "MERGE_HEAD"], run_subprocess, timeout=_GIT_TIMEOUT)
+    if merge_head.returncode == 0:
+        _restore(run_subprocess, checkout, pre)
+        raise RunnerError("resolver did not commit the merge")
+    parent2 = _git(run_subprocess, checkout, ["rev-parse", "HEAD^2"],
+                   allow_fail=True).strip()
+    master = _git(run_subprocess, checkout, ["rev-parse", "origin/master"],
+                  allow_fail=True).strip()
+    if not parent2 or not master or parent2 != master:
+        _restore(run_subprocess, checkout, pre)
+        raise RunnerError("resolver's HEAD is not a merge of origin/master")
+    status = _git(run_subprocess, checkout, ["status", "--porcelain"],
+                  allow_fail=True)
+    if status.strip():
+        _restore(run_subprocess, checkout, pre)
+        raise RunnerError("resolver left a dirty tree")
+
+
+def _restore(run_subprocess: Callable, checkout: str, pre: str) -> None:
+    """Put the worktree back exactly where this run found it: abort any
+    in-progress merge, then hard-reset to the pre-merge sha and clean."""
+    merge_head = _run(["git", "-C", checkout, "rev-parse", "-q", "--verify",
+                       "MERGE_HEAD"], run_subprocess, timeout=_GIT_TIMEOUT)
+    if merge_head.returncode == 0:
+        _run(["git", "-C", checkout, "merge", "--abort"], run_subprocess,
+            timeout=_GIT_TIMEOUT)
+    _run(["git", "-C", checkout, "reset", "-q", "--hard", pre],
+        run_subprocess, timeout=_GIT_TIMEOUT)
+    _run(["git", "-C", checkout, "clean", "-fdq"], run_subprocess,
+        timeout=_GIT_TIMEOUT)
 
 
 def _preflight_clean(run_subprocess: Callable, checkout: str) -> None:

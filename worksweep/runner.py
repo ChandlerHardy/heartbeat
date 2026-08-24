@@ -535,8 +535,13 @@ def _keep_current_done_message(result) -> str:
     scss = "recompiled" if result.scss_recompiled else "unchanged"
     sync_part = (f"{result.box_name} verified 200" if result.box_name
                 else "no dev box serving branch")
-    return (f"🔄 !{result.iid} merged master (+{result.ahead_count} commits, "
+    msg = (f"🔄 !{result.iid} merged master (+{result.ahead_count} commits, "
            f"scss {scss}) · {sync_part}")
+    resolved = getattr(result, "conflicts_resolved", ())
+    if resolved:
+        names = ", ".join(f.rsplit("/", 1)[-1] for f in resolved)
+        msg += f" · auto-resolved conflicts: {names}"
+    return msg
 
 
 def _fail_and_post(deps, cfg, number: int, summary: str, kind: str) -> None:
