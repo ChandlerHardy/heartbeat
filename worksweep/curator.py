@@ -33,7 +33,13 @@ from typing import Callable, List, Optional, Tuple
 from .formatter import _sanitize_title
 from .models import QueueRecord
 
-_MAX_OUTPUT_BYTES = 1300  # leaves ~600B for deterministic linkify + header/footer under the 1900B cap
+# The prompt asks for <=1200B but the LLM can't count bytes -- live sweeps
+# produced 1400-1800B replies, and a 1300 cap made EVERY curated digest fall
+# back to raw (2026-08-24). The cap is only a sanity bound on runaway output:
+# actual Discord fit is guaranteed downstream (fit_links strips links, then
+# _truncate_bytes clamps to body_budget; actionable items lead, so truncation
+# only ever costs the low-priority tail).
+_MAX_OUTPUT_BYTES = 1900
 _LLM_TIMEOUT_SECONDS = 120
 # Parent of the worksweep/ package -- the heartbeat repo root. Curation has
 # no specific per-repo checkout to run in (unlike runner.execute), so the
@@ -221,8 +227,8 @@ def _allowed_numbers(records: List[QueueRecord]) -> set:
 def validate(output: str, records: List[QueueRecord]) -> bool:
     """Deterministic accept/reject gate for LLM output. Rejects (returns
     False, logging why to stderr) unless:
-      - output is non-empty and <= _MAX_OUTPUT_BYTES (1300) UTF-8 -- the
-        prompt asks for 1200 so a compliant reply always clears the gate
+      - output is non-empty and <= _MAX_OUTPUT_BYTES (1900) UTF-8 -- a
+        runaway-output sanity bound; Discord fit is enforced downstream
       - output contains no URL and no markdown link syntax at all -- this is
         the injection bound: an untrusted title riding into the prompt can
         make the LLM say almost anything, but it can never turn that into a
