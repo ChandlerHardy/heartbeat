@@ -217,3 +217,33 @@ def test_kickstart_sweep_raises_when_launchctl_is_missing_or_times_out():
         with pytest.raises(RuntimeError):
             wsmain._kickstart_sweep(
                 run_subprocess=lambda cmd, _b=boom, **kw: (_ for _ in ()).throw(_b))
+
+
+# --- the dashboard's Dismiss edge: glab mark-as-done -------------------------
+
+def test_mark_todo_done_calls_the_write_endpoint():
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append((cmd, kw))
+        return _Completed(0)
+
+    wsmain._mark_todo_done(4242, run_subprocess=fake_run)
+    cmd, kw = calls[0]
+    assert cmd == ["glab", "api", "todos/4242/mark_as_done", "-X", "POST"]
+    import subprocess as _sp
+    assert kw["stdin"] is _sp.DEVNULL
+    assert kw["timeout"] == 30                     # a write, not a 30s read
+    assert kw["capture_output"] is True
+
+
+def test_mark_todo_done_raises_so_the_dashboard_can_log_and_continue():
+    import pytest
+    with pytest.raises(RuntimeError) as e:
+        wsmain._mark_todo_done(
+            1, run_subprocess=lambda cmd, **kw: _Completed(1, "", "404 Not Found"))
+    assert "404 Not Found" in str(e.value)
+    with pytest.raises(RuntimeError):
+        wsmain._mark_todo_done(
+            1, run_subprocess=lambda cmd, **kw: (_ for _ in ()).throw(
+                FileNotFoundError("glab")))

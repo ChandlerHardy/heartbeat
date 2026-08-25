@@ -40,6 +40,8 @@ _SWEEP_AGENT_LABEL = "com.chandlerhardy.worksweep"
 # kickstart returns as soon as launchd has started the job, so this is a
 # generous ceiling on a call that normally takes milliseconds.
 _KICKSTART_TIMEOUT_SECONDS = 15
+# Marking a GitLab todo done is a WRITE, unlike collectors._run_glab's reads.
+_GLAB_WRITE_TIMEOUT_SECONDS = 30
 
 from . import assessor, collectors, curator, devslots, implementer, keepcurrent
 from .approvals import apply_approvals
@@ -150,6 +152,34 @@ def _kickstart_sweep(run_subprocess: Callable = subprocess.run) -> None:
         raise RuntimeError(
             f"launchctl kickstart {target} exited "
             f"{result.returncode}: {detail or 'no output'}")
+
+
+def _mark_todo_done(todo_id: int,
+                    run_subprocess: Callable = subprocess.run) -> None:
+    """Mark GitLab todo `todo_id` done. Raises RuntimeError on failure.
+
+    The dashboard's Dismiss edge, injected into `dashboard.serve` so the
+    dashboard never learns about glab. A failure here is logged and swallowed by
+    the caller: clearing the GitLab todo is a courtesy on top of the local
+    dismiss, not the point of the action.
+
+    NOTE: this cannot fire today. Worksweep never captures a todo's numeric id
+    (`collectors.parse_todos` reads only target_type/action_name/target_url), so
+    `dashboard.todo_id_of` always returns 0. The edge is wired and tested so it
+    works the moment an id IS carried -- see the report.
+    """
+    args = ["api", f"todos/{int(todo_id)}/mark_as_done", "-X", "POST"]
+    try:
+        result = run_subprocess(
+            ["glab", *args], stdin=subprocess.DEVNULL, capture_output=True,
+            text=True, timeout=_GLAB_WRITE_TIMEOUT_SECONDS)
+    except Exception as e:
+        raise RuntimeError(f"glab {' '.join(args)}: {e}")
+    if getattr(result, "returncode", 1) != 0:
+        detail = ((getattr(result, "stderr", "") or
+                   getattr(result, "stdout", "") or "").strip()[:200])
+        raise RuntimeError(f"glab {' '.join(args)} exited "
+                           f"{result.returncode}: {detail or 'no output'}")
 
 
 def run_ssh(host: str, command: str, timeout: int = _SSH_TIMEOUT_SECONDS) -> str:
@@ -497,7 +527,8 @@ def main(argv=None) -> int:
         # dashboard tests off the network entirely.
         return _dashboard.serve(_queue_path(), port=args.port, bind=args.bind,
                                 post=_post_discord, webhook=cfg.discord_webhook,
-                                sweep=_kickstart_sweep)
+                                sweep=_kickstart_sweep,
+                                mark_todo_done=_mark_todo_done)
 
     if args.command == "run":
         from . import runner as _runner
