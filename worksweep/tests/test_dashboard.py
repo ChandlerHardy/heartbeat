@@ -115,10 +115,12 @@ def _called_names(tree):
 # --- server harness: real HTTP on port 0, always shut down --------------------
 
 class _Server:
-    def __init__(self, qpath, post=None, webhook="", now=NOW, sweep=None):
+    def __init__(self, qpath, post=None, webhook="", now=NOW, sweep=None,
+                 mark_todo_done=None):
         self.httpd = dashboard.make_server(("127.0.0.1", 0), qpath, post=post,
                                            webhook=webhook, now=lambda: now,
-                                           sweep=sweep)
+                                           sweep=sweep,
+                                           mark_todo_done=mark_todo_done)
         # poll fast: serve_forever's default 0.5s interval is paid on every
         # shutdown() and would dominate the suite runtime
         self.thread = threading.Thread(
@@ -139,6 +141,13 @@ class _Server:
         h = {"X-Worksweep": "approve", "Content-Type": "application/json"}
         h.update(headers or {})
         return self.request("POST", "/approve", json.dumps({"numbers": numbers}), h)
+
+    def dismiss(self, number, headers=None, body=None):
+        h = {"X-Worksweep": "approve", "Content-Type": "application/json"}
+        h.update(headers or {})
+        if body is None:
+            body = json.dumps({"number": number})
+        return self.request("POST", "/dismiss", body, h)
 
     def sweep(self, headers=None):
         h = {"X-Worksweep": "approve"}
@@ -162,10 +171,12 @@ class _Server:
 def serve_queue(tmp_path):
     made = []
 
-    def _make(records, post=None, webhook="", now=NOW, sweep=None):
+    def _make(records, post=None, webhook="", now=NOW, sweep=None,
+              mark_todo_done=None):
         qpath = os.path.join(str(tmp_path), "queue.json")
         save_queue(qpath, list(records))
-        s = _Server(qpath, post=post, webhook=webhook, now=now, sweep=sweep)
+        s = _Server(qpath, post=post, webhook=webhook, now=now, sweep=sweep,
+                    mark_todo_done=mark_todo_done)
         made.append(s)
         return s, qpath
     yield _make
@@ -467,7 +478,8 @@ def test_cli_accepts_dashboard_with_port_and_bind_defaults(monkeypatch, tmp_path
 
     def fake_serve(queue_path, port, bind, post=None, webhook="", **kw):
         seen.update(queue_path=queue_path, port=port, bind=bind,
-                    post=post, webhook=webhook, sweep=kw.get("sweep"))
+                    post=post, webhook=webhook, sweep=kw.get("sweep"),
+                    mark_todo_done=kw.get("mark_todo_done"))
         return 0
     monkeypatch.setattr(dashboard, "serve", fake_serve)
 
@@ -479,6 +491,7 @@ def test_cli_accepts_dashboard_with_port_and_bind_defaults(monkeypatch, tmp_path
     assert seen["post"] is wsmain._post_discord
     # the sweep edge is injected too -- dashboard.py never learns about launchctl
     assert seen["sweep"] is wsmain._kickstart_sweep
+    assert seen["mark_todo_done"] is wsmain._mark_todo_done
     assert seen["webhook"] == cfg.discord_webhook
 
     assert wsmain.main(["dashboard", "--port", "9001", "--bind", "127.0.0.1"]) == 0
@@ -822,7 +835,7 @@ def test_approve_all_confirms_with_the_count_of_the_set_it_sends():
                if 'data-blanket="1"' in t and 'data-view="sections"' in t]
     assert sorted(blanket) == [1, 2]
     # and the button sends that set, not a server-side notion of "all"
-    assert "send('/approve-all',n)" in page.replace(" ", "")
+    assert "send('/approve-all',{numbers:n})" in page.replace(" ", "")
 
 
 def test_desktop_media_query_declares_a_panel_grid_with_gap():
@@ -1044,9 +1057,40 @@ def test_a_bare_mr_iid_renders_as_unlinked_text():
     assert 'href="!4830"' not in page
 
 
-def test_card_title_falls_back_to_the_mr_ref_when_there_is_no_branch():
-    """AC #38."""
-    recs = [_br(1, web_url="https://gl/g/pb-www/-/merge_requests/4821")]
+def test_card_is_named_after_a_human_title_not_an_iid():
+    """Addendum 4: most records carry no branch, so naming cards after the ref
+    alone left the Branches view reading "!4821" instead of what the work IS.
+    An MR's title wins over an issue's -- it describes the change under way."""
+    recs = [_br(1, web_url="https://gl/g/pb-www/-/merge_requests/4821",
+                kind="issue", title="Ranch data: investigate"),
+            _br(2, web_url="https://gl/g/pb-www/-/merge_requests/4821",
+                kind="mr", title="fix(yardage): authorize the yardage endpoint")]
+    groups, _ = dashboard.group_by_workstream(recs)
+    assert groups[0].title == "fix(yardage): authorize the yardage endpoint"
+    # the refs stay in the header as secondary metadata, not as the name
+    assert groups[0].mr_links == ("https://gl/g/pb-www/-/merge_requests/4821",)
+    page = _page(recs)
+    assert ">fix(yardage): authorize the yardage endpoint<" in page
+    assert ">!4821<" in page
+
+
+def test_a_branch_name_still_wins_over_a_title():
+    recs = [_br(1, branch="chardy/1588-x", title="some MR title", kind="mr")]
+    assert dashboard.group_by_workstream(recs)[0][0].title == "chardy/1588-x"
+
+
+def test_long_card_titles_are_truncated():
+    long_title = "fix(yardage): " + "authorize the yardage endpoint " * 5
+    recs = [_br(1, kind="mr", title=long_title,
+                web_url="https://gl/g/pb-www/-/merge_requests/4821")]
+    title = dashboard.group_by_workstream(recs)[0][0].title
+    assert len(title) <= 60
+    assert title.endswith("…")
+
+
+def test_card_title_falls_back_to_the_mr_ref_when_nothing_is_named():
+    """AC #38: with no branch AND no titles at all, the ref is all there is."""
+    recs = [_br(1, title="", web_url="https://gl/g/pb-www/-/merge_requests/4821")]
     groups, _ = dashboard.group_by_workstream(recs)
     assert groups[0].title == "!4821"
 
@@ -1116,10 +1160,9 @@ def test_dashboard_does_not_call_the_raising_iid_helpers():
 # Fix Mode: Attempt 1 -- review findings
 # =============================================================================
 
-def test_non_runnable_actionable_rows_render_without_a_checkbox():
-    """F1: nothing in worksweep claims triage/mr-hygiene/none, so offering an
-    approve control for one would strand it as a permanently-approved zombie.
-    It still renders -- labelled -- because it does need a human."""
+def test_non_runnable_actionable_rows_get_dismiss_not_a_checkbox():
+    """F1 + addendum 1: nothing claims triage/mr-hygiene/none, so an approve
+    control would strand them. Their resolution is Dismiss instead."""
     page = _page([_rec(1, executor="magi-review"),
                   _rec(2, executor="keep-current"),
                   _rec(3, executor="implement"),
@@ -1127,12 +1170,14 @@ def test_non_runnable_actionable_rows_render_without_a_checkbox():
                   _rec(5, executor="mr-hygiene", status="needs-input"),
                   _rec(6, executor="none")])
     assert sorted(_checkboxes(page, "sections")) == [1, 2, 3]
-    # once per non-runnable row in EACH of the two views that render rows
-    assert page.count('class="manual"') == 6
     assert sorted(_checkboxes(page, "branches")) == [1, 2, 3]
+    # a Dismiss button for each non-runnable row, in each of the two row views
+    dismissable = sorted(int(m) for m in
+                         re.findall(r'data-dismiss="(\d+)"', page))
+    assert dismissable == [4, 4, 5, 5, 6, 6]
     for n in ("#4", "#5", "#6"):                   # still visible on the page
         assert n in page
-    body = _rule(_style(page), ".manual")
+    body = _rule(_style(page), ".btn-dismiss")
     assert body is not None
     assert re.search(r"min-height:\s*44px", body)   # keeps the row rhythm
 
@@ -1418,10 +1463,10 @@ def test_timed_reload_skips_while_a_selection_or_post_is_live():
     """F7 (falsifying): a reload mid-POST tears an approval, and a reload with
     boxes ticked silently discards the selection under the user's thumb."""
     js = _page([_rec(1)]).replace(" ", "").replace("\n", "")
-    # `syncing` joins the guard: a sync is waiting on the queue mtime to change
-    # and reloads itself, so the timer must not reload out from under it.
-    assert ("if(inflight||syncing||selected().length)"
-            "{setTimeout(tick,RELOAD_MS);return;}") in js
+    # One shared guard now covers every auto-reload path: an in-flight POST, an
+    # open confirm dialog, or any ticked checkbox.
+    assert "functionbusy(){returninflight||confirming||selected().length>0;}" in js
+    assert "if(busy()){setTimeout(tick,FALLBACK_MS);return;}" in js
     assert "location.reload();" in js
 
 
@@ -1707,15 +1752,16 @@ def test_sync_button_carries_the_rendered_mtime():
         r'<button[^>]*id="sync"[^>]*>', _page([_rec(1)], mtime=None)).group(0)
 
 
-def test_sync_posts_to_sweep_and_polls_mtime():
+def test_sync_posts_to_sweep_and_leaves_the_reload_to_the_live_poll():
+    """Addendum 3: Sync no longer owns a private poll -- the always-on one
+    reloads when the sweep lands, so there is one refresh path, not two."""
     js = _page([_rec(1)]).replace(" ", "").replace("\n", "")
     assert "fetch('/sweep',{method:'POST',headers:{'X-Worksweep':'approve'}})" in js
-    assert "fetch('/mtime',{cache:'no-store'})" in js
     assert "sync.disabled=true;sync.textContent='syncing…';" in js
-    assert "if(r.status===202){pollMtime(before,Date.now()+SYNC_MAX_MS);return;}" in js
     assert "if(r.status===429){syncDone('justsynced');return;}" in js
-    # poll cadence and the fallback that stops a dead sweep hanging the button
-    assert "POLL_MS=5000" in js
+    assert "pollMtime" not in js                    # the private poll is gone
+    # the button still un-spins if the sweep dies without moving the queue
+    assert "setTimeout(function(){syncDone('Sync');},SYNC_MAX_MS);" in js
     assert "SYNC_MAX_MS=120000" in js
 
 
@@ -1767,3 +1813,308 @@ def test_header_shows_staleness_at_a_glance():
 def test_header_says_never_synced_with_no_queue_file():
     page = _page([], mtime=None)
     assert "never synced" in page
+
+
+# =============================================================================
+# Fix Mode: Attempt 4 -- dismiss, pill filters, live polling, card naming
+# =============================================================================
+
+class _Marker:
+    def __init__(self, fail=None):
+        self.ids, self.fail = [], fail
+
+    def __call__(self, todo_id):
+        self.ids.append(todo_id)
+        if self.fail:
+            raise self.fail
+
+
+def _todo(n, todo_id=None, status="proposed"):
+    """A todo record. `todo_id` synthesises the `todo:<digits>:` shape that the
+    GitLab edge needs; the REAL queue never carries one (see todo_id_of)."""
+    ident = (f"todo:{todo_id}:https://gl/x/-/merge_requests/9" if todo_id
+             else "todo:assigned:https://gl/x/-/work_items/1719")
+    return _rec(n, kind="todo", executor="triage", status=status, id=ident,
+                web_url="https://gl/x/-/work_items/1719")
+
+
+def test_dismiss_flips_a_non_runnable_row_to_done(serve_queue):
+    s, qpath = serve_queue([_rec(1, executor="triage"), _rec(2, executor="triage")])
+    status, _, body = s.dismiss(1)
+    assert status == 200
+    assert json.loads(body) == {"dismissed": True, "number": 1}
+    out = {r.number: (r.item.status, r.item.done_reason) for r in load_queue(qpath)}
+    assert out == {1: ("done", "dismissed"), 2: ("proposed", "")}
+
+
+def test_dismiss_refuses_a_runnable_row(serve_queue):
+    """Falsifying: drop the non-runnable gate and Dismiss silently throws away
+    work the runner was about to do -- with no un-dismiss path."""
+    s, qpath = serve_queue([_rec(1, executor="magi-review"),
+                            _rec(2, executor="keep-current"),
+                            _rec(3, executor="implement")])
+    before = open(qpath, "rb").read()
+    for n in (1, 2, 3):
+        status, _, body = s.dismiss(n)
+        assert status == 400, n
+        assert json.loads(body)["dismissed"] is False
+    assert open(qpath, "rb").read() == before
+
+
+def test_dismiss_refuses_an_already_terminal_row(serve_queue):
+    s, qpath = serve_queue([_rec(1, executor="triage", status="done"),
+                            _rec(2, executor="triage", status="error")])
+    before = open(qpath, "rb").read()
+    assert s.dismiss(1)[0] == 400
+    assert s.dismiss(2)[0] == 400
+    assert open(qpath, "rb").read() == before
+
+
+def test_dismiss_of_an_unknown_number_is_400(serve_queue):
+    s, qpath = serve_queue([_rec(1, executor="triage")])
+    before = open(qpath, "rb").read()
+    status, _, body = s.dismiss(99)
+    assert status == 400
+    assert "99" in json.loads(body)["error"]
+    assert open(qpath, "rb").read() == before
+
+
+def test_dismiss_without_the_custom_header_is_403(serve_queue):
+    """Falsifying: without the CSRF guard any tailnet page could retire rows."""
+    s, qpath = serve_queue([_rec(1, executor="triage")])
+    before = open(qpath, "rb").read()
+    status, _, _ = s.request("POST", "/dismiss", json.dumps({"number": 1}), {})
+    assert status == 403
+    assert open(qpath, "rb").read() == before
+    assert s.dismiss(1, headers={"Origin": "http://evil.example"})[0] == 403
+    assert open(qpath, "rb").read() == before
+
+
+def test_get_dismiss_is_404(serve_queue):
+    s, _ = serve_queue([_rec(1, executor="triage")])
+    assert s.request("GET", "/dismiss")[0] == 404
+
+
+@pytest.mark.parametrize("body", [
+    "", "not json", "[]", "{}", '{"number": "1"}', '{"number": true}',
+    '{"number": null}', '{"number": 1.5}', '{"numbers": [1]}',
+])
+def test_malformed_dismiss_body_is_400(serve_queue, body):
+    s, qpath = serve_queue([_rec(1, executor="triage")])
+    before = open(qpath, "rb").read()
+    assert s.dismiss(1, body=body)[0] == 400
+    assert open(qpath, "rb").read() == before
+
+
+def test_dismiss_marks_the_gitlab_todo_done_once(serve_queue):
+    marker = _Marker()
+    s, qpath = serve_queue([_todo(1, todo_id=4242)], mark_todo_done=marker)
+    assert s.dismiss(1)[0] == 200
+    assert marker.ids == [4242]
+    assert load_queue(qpath)[0].item.status == "done"
+
+
+def test_a_glab_failure_still_dismisses_locally(serve_queue, capsys):
+    """Falsifying: clearing the GitLab todo is a courtesy on top of the local
+    dismiss. If glab failing blocked it, a GitLab outage would freeze the page."""
+    marker = _Marker(fail=RuntimeError("glab exited 1: 404 not found"))
+    s, qpath = serve_queue([_todo(1, todo_id=4242)], mark_todo_done=marker)
+    status, _, body = s.dismiss(1)
+    assert status == 200
+    assert json.loads(body)["dismissed"] is True
+    assert marker.ids == [4242]
+    out = load_queue(qpath)[0].item
+    assert (out.status, out.done_reason) == ("done", "dismissed")
+
+
+def test_a_real_todo_record_dismisses_locally_and_says_why_not_in_gitlab(
+        serve_queue, capsys):
+    """The live queue's todo ids are `todo:<action>:<url>` -- no numeric id
+    anywhere -- so the GitLab edge cannot fire. That must be LOUD, not silent."""
+    marker = _Marker()
+    s, qpath = serve_queue([_todo(1)], mark_todo_done=marker)
+    assert s.dismiss(1)[0] == 200
+    assert marker.ids == []                        # nothing to call it with
+    assert load_queue(qpath)[0].item.status == "done"
+    err = capsys.readouterr().err
+    assert "was NOT marked done" in err
+    assert "no todo id" in err
+
+
+def test_todo_id_of_reads_a_numeric_id_and_zero_otherwise():
+    assert dashboard.todo_id_of(_todo(1, todo_id=4242).item) == 4242
+    # the shape the live queue actually carries
+    assert dashboard.todo_id_of(_todo(1).item) == 0
+    assert dashboard.todo_id_of(_rec(1, id="issue:pb-www#869").item) == 0
+    assert dashboard.todo_id_of(_rec(1, id="").item) == 0
+
+
+def test_dismiss_posts_a_discord_audit(serve_queue):
+    posted = []
+    s, _ = serve_queue([_rec(1, executor="triage")],
+                       post=lambda hook, c: posted.append(c),
+                       webhook="https://discord.com/api/webhooks/1/x")
+    assert s.dismiss(1)[0] == 200
+    assert len(posted) == 1
+    assert posted[0].startswith("🗑️ dismissed 1")
+    assert "(dashboard)" in posted[0]
+
+
+def test_a_failed_dismiss_audit_does_not_undo_the_dismiss(serve_queue):
+    def boom(hook, content):
+        raise RuntimeError("discord down")
+    s, qpath = serve_queue([_rec(1, executor="triage")], post=boom,
+                           webhook="https://discord.com/api/webhooks/1/x")
+    assert s.dismiss(1)[0] == 200
+    assert load_queue(qpath)[0].item.status == "done"
+
+
+def test_dismiss_does_not_hold_the_write_lock_across_glab(serve_queue):
+    """A 30s glab timeout must not stall approvals behind it."""
+    import time as _t
+    gate = threading.Event()
+    s, qpath = serve_queue([_rec(1, executor="triage"), _rec(2)],
+                           mark_todo_done=lambda i: gate.wait(timeout=5))
+    t = threading.Thread(target=lambda: s.dismiss(1), daemon=True)
+    t.start()
+    _t.sleep(0.1)
+    started = _t.monotonic()
+    assert s.approve([2])[0] == 200
+    assert _t.monotonic() - started < 2.0
+    gate.set()
+    t.join(timeout=5)
+
+
+# --- pills as filters --------------------------------------------------------
+
+def test_rows_carry_their_status_for_filtering():
+    """Both row renderers must tag rows, or the filter silently half-works:
+    the Branches view would filter and the Checklist/Panels views would not."""
+    page = _page([_rec(1, status="proposed"), _rec(2, status="running"),
+                  _rec(3, status="done"), _rec(4, status="error")])
+    sections = page[page.index('class="sections"'):page.index('class="branches"')]
+    branches = page[page.index('class="branches"'):]
+    for view, name in ((sections, "sections"), (branches, "branches")):
+        found = sorted(set(re.findall(r'<div class="row" data-st="([a-z-]+)"',
+                                      view)))
+        assert found == ["done", "error", "proposed", "running"], name
+    # every rendered row is taggedatag-less row could never be filtered out
+    assert page.count('<div class="row"') == page.count('<div class="row" data-st=')
+
+
+def test_status_pills_are_filter_buttons():
+    page = _page([_rec(1, status="proposed"), _rec(2, status="running")])
+    pills = re.findall(r'<button[^>]*data-filter="([a-z-]+)"[^>]*>', page)
+    assert sorted(pills) == ["proposed", "running"]
+    for tag in re.findall(r'<button[^>]*data-filter="[a-z-]+"[^>]*>', page):
+        assert 'aria-pressed="false"' in tag       # fresh page = no filter
+    css = _style(page)
+    assert _rule(css, "button.cnt:hover") is not None
+    assert _rule(css, "button.cnt:active") is not None
+    assert _rule(css, 'button.cnt[aria-pressed="true"]') is not None
+
+
+def test_done_this_week_is_informational_not_a_filter():
+    """It must not invite tapping: a span, no data-filter, no hover rule."""
+    page = _page([_rec(1, status="done")])
+    week = re.search(r'<span class="cnt cnt-week">[^<]*</span>', page)
+    assert week is not None
+    assert "data-filter" not in week.group(0)
+    css = _style(page)
+    assert _rule(css, ".cnt-week:hover") is None
+    assert "cursor:default" in _rule(css, ".cnt-week")
+
+
+def test_filter_toggle_logic_is_emitted():
+    """Falsifying: strip the toggle and the pills become inert decoration."""
+    js = _page([_rec(1)]).replace(" ", "").replace("\n", "")
+    # exactly one active at a time, and tapping the active one clears it
+    assert ("root.setAttribute('data-filter',"
+            "(root.getAttribute('data-filter')||'')===v?'':v);") in js
+    assert "rows[i].style.display=(!f||rows[i].getAttribute('data-st')===f)?'':'none';" in js
+    assert "vart=e.target.closest('[data-set-layout]');" in js
+    assert "varf=e.target.closest('[data-filter]');" in js
+    assert "toggleFilter(f.getAttribute('data-filter'))" in js
+    # not persisted anywhere
+    assert "localStorage.setItem('worksweep-filter'" not in js
+    assert "data-filter" not in _page([_rec(1)])[:_page([_rec(1)]).index("<head")]
+
+
+def test_dismiss_button_is_wired_in_the_page():
+    js = _page([_rec(1, executor="triage")]).replace(" ", "").replace("\n", "")
+    assert "vard=e.target.closest('[data-dismiss]');" in js
+    assert "send('/dismiss',{number:parseInt(d.getAttribute('data-dismiss'),10)})" in js
+
+
+# --- always-on live polling --------------------------------------------------
+
+def test_live_poll_is_always_armed_not_gated_on_a_sync_tap():
+    """Addendum 3 (falsifying): if the poll only started after a Sync tap, a
+    runner completion would not appear until the next timed reload."""
+    js = _page([_rec(1)]).replace(" ", "").replace("\n", "")
+    assert "POLL_MS=10000" in js
+    assert "FALLBACK_MS=300000" in js
+    # Armed at TOP LEVEL, not inside a handler. Matched at exactly two spaces
+    # of indent so the rescheduling calls inside poll() (deeper indent) cannot
+    # satisfy this on their own.
+    body = _page([_rec(1)])
+    script = body[body.rindex("<script>"):]
+    assert re.search(r"^  setTimeout\(poll,POLL_MS\);$", script, re.M)
+    assert re.search(r"^  setTimeout\(tick,FALLBACK_MS\);$", script, re.M)
+    assert "fetch('/mtime',{cache:'no-store'})" in js
+
+
+def test_live_poll_reloads_only_when_the_mtime_changed_and_nothing_is_busy():
+    js = _page([_rec(1)]).replace(" ", "").replace("\n", "")
+    assert "if(t&&baseMtime&&t!==baseMtime&&!busy()){location.reload();return;}" in js
+    # and it keeps polling when busy, so it resumes rather than giving up
+    assert "setTimeout(poll,POLL_MS);" in js
+
+
+# --- Branches ordering (addendum 5) -----------------------------------------
+
+def _act(n, branch, last_seen, status="proposed"):
+    return QueueRecord(number=n, first_seen=T0, last_seen=last_seen,
+                       item=_rec(n, status=status, branch=branch,
+                                 title=f"work {n}", kind="mr").item)
+
+
+def test_cards_order_active_by_recency_then_completed_last():
+    """Addendum 5 (falsifying): ascending-by-number put long-merged workstreams
+    at the top of the page. Live work first, most recently touched first."""
+    recs = [_act(1, "b-stale", "2026-06-01T00:00:00Z"),
+            _act(2, "b-recent", "2026-06-29T00:00:00Z"),
+            _act(3, "b-done", "2026-06-30T00:00:00Z", status="done"),
+            _act(4, "b-error", "2026-06-28T00:00:00Z", status="error")]
+    groups, _ = dashboard.group_by_workstream(recs)
+    # branch wins over title as the card name, so cards read by branch here
+    assert [g.title for g in groups] == ["b-recent", "b-stale", "b-done", "b-error"]
+    assert [g.active for g in groups] == [True, True, False, False]
+
+
+def test_a_card_is_active_when_any_member_is_non_terminal():
+    recs = [_act(1, "b", "2026-06-01T00:00:00Z", status="done"),
+            _act(2, "b", "2026-06-02T00:00:00Z", status="proposed")]
+    groups, _ = dashboard.group_by_workstream(recs)
+    assert len(groups) == 1
+    assert groups[0].active is True
+    assert groups[0].last_activity == "2026-06-02T00:00:00Z"
+
+
+def test_completed_cards_render_under_a_quiet_divider_and_before_ungrouped():
+    recs = [_act(1, "b-live", "2026-06-29T00:00:00Z"),
+            _act(2, "b-done", "2026-06-30T00:00:00Z", status="done"),
+            _br(3, branch="", web_url="")]
+    page = _page(recs)
+    assert page.index("b-live") < page.index('class="divider"')
+    assert page.index('class="divider"') < page.index("b-done")
+    assert page.index("b-done") < page.index("Ungrouped")
+    assert "card card-done" in page
+    css = _style(page)
+    assert _rule(css, ".card-done") is not None
+    assert _rule(css, ".divider") is not None
+
+
+def test_no_divider_when_every_card_is_active():
+    page = _page([_act(1, "b", "2026-06-29T00:00:00Z")])
+    assert 'class="divider"' not in page

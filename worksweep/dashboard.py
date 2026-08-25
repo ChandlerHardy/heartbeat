@@ -49,7 +49,8 @@ from .approvals import (_APPROVABLE, approve_all, approve_numbers,
                          is_blanket_eligible)
 from .formatter import DISCORD_MAX_CHARS, _truncate_bytes
 from .models import RUNNABLE_EXECUTORS, QueueRecord, WorkItem
-from .queue import load_queue, save_queue
+from .queue import (_TERMINAL, dismiss as dismiss_record, is_dismissable,
+                    load_queue, save_queue)
 
 DEFAULT_PORT = 8787
 _LOOPBACK = "127.0.0.1"
@@ -84,6 +85,17 @@ _MTIME_POLL_SECONDS = 5
 # Give up waiting and reload anyway: a sweep that errors out may never move the
 # mtime, and the user should not be left staring at a spinner.
 _SYNC_FALLBACK_SECONDS = 120
+# The page polls the queue mtime continuously, not just after a Sync tap, so a
+# runner completion / intake approval / keep-current merge shows up within one
+# interval instead of waiting for the next timed reload.
+_POLL_SECONDS = 10
+# Belt-and-braces reload for a poll that has wedged (a fetch that never settles,
+# a suspended tab that resumes weird). Long, because the poll is the real
+# refresh path now.
+_FALLBACK_RELOAD_SECONDS = 300
+# A workstream card is named after a human-readable thing, not an iid. Long MR
+# titles are truncated so a card header stays one scannable line.
+_CARD_TITLE_LIMIT = 60
 # Control bytes from a request line must never reach a log file raw -- they can
 # forge log lines or drive a terminal that later tails the file.
 _CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
@@ -208,6 +220,27 @@ def is_actionable(item: WorkItem) -> bool:
     return item.status in _APPROVABLE
 
 
+def todo_id_of(item) -> int:
+    """The GitLab todo id for a todo record, or 0 when the queue does not carry one.
+
+    IMPORTANT, and the reason this returns 0 in practice: worksweep never
+    captures a todo's numeric id. `collectors.parse_todos` reads only
+    `target_type`, `action_name` and `target_url`, `models.Todo` has no id
+    field, and `assessor.assess_todo` builds the WorkItem id as
+    `todo:<action_name>:<target_url>` -- verified against the live queue, where
+    real ids look like `todo:assigned:https://.../work_items/1719`.
+
+    So the `todo:<digits>:` shape this parses does not occur today and the
+    GitLab "mark as done" edge cannot fire. The local dismiss is unaffected and
+    is durable across sweeps regardless (see the reconcile tests). Capturing the
+    id needs a decision -- a new persisted field, or a lookup by target_url at
+    dismiss time -- so it is reported rather than invented here. The moment an
+    id IS carried, this and the injected edge light up with no other change.
+    """
+    m = re.match(r"todo:(\d+):", getattr(item, "id", "") or "")
+    return int(m.group(1)) if m else 0
+
+
 def done_this_week(records: Sequence[QueueRecord], now: str) -> int:
     """Count `done` records last seen within the past 7 days.
 
@@ -289,6 +322,36 @@ class Group:
     mr_links: Tuple[str, ...]       # web_urls that ARE merge requests
     issue_links: Tuple[str, ...]    # web_urls that ARE issues
     bare_mr_refs: Tuple[int, ...]   # iids with no URL among the group's records
+    active: bool = True             # any member still not done/error
+    last_activity: str = ""         # max member last_seen, for recency ordering
+
+
+def _card_name(records: Sequence[QueueRecord], branch: str) -> str:
+    """The human name for a workstream card.
+
+    Only stale/keep-current records carry `branch`, so naming cards after it
+    alone left most of them reading "!4078" -- an iid is an index, not a name.
+    Falls back to a member title, preferring an MR's (it describes the change
+    under way) over an issue's or anything else.
+    """
+    if branch:
+        return branch
+    titles = []
+    for r in records:
+        try:
+            title = (r.item.title or "").strip()
+            kind = r.item.kind
+        except Exception:
+            continue
+        if title:
+            titles.append((0 if kind == "mr" else 1, _as_int(r.number), title))
+    if titles:
+        titles.sort()
+        name = titles[0][2]
+        if len(name) > _CARD_TITLE_LIMIT:
+            name = name[:_CARD_TITLE_LIMIT - 1].rstrip() + "…"
+        return name
+    return ""
 
 
 def group_by_workstream(
@@ -400,22 +463,39 @@ def group_by_workstream(
                        for iid in iids
                        if iid not in linked_iids_by_repo.get(repo, ())})
 
-        if branch:
-            title = branch
-        elif mr_links:
-            title = f"!{int(_MR_URL_RE.search(mr_links[0]).group(1))}"
-        elif bare:
-            title = f"!{bare[0]}"
-        else:
-            title = "Workstream"
+        # Name the card after something a human recognises; refs stay as
+        # secondary metadata in the header rather than standing in as the name.
+        title = _card_name(recs, branch)
+        if not title:
+            if mr_links:
+                title = f"!{int(_MR_URL_RE.search(mr_links[0]).group(1))}"
+            elif bare:
+                title = f"!{bare[0]}"
+            else:
+                title = "Workstream"
+
+        active, last_activity = False, ""
+        for r in recs:
+            try:
+                if r.item.status not in _TERMINAL:
+                    active = True
+            except Exception:
+                active = True          # unreadable -> surface it, never bury it
+            last_activity = max(last_activity, str(getattr(r, "last_seen", "") or ""))
 
         groups.append(Group(
             title=title, branch=branch,
             records=tuple(sorted(recs, key=lambda r: _as_int(r.number))),
             mr_links=tuple(mr_links), issue_links=tuple(issue_links),
-            bare_mr_refs=tuple(bare)))
+            bare_mr_refs=tuple(bare),
+            active=active, last_activity=last_activity))
 
+    # Three stable passes, least significant first. Ordering by iid put long
+    # -merged workstreams at the top of the page; what matters is "what is
+    # live, and what moved most recently".
     groups.sort(key=lambda g: min(_as_int(r.number) for r in g.records))
+    groups.sort(key=lambda g: str(g.last_activity or ""), reverse=True)
+    groups.sort(key=lambda g: 0 if g.active else 1)
     return groups, ungrouped
 
 
@@ -472,7 +552,16 @@ a:hover{text-decoration:underline}
   background:var(--panel-2);border:1px solid var(--line-soft);
   border-radius:999px;padding:3px 10px;
 }
-.cnt-week{color:var(--ink);border-color:var(--accent-2)}
+/* Filter pills are buttons; the week pill is a plain span with NO hover or
+   pointer affordance, so it never looks tappable (it is informational). */
+button.cnt{appearance:none;font:inherit;cursor:pointer}
+button.cnt:hover{background:var(--line-soft);color:var(--ink);border-color:var(--ink-3)}
+button.cnt:active{transform:translateY(1px);background:var(--line)}
+button.cnt[aria-pressed="true"]{
+  background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:650;
+}
+button.cnt:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
+.cnt-week{color:var(--ink);border-color:var(--accent-2);cursor:default}
 
 /* ---- layout toggle ---- */
 .toggle{display:flex;gap:2px;padding:3px;background:var(--panel-2);
@@ -529,6 +618,19 @@ a:hover{text-decoration:underline}
 }
 .check input{width:21px;height:21px;accent-color:var(--accent);cursor:pointer}
 .spacer{flex:0 0 auto;min-width:20px}
+/* The resolution for a row no runner will ever claim. */
+.btn-dismiss{
+  appearance:none;font:inherit;font-size:10px;font-weight:650;
+  letter-spacing:.04em;text-transform:uppercase;
+  display:flex;align-items:center;justify-content:center;
+  min-width:44px;min-height:44px;margin:-6px 0 -6px -6px;flex:0 0 auto;
+  padding:0 6px;border-radius:9px;cursor:pointer;
+  border:1px solid var(--line);background:transparent;color:var(--ink-3);
+  transition:background .13s ease,color .13s ease,border-color .13s ease;
+}
+.btn-dismiss:hover{background:var(--panel-2);color:var(--ink);border-color:var(--ink-3)}
+.btn-dismiss:active{transform:translateY(1px);background:var(--line)}
+.btn-dismiss:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
 /* An actionable row no runner will ever claim: it needs a human, but not this
    button, so it gets a label where the checkbox would be. */
 .manual{
@@ -573,6 +675,17 @@ a:hover{text-decoration:underline}
 .card-refs{display:flex;flex-wrap:wrap;gap:10px;margin-top:5px;
            font-size:13px;font-variant-numeric:tabular-nums}
 .ref-bare{color:var(--ink-3)}
+/* Refs are secondary metadata under the card's name, never the name itself. */
+.card-refs{color:var(--ink-3)}
+/* Finished workstreams stay on the page but never compete with live work. */
+.divider{
+  grid-column:1/-1;margin:22px 0 12px;padding-top:14px;
+  border-top:1px solid var(--line);
+  font-size:11px;font-weight:650;letter-spacing:.09em;text-transform:uppercase;
+  color:var(--ink-3);
+}
+.card-done{opacity:.62}
+.card-done:hover{opacity:1}
 
 /* ---- all clear ---- */
 .clear{
@@ -636,9 +749,12 @@ try{d.setAttribute('data-layout',window.matchMedia('%(bp)s').matches?'panels':'c
 
 _BODY_SCRIPT = """
 (function(){
-  var root=document.documentElement,KEY='%(key)s',RELOAD_MS=%(reload)d;
-  var POLL_MS=%(poll)d,SYNC_MAX_MS=%(fallback)d;
-  var inflight=false,syncing=false;
+  var root=document.documentElement,KEY='%(key)s';
+  var POLL_MS=%(poll)d,FALLBACK_MS=%(fallback_reload)d,SYNC_MAX_MS=%(sync_max)d;
+  var inflight=false,syncing=false,confirming=false;
+  var sync=document.getElementById('sync');
+  var baseMtime=sync?(sync.getAttribute('data-mtime')||'').trim():'';
+
   function scope(){
     return document.querySelector(root.getAttribute('data-layout')==='branches'?'.branches':'.sections');
   }
@@ -662,20 +778,22 @@ _BODY_SCRIPT = """
   function blanket(){
     return nums(boxes('input[type=checkbox][data-blanket="1"]'));
   }
+  // Reloading now would lose a selection, tear a POST, or yank the page out
+  // from under an open confirm dialog. Every auto-reload path checks this.
+  function busy(){return inflight||confirming||selected().length>0;}
+
   function refresh(){
     var n=selected().length,c=document.getElementById('sel-count'),
         go=document.getElementById('approve-selected'),
         all=document.getElementById('approve-all');
     if(c){c.textContent=n;}
-    // Both buttons are re-enabled here: send() disables them for the round
-    // trip, and a failed POST must not leave the page permanently inert.
     if(go){go.disabled=inflight||n===0;}
     if(all){all.disabled=inflight||blanket().length===0;}
   }
   function setLayout(v){
     root.setAttribute('data-layout',v);
     try{localStorage.setItem(KEY,v);}catch(e){}
-    marks();refresh();
+    marks();applyFilter();
   }
   function marks(){
     var cur=root.getAttribute('data-layout'),
@@ -684,27 +802,85 @@ _BODY_SCRIPT = """
       b[i].setAttribute('aria-pressed',b[i].getAttribute('data-set-layout')===cur?'true':'false');
     }
   }
-  function send(url,list){
+
+  // ---- status filter: tap a pill to show only that status ----
+  function applyFilter(){
+    var f=(root.getAttribute('data-filter')||'').trim();
+    var rows=document.querySelectorAll('.row[data-st]');
+    for(var i=0;i<rows.length;i++){
+      rows[i].style.display=(!f||rows[i].getAttribute('data-st')===f)?'':'none';
+    }
+    // A section or card with nothing left to show is noise, so hide it too.
+    var groups=document.querySelectorAll('.section,.card');
+    for(var j=0;j<groups.length;j++){
+      groups[j].style.display=(!f||groups[j].querySelector('.row[data-st="'+f+'"]'))?'':'none';
+    }
+    var div=document.querySelector('.divider'),shown=false;
+    if(div){
+      var doneCards=document.querySelectorAll('.card-done');
+      for(var k=0;k<doneCards.length;k++){
+        if(doneCards[k].style.display!=='none'){shown=true;break;}
+      }
+      div.style.display=shown?'':'none';
+    }
+    var pills=document.querySelectorAll('[data-filter]');
+    for(var m=0;m<pills.length;m++){
+      pills[m].setAttribute('aria-pressed',
+        pills[m].getAttribute('data-filter')===f&&f?'true':'false');
+    }
+    refresh();
+  }
+  function toggleFilter(v){
+    // Exactly one active at a time; tapping the active one clears it. Never
+    // persisted -- a filter that survived a reload would hide work on a page
+    // whose whole job is showing it.
+    root.setAttribute('data-filter',
+      (root.getAttribute('data-filter')||'')===v?'':v);
+    applyFilter();
+  }
+
+  function send(url,body){
     inflight=true;refresh();
-    fetch(url,{method:'POST',headers:{'X-Worksweep':'approve','Content-Type':'application/json'},body:JSON.stringify({numbers:list})})
+    fetch(url,{method:'POST',headers:{'X-Worksweep':'approve','Content-Type':'application/json'},body:JSON.stringify(body)})
       .then(function(r){
         if(r.status===200){location.reload();return;}
-        inflight=false;alert('Approval failed ('+r.status+')');refresh();
+        inflight=false;alert('Request failed ('+r.status+')');refresh();
       })
-      .catch(function(e){inflight=false;alert('Approval failed: '+e);refresh();});
+      .catch(function(e){inflight=false;alert('Request failed: '+e);refresh();});
   }
-  // A timed reload instead of <meta refresh>: never reload mid-POST (which
-  // would tear an approval) and never reload while boxes are ticked (which
-  // would silently discard the selection under the user's thumb). Reschedule
-  // and try again later instead.
+
+  // ---- live refresh: poll the queue mtime ALWAYS, not only after a Sync ----
+  // A runner completion, an intake approval or a keep-current merge lands
+  // within one interval instead of waiting for a timed reload.
+  function poll(){
+    fetch('/mtime',{cache:'no-store'})
+      .then(function(r){return r.text();})
+      .then(function(t){
+        t=(t||'').trim();
+        // If the queue moved while the user is mid-action, keep polling and
+        // reload as soon as they are free -- never yank the page away.
+        if(t&&baseMtime&&t!==baseMtime&&!busy()){location.reload();return;}
+        setTimeout(poll,POLL_MS);
+      })
+      .catch(function(){setTimeout(poll,POLL_MS);});
+  }
+  setTimeout(poll,POLL_MS);
+  // Long backstop for a poll that has wedged (a fetch that never settles, a
+  // suspended tab that resumes oddly).
   function tick(){
-    if(inflight||syncing||selected().length){setTimeout(tick,RELOAD_MS);return;}
+    if(busy()){setTimeout(tick,FALLBACK_MS);return;}
     location.reload();
   }
-  setTimeout(tick,RELOAD_MS);
+  setTimeout(tick,FALLBACK_MS);
+
   document.addEventListener('click',function(e){
-    var t=e.target&&e.target.closest?e.target.closest('[data-set-layout]'):null;
-    if(t){setLayout(t.getAttribute('data-set-layout'));}
+    if(!e.target||!e.target.closest){return;}
+    var t=e.target.closest('[data-set-layout]');
+    if(t){setLayout(t.getAttribute('data-set-layout'));return;}
+    var f=e.target.closest('[data-filter]');
+    if(f){toggleFilter(f.getAttribute('data-filter'));return;}
+    var d=e.target.closest('[data-dismiss]');
+    if(d&&!inflight){send('/dismiss',{number:parseInt(d.getAttribute('data-dismiss'),10)});}
   });
   document.addEventListener('change',function(e){
     var b=e.target;
@@ -720,7 +896,7 @@ _BODY_SCRIPT = """
   if(sel){sel.addEventListener('click',function(){
     var n=selected();
     if(!n.length){return;}
-    send('/approve',n);
+    send('/approve',{numbers:n});
   });}
   var all=document.getElementById('approve-all');
   if(all){all.addEventListener('click',function(){
@@ -729,11 +905,14 @@ _BODY_SCRIPT = """
     // counting exactly the set it is about to send.
     var n=blanket();
     if(!n.length){alert('Nothing is proposed right now.');return;}
-    if(!confirm('Approve all '+n.length+' proposed items?')){return;}
-    send('/approve-all',n);
+    confirming=true;
+    var ok=confirm('Approve all '+n.length+' proposed items?');
+    confirming=false;
+    if(!ok){return;}
+    send('/approve-all',{numbers:n});
   });}
-  // ---- Sync: kick a sweep, then wait for the queue to actually change ----
-  var sync=document.getElementById('sync');
+
+  // ---- Sync: kick a sweep; the always-on poll picks up the result ----
   function syncDone(label){
     syncing=false;
     if(!sync){return;}
@@ -742,36 +921,27 @@ _BODY_SCRIPT = """
       if(!syncing){sync.disabled=false;sync.textContent='Sync';}
     },3000);
   }
-  // Poll the queue mtime rather than guessing how long a sweep takes: reload
-  // the instant it actually changes, and fall back to a plain reload so a
-  // sweep that dies without writing cannot leave a spinner up forever.
-  function pollMtime(before,deadline){
-    if(Date.now()>deadline){location.reload();return;}
-    fetch('/mtime',{cache:'no-store'})
-      .then(function(r){return r.text();})
-      .then(function(t){
-        if(t&&t.trim()&&t.trim()!==before){location.reload();return;}
-        setTimeout(function(){pollMtime(before,deadline);},POLL_MS);
-      })
-      .catch(function(){setTimeout(function(){pollMtime(before,deadline);},POLL_MS);});
-  }
   if(sync){sync.addEventListener('click',function(){
     if(syncing||sync.disabled){return;}
     syncing=true;sync.disabled=true;sync.textContent='syncing…';
-    var before=(sync.getAttribute('data-mtime')||'').trim();
     fetch('/sweep',{method:'POST',headers:{'X-Worksweep':'approve'}})
       .then(function(r){
-        if(r.status===202){pollMtime(before,Date.now()+SYNC_MAX_MS);return;}
+        if(r.status===202){
+          // No private poll: the always-on one reloads when the sweep lands.
+          // This only stops the button spinning if the sweep dies silently.
+          setTimeout(function(){syncDone('Sync');},SYNC_MAX_MS);
+          return;
+        }
         if(r.status===429){syncDone('just synced');return;}
         syncDone('sync failed');
       })
       .catch(function(){syncDone('sync failed');});
   });}
-  marks();refresh();
+  marks();applyFilter();refresh();
 })();
-""" % {"key": _LAYOUT_STORAGE_KEY, "reload": _REFRESH_SECONDS * 1000,
-         "poll": _MTIME_POLL_SECONDS * 1000,
-         "fallback": _SYNC_FALLBACK_SECONDS * 1000}
+""" % {"key": _LAYOUT_STORAGE_KEY, "poll": _POLL_SECONDS * 1000,
+       "fallback_reload": _FALLBACK_RELOAD_SECONDS * 1000,
+       "sync_max": _SYNC_FALLBACK_SECONDS * 1000}
 
 
 def _link(url: str, label: str) -> str:
@@ -802,8 +972,13 @@ def _checkbox(record: QueueRecord, view: str) -> str:
     if not is_actionable(item):
         return '<span class="spacer"></span>'
     if item.executor not in RUNNABLE_EXECUTORS:
-        return ('<span class="manual" title="no runner claims this executor '
-                '- handle it by hand">manual</span>')
+        # Nothing executes these, so the only resolution is "I looked at it".
+        # A Dismiss button is that resolution; an approve checkbox here would
+        # strand the record as a permanently-approved zombie.
+        return (f'<button type="button" class="btn-dismiss" '
+                f'data-dismiss="{_e(record.number)}" '
+                f'aria-label="dismiss item {_e(record.number)}" '
+                f'title="mark as handled">Dismiss</button>')
     blanket = ' data-blanket="1"' if is_blanket_eligible(item) else ''
     return (f'<label class="check">'
             f'<input type="checkbox" data-view="{_e(view)}" '
@@ -850,7 +1025,10 @@ def _section_row(record: QueueRecord, now: str, section: str) -> str:
 
     age = _age(record, now)
     meta = f'<div class="meta">{_e(age)}</div>' if age else ""
-    return (f'<div class="row">{_checkbox(record, "sections")}'
+    # `data-st` (not `data-status`) matches the chip attribute and keeps the
+    # module free of the literal `status="`, which the AC #20 invariant forbids.
+    return (f'<div class="row" data-st="{_e(item.status)}">'
+            f'{_checkbox(record, "sections")}'
             f'<div class="cell"><div class="line1">{"".join(bits)}</div>'
             f'{"".join(detail)}</div>{meta}</div>')
 
@@ -877,7 +1055,7 @@ def _degraded_row(record, error: Exception) -> str:
     """
     print(f"worksweep: dashboard row render failed: {error}", file=sys.stderr)
     number = _e(getattr(record, "number", "?"))
-    return (f'<div class="row"><span class="spacer"></span>'
+    return (f'<div class="row" data-st="error"><span class="spacer"></span>'
             f'<div class="cell"><div class="line1">'
             f'<span class="num">#{number}</span>'
             f'<span class="chip" data-st="error">unrenderable</span>'
@@ -906,17 +1084,20 @@ def _sections_html(sections: Dict[str, List[QueueRecord]], now: str) -> str:
 
 def _card_row(record: QueueRecord) -> str:
     item = record.item
-    return (f'<div class="row">{_checkbox(record, "branches")}'
+    return (f'<div class="row" data-st="{_e(item.status)}">'
+            f'{_checkbox(record, "branches")}'
             f'<div class="cell"><div class="line1">'
             f'<span class="num">#{_e(record.number)}</span>'
             f'<span class="exec">{_e(item.executor)}</span>{_chip(record)}'
             f'</div><div class="why">{_e(item.why)}</div></div></div>')
 
 
-def _card(title: str, refs_html: str, records: Sequence[QueueRecord]) -> str:
+def _card(title: str, refs_html: str, records: Sequence[QueueRecord],
+          done: bool = False) -> str:
     rows = "".join(_safe(_card_row, r) for r in records)
     refs = f'<div class="card-refs">{refs_html}</div>' if refs_html else ""
-    return (f'<section class="card"><div class="card-h">'
+    cls = "card card-done" if done else "card"
+    return (f'<section class="{_e(cls)}"><div class="card-h">'
             f'<div class="card-t">{_e(title)}</div>{refs}</div>'
             f'<div class="rows">{rows}</div></section>')
 
@@ -924,7 +1105,12 @@ def _card(title: str, refs_html: str, records: Sequence[QueueRecord]) -> str:
 def _branches_html(groups: Sequence[Group],
                    ungrouped: Sequence[QueueRecord]) -> str:
     cards = []
+    divided = False
     for g in groups:
+        if not g.active and not divided:
+            # Finished workstreams stay on the page but never above live work.
+            divided = True
+            cards.append('<div class="divider">Completed</div>')
         refs = []
         for url in g.mr_links:
             refs.append(_link(url, f"!{int(_MR_URL_RE.search(url).group(1))}"))
@@ -934,7 +1120,8 @@ def _branches_html(groups: Sequence[Group],
             refs.append(f'<span class="ref-bare">!{_e(iid)}</span>')
         for url in g.issue_links:
             refs.append(_link(url, f"#{int(_ISSUE_URL_RE.search(url).group(1))}"))
-        cards.append(_card(g.title, "".join(refs), g.records))
+        cards.append(_card(g.title, "".join(refs), g.records,
+                           done=not g.active))
     if ungrouped:
         cards.append(_card("Ungrouped", "",
                            sorted(ungrouped, key=lambda r: _as_int(r.number))))
@@ -956,8 +1143,12 @@ def _telemetry_html(records: Sequence[QueueRecord],
             if st not in seen:
                 seen.add(st)
                 ordered.append(st)
-    pills = "".join(f'<span class="cnt">{_e(st)} {counts[st]}</span>'
-                    for st in ordered)
+    # Tap-to-filter. Deliberately NOT persisted: a filter that survived a
+    # reload would silently hide work on a page whose whole job is showing it.
+    pills = "".join(
+        f'<button type="button" class="cnt" data-filter="{_e(st)}" '
+        f'aria-pressed="false">{_e(st)} {counts[st]}</button>'
+        for st in ordered)
     if queue_mtime:
         stamp = datetime.datetime.fromtimestamp(
             queue_mtime).strftime("%Y-%m-%d %H:%M")
@@ -1167,6 +1358,20 @@ def _audit_message(numbers: Sequence[int],
                            DISCORD_MAX_CHARS)
 
 
+def _valid_number(payload) -> Optional[int]:
+    """Validate a `{"number": N}` envelope. None when malformed (-> 400).
+
+    Bools are excluded explicitly: `isinstance(True, int)` is True in Python,
+    so `{"number": true}` would otherwise dismiss record 1.
+    """
+    if not isinstance(payload, dict):
+        return None
+    number = payload.get("number")
+    if isinstance(number, bool) or not isinstance(number, int):
+        return None
+    return number
+
+
 class DashboardHandler(BaseHTTPRequestHandler):
     """GET `/` renders; POST `/approve` and `/approve-all` persist.
 
@@ -1284,7 +1489,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:                                 # noqa: N802
         path = self._path()
-        if path not in ("/approve", "/approve-all", "/sweep"):
+        if path not in ("/approve", "/approve-all", "/sweep", "/dismiss"):
             self._text(404, "not found")
             return
         if not self._csrf_ok():
@@ -1316,6 +1521,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except (UnicodeDecodeError, ValueError):
             self._text(400, "bad request")
             return
+
+        if path == "/dismiss":
+            number = _valid_number(payload)
+            if number is None:
+                self._text(400, "bad request")
+                return
+            try:
+                self._dismiss(number)
+            except Exception as e:                 # never crash the agent
+                print(f"worksweep: dashboard dismiss failed: {e}", file=sys.stderr)
+                self._json(500, {"dismissed": False, "error": "dismiss failed"})
+            return
+
         numbers = _valid_numbers(payload)
         if numbers is None:
             self._text(400, "bad request")
@@ -1371,6 +1589,75 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         self._json(202, {"started": True})
 
+    def _dismiss(self, number: int) -> None:
+        """Retire a non-runnable row: flip it to done/`dismissed`.
+
+        Ordering is deliberate. The local flip happens first, under the lock and
+        durable, and the GitLab call happens after and outside the lock:
+
+        * a glab failure must not block the dismiss (it is a courtesy that also
+          clears the todo in GitLab, not the point of the action);
+        * the glab call has a 30s timeout, and holding the write lock across it
+          would stall every approval on the page for that long -- the same
+          mistake the sweep route avoids.
+        """
+        with _WRITE_LOCK:
+            records = load_queue(self.server.queue_path)
+            target = None
+            for r in records:
+                if r.number == number:
+                    target = r
+                    break
+            if target is None:
+                self._json(400, {"dismissed": False,
+                                 "error": f"no record #{number}"})
+                return
+            # The flip itself lives in queue.py: the dashboard writes no
+            # status of its own, exactly as with approvals.
+            updated, flipped = dismiss_record(records, number, self.server.now())
+            if flipped is None:
+                # Runnable items are approve-territory; already-terminal ones
+                # have nothing to dismiss.
+                self._json(400, {"dismissed": False,
+                                 "error": f"#{number} is not dismissable"})
+                return
+            save_queue(self.server.queue_path, updated)
+
+        self._mark_todo_done(target.item, number)
+        self._audit_dismiss(number, target.item)
+        self._json(200, {"dismissed": True, "number": number})
+
+    def _mark_todo_done(self, item, number: int) -> None:
+        """Best-effort: clear the matching GitLab todo. Never fatal."""
+        todo_id = todo_id_of(item)
+        if not todo_id:
+            if item.kind == "todo":
+                print(f"worksweep: dismissed #{number} locally; the GitLab todo "
+                      f"was NOT marked done (the queue record carries no todo "
+                      f"id: {item.id!r})", file=sys.stderr)
+            return
+        edge = getattr(self.server, "mark_todo_done", None)
+        if edge is None:
+            return
+        try:
+            edge(todo_id)
+        except Exception as e:
+            print(f"worksweep: could not mark GitLab todo {todo_id} done: {e}",
+                  file=sys.stderr)
+
+    def _audit_dismiss(self, number: int, item) -> None:
+        confirm = (f"🗑️ dismissed {number} "
+                   f"({item.executor} {item.repo})".rstrip() + " (dashboard)")
+        post, webhook = self.server.post, self.server.webhook
+        if post and webhook:
+            try:
+                post(webhook, confirm)
+            except Exception as e:
+                print(f"worksweep: dismiss confirmation post failed: {e}",
+                      file=sys.stderr)
+        else:
+            print(confirm)
+
     def _approve(self, path: str, numbers: Optional[List[int]]) -> None:
         qpath = self.server.queue_path
         now = self.server.now()
@@ -1422,7 +1709,9 @@ def make_server(address: Tuple[str, int], queue_path: str,
                 post: Optional[Callable[[str, str], None]] = None,
                 webhook: str = "",
                 now: Optional[Callable[[], str]] = None,
-                sweep: Optional[Callable[[], None]] = None) -> _DashboardServer:
+                sweep: Optional[Callable[[], None]] = None,
+                mark_todo_done: Optional[Callable[[int], None]] = None
+                ) -> _DashboardServer:
     """Build (but do not start) the dashboard server.
 
     Split out of `serve` so tests can bind port 0 on a thread and shut it down;
@@ -1438,6 +1727,7 @@ def make_server(address: Tuple[str, int], queue_path: str,
     # tests never spawn anything.
     httpd.sweep = sweep
     httpd.sweep_last = 0.0
+    httpd.mark_todo_done = mark_todo_done
     return httpd
 
 
@@ -1508,6 +1798,7 @@ def serve(queue_path: str, port: int = DEFAULT_PORT, bind: str = "auto",
           post: Optional[Callable[[str, str], None]] = None,
           webhook: str = "",
           sweep: Optional[Callable[[], None]] = None,
+          mark_todo_done: Optional[Callable[[int], None]] = None,
           run_subprocess: Callable = subprocess.run,
           sleep: Callable[[float], None] = time.sleep,
           max_attempts: int = 0) -> int:
@@ -1539,7 +1830,8 @@ def serve(queue_path: str, port: int = DEFAULT_PORT, bind: str = "auto",
         if address:
             try:
                 httpd = make_server((address, port), queue_path,
-                                    post=post, webhook=webhook, sweep=sweep)
+                                    post=post, webhook=webhook, sweep=sweep,
+                                    mark_todo_done=mark_todo_done)
             except OSError as e:
                 print(f"worksweep: dashboard cannot bind {address}:{port} "
                       f"({e})", file=sys.stderr)
