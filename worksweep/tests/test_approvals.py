@@ -103,6 +103,16 @@ def test_explicit_numbers_beat_all():
     assert parse_approval("✅ 1,3 all good") == {1, 3}
 
 
+def test_adjacent_all_with_numbers_is_still_numbers_only():
+    """The case that isolates the numbers-beat-all PRECONDITION from the
+    adjacency regex: here the marker IS immediately followed by "all", so the
+    regex matches -- only `parse_approval(text)` being non-empty stops this
+    chatty line from approving the entire queue."""
+    assert parse_approve_all("✅ all good, especially 3") is False
+    assert parse_approval("✅ all good, especially 3") == {3}
+    assert parse_approve_all("approve all of 1 and 2") is False
+
+
 def test_approve_all_requires_whitespace_after_marker():
     # deliberate consequence of the `\s+` in the pattern (spec'd, not an accident)
     assert parse_approve_all("✅all") is False

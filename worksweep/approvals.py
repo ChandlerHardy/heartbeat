@@ -75,6 +75,25 @@ def parse_approval(text: str) -> Set[int]:
     return out
 
 
+def parse_approve_all(text: str) -> bool:
+    """True when `text` is a BLANKET approval (`✅ all` / `approve all`).
+
+    Two preconditions, both load-bearing:
+
+    1. Adjacency -- the marker must sit immediately before the word "all", so a
+       casual sign-off like "✅ sounds good, that's all" is NOT a blanket
+       approval. (`_HAS_MARKER_RE` is unanchored; a "marker present AND `all`
+       present" test would approve the whole queue on that sentence.)
+    2. Precedence -- explicit numbers always win. `✅ 1,3 all good` names
+       numbers, so it is a numbered approval and this returns False. This is an
+       ORDERING constraint, not a filter: callers must not compute the blanket
+       flag independently and union the two result sets.
+    """
+    if not text or not _APPROVE_ALL_RE.search(text):
+        return False
+    return not parse_approval(text)
+
+
 def flip(records: List[QueueRecord], numbers: Set[int], now: str,
          statuses: Tuple[str, ...]) -> Tuple[List[QueueRecord], Set[int]]:
     """Flip every record in `numbers` whose status is in `statuses` to `approved`.
@@ -136,14 +155,30 @@ def apply_approvals(records: List[QueueRecord], messages: List[DiscordMessage],
     numbers is matched against record numbers; each matching record currently
     `proposed` becomes `approved` (last_seen bumped to `now`).
 
+    A message that is a blanket approval (`✅ all`, see `parse_approve_all`)
+    additionally flips every remaining `proposed` record -- `needs-input` is
+    deliberately NOT swept (decision 1). Blanket-flipped numbers land in the
+    returned set like any other, so the intake confirmation names them.
+
     Returns (updated_records, newly_approved_numbers). Already-`approved` records
     stay approved but are NOT in the returned set, so a confirmation message
     names only freshly flipped items. Numbers with no matching record are no-ops.
     """
     approved_numbers: Set[int] = set()
+    blanket = False
     if user_id:
         for m in messages:
             if m.author_id == user_id:
                 approved_numbers |= parse_approval(m.content)
+                # Derived per-message INSIDE the author gate: a colleague's
+                # `✅ all` must not sweep the queue.
+                blanket = blanket or parse_approve_all(m.content)
 
-    return approve_numbers(records, approved_numbers, now)
+    out, newly = approve_numbers(records, approved_numbers, now)
+    if blanket:
+        # `proposed` only, and applied to the already-flipped list so the two
+        # paths compose (a numbered ✅ that released a needs-input item stays
+        # released, and neither number is reported twice).
+        out, blanket_newly = approve_all(out, now)
+        newly |= blanket_newly
+    return out, newly

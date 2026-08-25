@@ -150,6 +150,19 @@ def test_explicit_numbers_beat_all():
         1: "approved", 2: "proposed", 3: "approved"}
 
 
+def test_adjacent_all_with_numbers_approves_only_those_numbers():
+    """AC #3 at the apply level, on the message shape that actually exercises
+    the precondition: "✅ all good, especially 3" names a number, so it is a
+    numbered approval -- records 1 and 2 stay proposed."""
+    recs = [_rec(1), _rec(2), _rec(3)]
+    out, approved = apply_approvals(
+        recs, [_msg(USER, "✅ all good, especially 3")], USER, T1)
+    by = _by_num(out)
+    assert approved == {3}
+    assert {n: by[n].item.status for n in (1, 2, 3)} == {
+        1: "proposed", 2: "proposed", 3: "approved"}
+
+
 def test_approve_all_from_other_author_changes_nothing():
     """AC #5: the author gate wraps the blanket check too."""
     recs = _one_of_each()
