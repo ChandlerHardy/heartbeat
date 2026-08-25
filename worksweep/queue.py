@@ -16,6 +16,7 @@ import dataclasses
 import json
 import os
 import sys
+import tempfile
 from typing import List
 
 from .models import QueueRecord, WorkItem
@@ -90,10 +91,27 @@ def save_queue(path: str, records: List[QueueRecord]) -> None:
         }
         for r in records
     ]
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(payload, f, indent=2)
-    os.replace(tmp, path)
+    # A UNIQUE temp name per write, not a fixed `path + ".tmp"`. Three writers
+    # touch this file (intake, runner, dashboard) and the dashboard is threaded:
+    # with a shared fixed name, two concurrent writers interleave their bytes
+    # into the SAME temp file and os.replace then publishes the resulting
+    # mixture as the whole queue. Unique names make each writer's temp private,
+    # so the worst case degrades to a lost update (last replace wins) instead of
+    # a corrupt file.
+    fd, tmp = tempfile.mkstemp(dir=parent or ".", prefix=".queue-", suffix=".tmp")
+    try:
+        # mkstemp is 0600; queue.json holds private MR titles and whys, so keep
+        # it that way rather than widening to the umask default.
+        with os.fdopen(fd, "w") as f:
+            json.dump(payload, f, indent=2)
+        os.replace(tmp, path)
+    except BaseException:
+        # never leave a stray temp behind on a failed write
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def auto_approve(records: List[QueueRecord],
