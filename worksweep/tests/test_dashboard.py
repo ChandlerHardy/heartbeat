@@ -115,9 +115,10 @@ def _called_names(tree):
 # --- server harness: real HTTP on port 0, always shut down --------------------
 
 class _Server:
-    def __init__(self, qpath, post=None, webhook="", now=NOW):
+    def __init__(self, qpath, post=None, webhook="", now=NOW, sweep=None):
         self.httpd = dashboard.make_server(("127.0.0.1", 0), qpath, post=post,
-                                           webhook=webhook, now=lambda: now)
+                                           webhook=webhook, now=lambda: now,
+                                           sweep=sweep)
         # poll fast: serve_forever's default 0.5s interval is paid on every
         # shutdown() and would dominate the suite runtime
         self.thread = threading.Thread(
@@ -139,6 +140,11 @@ class _Server:
         h.update(headers or {})
         return self.request("POST", "/approve", json.dumps({"numbers": numbers}), h)
 
+    def sweep(self, headers=None):
+        h = {"X-Worksweep": "approve"}
+        h.update(headers or {})
+        return self.request("POST", "/sweep", "", h)
+
     def approve_all(self, numbers, headers=None):
         """F2: the page sends the proposed+runnable numbers it rendered."""
         h = {"X-Worksweep": "approve", "Content-Type": "application/json"}
@@ -156,10 +162,10 @@ class _Server:
 def serve_queue(tmp_path):
     made = []
 
-    def _make(records, post=None, webhook="", now=NOW):
+    def _make(records, post=None, webhook="", now=NOW, sweep=None):
         qpath = os.path.join(str(tmp_path), "queue.json")
         save_queue(qpath, list(records))
-        s = _Server(qpath, post=post, webhook=webhook, now=now)
+        s = _Server(qpath, post=post, webhook=webhook, now=now, sweep=sweep)
         made.append(s)
         return s, qpath
     yield _make
@@ -461,7 +467,7 @@ def test_cli_accepts_dashboard_with_port_and_bind_defaults(monkeypatch, tmp_path
 
     def fake_serve(queue_path, port, bind, post=None, webhook="", **kw):
         seen.update(queue_path=queue_path, port=port, bind=bind,
-                    post=post, webhook=webhook)
+                    post=post, webhook=webhook, sweep=kw.get("sweep"))
         return 0
     monkeypatch.setattr(dashboard, "serve", fake_serve)
 
@@ -471,6 +477,8 @@ def test_cli_accepts_dashboard_with_port_and_bind_defaults(monkeypatch, tmp_path
     assert seen["queue_path"] == qpath
     # the Discord poster arrives by INJECTION -- dashboard.py imports no __main__
     assert seen["post"] is wsmain._post_discord
+    # the sweep edge is injected too -- dashboard.py never learns about launchctl
+    assert seen["sweep"] is wsmain._kickstart_sweep
     assert seen["webhook"] == cfg.discord_webhook
 
     assert wsmain.main(["dashboard", "--port", "9001", "--bind", "127.0.0.1"]) == 0
@@ -1410,7 +1418,10 @@ def test_timed_reload_skips_while_a_selection_or_post_is_live():
     """F7 (falsifying): a reload mid-POST tears an approval, and a reload with
     boxes ticked silently discards the selection under the user's thumb."""
     js = _page([_rec(1)]).replace(" ", "").replace("\n", "")
-    assert "if(inflight||selected().length){setTimeout(tick,RELOAD_MS);return;}" in js
+    # `syncing` joins the guard: a sync is waiting on the queue mtime to change
+    # and reloads itself, so the timer must not reload out from under it.
+    assert ("if(inflight||syncing||selected().length)"
+            "{setTimeout(tick,RELOAD_MS);return;}") in js
     assert "location.reload();" in js
 
 
@@ -1496,3 +1507,263 @@ def test_issue_ref_survives_a_url_with_a_trailing_path():
     """A designs/notes sub-path still resolves to the parent issue."""
     item = _rec(1, web_url="https://gl/g/p/-/work_items/869/designs/a.png").item
     assert dashboard.ref_of(item) == "#869"
+
+
+# =============================================================================
+# Fix Mode: Attempt 3 -- "Sync" kicks a sweep so the page is not stuck on the
+# 9am/1pm queue snapshot
+# =============================================================================
+
+class _Sweeper:
+    """Records calls to the injected sweep edge; optionally fails."""
+
+    def __init__(self, fail=None):
+        self.calls = 0
+        self.fail = fail
+
+    def __call__(self):
+        self.calls += 1
+        if self.fail:
+            raise self.fail
+
+
+def test_post_sweep_kicks_the_injected_edge_exactly_once(serve_queue):
+    sweeper = _Sweeper()
+    s, _ = serve_queue([_rec(1)], sweep=sweeper)
+    status, headers, body = s.sweep()
+    assert status == 202
+    assert json.loads(body) == {"started": True}
+    assert sweeper.calls == 1
+
+
+def test_post_sweep_without_the_custom_header_is_403(serve_queue):
+    """Falsifying: drop the CSRF check on /sweep and any page in a tailnet
+    browser could make the mini sweep and post a Discord digest on demand."""
+    sweeper = _Sweeper()
+    s, _ = serve_queue([_rec(1)], sweep=sweeper)
+    status, _, _ = s.request("POST", "/sweep", "", {})
+    assert status == 403
+    assert sweeper.calls == 0
+    # an empty header value is not a header
+    status, _, _ = s.request("POST", "/sweep", "", {"X-Worksweep": ""})
+    assert status == 403
+    assert sweeper.calls == 0
+
+
+def test_post_sweep_with_a_mismatched_origin_is_403(serve_queue):
+    sweeper = _Sweeper()
+    s, _ = serve_queue([_rec(1)], sweep=sweeper)
+    status, _, _ = s.sweep(headers={"Origin": "http://evil.example"})
+    assert status == 403
+    assert sweeper.calls == 0
+
+
+def test_get_sweep_is_404(serve_queue):
+    """The sweep is a POST-only side effect; GET must not trigger it."""
+    sweeper = _Sweeper()
+    s, _ = serve_queue([_rec(1)], sweep=sweeper)
+    status, _, _ = s.request("GET", "/sweep")
+    assert status == 404
+    assert sweeper.calls == 0
+
+
+def test_second_sweep_within_the_window_is_429(serve_queue):
+    """Falsifying: remove the throttle and a held button (or an impatient tap)
+    fires a sweep -- and a Discord digest -- per tap."""
+    sweeper = _Sweeper()
+    s, _ = serve_queue([_rec(1)], sweep=sweeper)
+    assert s.sweep()[0] == 202
+
+    status, headers, body = s.sweep()
+    assert status == 429
+    assert sweeper.calls == 1                      # the edge was NOT called again
+    payload = json.loads(body)
+    assert payload["started"] is False
+    assert 0 < payload["retry_after"] <= 61
+    assert int(headers["Retry-After"]) == payload["retry_after"]
+
+
+def test_a_failed_sweep_does_not_hold_the_user_off(serve_queue):
+    """A kickstart that failed started nothing and posted no digest, so the
+    throttle must not lock the user out for a minute over it."""
+    sweeper = _Sweeper(fail=RuntimeError("launchctl kickstart exited 3"))
+    s, _ = serve_queue([_rec(1)], sweep=sweeper)
+    status, _, body = s.sweep()
+    assert status == 500
+    assert json.loads(body)["started"] is False
+    assert "launchctl" in json.loads(body)["error"]
+
+    sweeper.fail = None                            # launchd recovers
+    status, _, body = s.sweep()
+    assert status == 202                           # retryable immediately
+    assert json.loads(body) == {"started": True}
+    assert sweeper.calls == 2
+
+
+def test_sweep_returns_500_when_the_edge_is_not_wired(serve_queue):
+    s, _ = serve_queue([_rec(1)])                  # no sweep injected
+    status, _, body = s.sweep()
+    assert status == 500
+    assert json.loads(body)["started"] is False
+    # and it must stay retryable, not burn the throttle window
+    status, _, _ = s.sweep()
+    assert status == 500
+
+
+def test_sweep_never_runs_in_process(serve_queue):
+    """The sweep belongs to its own agent: this module must hold no code path
+    that sweeps locally (different env, double queue writer, ~90s blocking)."""
+    tree = _dashboard_tree()
+    called = _called_names(tree)
+    for banned in ("run_sweep", "reconcile", "collect_issues", "_run_intake"):
+        assert banned not in called, banned
+    assert "run_sweep" not in _dashboard_src()
+
+
+def test_sweep_response_is_fast_and_does_not_block_approvals(serve_queue):
+    """The throttle lock is held only across the check-and-set, never across
+    the edge, so a slow kickstart cannot stall an approval."""
+    import time as _t
+    gate = threading.Event()
+
+    def slow_sweep():
+        gate.wait(timeout=5)
+
+    s, qpath = serve_queue([_rec(1)], sweep=slow_sweep)
+    t = threading.Thread(target=lambda: s.sweep(), daemon=True)
+    t.start()
+    _t.sleep(0.1)                                  # sweep is mid-flight
+    started = _t.monotonic()
+    assert s.approve([1])[0] == 200                # not blocked behind it
+    assert _t.monotonic() - started < 2.0
+    gate.set()
+    t.join(timeout=5)
+    assert load_queue(qpath)[0].item.status == "approved"
+
+
+# --- GET /mtime --------------------------------------------------------------
+
+def test_mtime_returns_the_queue_file_mtime(serve_queue):
+    s, qpath = serve_queue([_rec(1)])
+    status, headers, body = s.request("GET", "/mtime")
+    assert status == 200
+    assert headers["Content-Type"].startswith("text/plain")
+    assert body.decode() == dashboard.mtime_token(os.path.getmtime(qpath))
+
+
+def test_mtime_changes_when_the_queue_is_rewritten(serve_queue):
+    """This is the whole signal the Sync flow waits on."""
+    s, qpath = serve_queue([_rec(1)])
+    before = s.request("GET", "/mtime")[2]
+    os.utime(qpath, (1_800_000_000, 1_800_000_000))
+    after = s.request("GET", "/mtime")[2]
+    assert after != before
+    assert after.decode() == dashboard.mtime_token(1_800_000_000)
+
+
+def test_mtime_needs_no_csrf_header(serve_queue):
+    """Read-only and side-effect free: it leaks only when the queue last
+    changed, which the page already displays."""
+    s, _ = serve_queue([_rec(1)])
+    assert s.request("GET", "/mtime", None, {})[0] == 200
+
+
+def test_mtime_is_get_only(serve_queue):
+    s, _ = serve_queue([_rec(1)])
+    status, _, _ = s.request("POST", "/mtime", "", {"X-Worksweep": "approve"})
+    assert status == 404
+
+
+def test_mtime_is_zero_when_the_queue_is_missing(tmp_path):
+    s = _Server(os.path.join(str(tmp_path), "gone.json"))
+    try:
+        status, _, body = s.request("GET", "/mtime")
+        assert status == 200
+        assert body.decode() == "0"
+    finally:
+        s.close()
+
+
+# --- the Sync control --------------------------------------------------------
+
+def test_sync_button_is_in_the_header_for_every_layout():
+    """It lives in the header, outside the per-view containers, so all three
+    layouts get it without duplicating the control."""
+    page = _page([_rec(1)])
+    btn = re.search(r'<button[^>]*id="sync"[^>]*>.*?</button>', page, re.S)
+    assert btn is not None
+    assert page.index('id="sync"') < page.index('class="sections"')
+    assert page.count('id="sync"') == 1
+    assert "Sync" in btn.group(0)
+
+
+def test_sync_button_carries_the_rendered_mtime():
+    """The page compares this against GET /mtime, so it must be the token the
+    page was actually rendered from -- not a fresh read."""
+    page = _page([_rec(1)], mtime=1_750_000_000.0)
+    btn = re.search(r'<button[^>]*id="sync"[^>]*>', page).group(0)
+    assert f'data-mtime="{dashboard.mtime_token(1_750_000_000.0)}"' in btn
+    assert 'data-mtime="0"' in re.search(
+        r'<button[^>]*id="sync"[^>]*>', _page([_rec(1)], mtime=None)).group(0)
+
+
+def test_sync_posts_to_sweep_and_polls_mtime():
+    js = _page([_rec(1)]).replace(" ", "").replace("\n", "")
+    assert "fetch('/sweep',{method:'POST',headers:{'X-Worksweep':'approve'}})" in js
+    assert "fetch('/mtime',{cache:'no-store'})" in js
+    assert "sync.disabled=true;sync.textContent='syncing…';" in js
+    assert "if(r.status===202){pollMtime(before,Date.now()+SYNC_MAX_MS);return;}" in js
+    assert "if(r.status===429){syncDone('justsynced');return;}" in js
+    # poll cadence and the fallback that stops a dead sweep hanging the button
+    assert "POLL_MS=5000" in js
+    assert "SYNC_MAX_MS=120000" in js
+
+
+def test_sync_button_has_hover_and_active_states():
+    css = _style(_page([_rec(1)]))
+    assert _rule(css, ".btn-sync:hover") is not None
+    assert _rule(css, ".btn-sync:active") is not None
+
+
+# --- staleness telemetry -----------------------------------------------------
+
+@pytest.mark.parametrize("seconds,expected", [
+    (0, "synced just now"),
+    (30, "synced just now"),
+    (14 * 60, "synced 14 min ago"),
+    (59 * 60, "synced 59 min ago"),
+    (3 * 3600, "synced 3 hr ago"),
+    (23 * 3600, "synced 23 hr ago"),
+    (86400, "synced 1 day ago"),
+    (3 * 86400, "synced 3 days ago"),
+])
+def test_relative_age_text(seconds, expected):
+    import datetime
+    base = datetime.datetime.fromisoformat(NOW).timestamp()
+    assert dashboard.relative_age(base - seconds, NOW) == expected
+
+
+def test_relative_age_handles_missing_and_skewed_mtimes():
+    import datetime
+    base = datetime.datetime.fromisoformat(NOW).timestamp()
+    assert dashboard.relative_age(None, NOW) == "never synced"
+    assert dashboard.relative_age(0, NOW) == "never synced"
+    # a clock-skewed future mtime must not render "synced -3 min ago"
+    assert dashboard.relative_age(base + 600, NOW) == "synced just now"
+    assert dashboard.relative_age(base, "not-a-timestamp") == "synced"
+
+
+def test_header_shows_staleness_at_a_glance():
+    import datetime
+    base = datetime.datetime.fromisoformat(NOW).timestamp()
+    page = _page([_rec(1)], mtime=base - 14 * 60)
+    head = page[:page.index("Needs you")]
+    assert "synced 14 min ago" in head
+    # the absolute stamp stays for precision
+    stamp = datetime.datetime.fromtimestamp(base - 14 * 60).strftime("%Y-%m-%d %H:%M")
+    assert stamp in head
+
+
+def test_header_says_never_synced_with_no_queue_file():
+    page = _page([], mtime=None)
+    assert "never synced" in page

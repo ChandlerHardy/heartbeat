@@ -70,6 +70,20 @@ _TAILNET_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 # The mini does not always have `tailscale` on PATH under launchd.
 _TAILSCALE_FALLBACK_BIN = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
 _BIND_RETRY_SECONDS = 30
+# The dashboard renders queue.json, which only changes when a sweep runs
+# (9am/1pm CT). "Sync" kicks a sweep so a freshly-assigned review request shows
+# up in seconds instead of hours. The sweep runs OUT-OF-PROCESS under its own
+# launchd agent -- see the injected `sweep` edge on the server -- because it
+# needs that agent's env, writes the queue itself, posts its own digest, and
+# takes ~90s, which would block one of this server's request threads.
+# Every sync posts a normal Discord digest (the standard sweep contract), so
+# the throttle is what bounds channel noise, not an accident of timing.
+_SWEEP_MIN_INTERVAL_SECONDS = 60
+# Polling cadence for the page's "has the queue changed yet?" check.
+_MTIME_POLL_SECONDS = 5
+# Give up waiting and reload anyway: a sweep that errors out may never move the
+# mtime, and the user should not be left staring at a spinner.
+_SYNC_FALLBACK_SECONDS = 120
 # Control bytes from a request line must never reach a log file raw -- they can
 # forge log lines or drive a terminal that later tails the file.
 _CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
@@ -474,6 +488,18 @@ a:hover{text-decoration:underline}
 .toggle-btn[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink)}
 .toggle-btn:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
 
+/* ---- sync ---- */
+.btn-sync{
+  appearance:none;font:inherit;font-size:13px;font-weight:600;
+  min-height:34px;padding:7px 14px;border-radius:10px;cursor:pointer;
+  border:1px solid var(--line);background:var(--panel-2);color:var(--ink-2);
+  transition:background .13s ease,color .13s ease,border-color .13s ease;
+}
+.btn-sync:hover{background:var(--line-soft);color:var(--ink);border-color:var(--ink-3)}
+.btn-sync:active{transform:translateY(1px);background:var(--line)}
+.btn-sync:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
+.btn-sync[disabled]{opacity:.55;cursor:progress}
+
 /* ---- sections ---- */
 .section{
   background:var(--panel);border:1px solid var(--line);border-radius:14px;
@@ -611,7 +637,8 @@ try{d.setAttribute('data-layout',window.matchMedia('%(bp)s').matches?'panels':'c
 _BODY_SCRIPT = """
 (function(){
   var root=document.documentElement,KEY='%(key)s',RELOAD_MS=%(reload)d;
-  var inflight=false;
+  var POLL_MS=%(poll)d,SYNC_MAX_MS=%(fallback)d;
+  var inflight=false,syncing=false;
   function scope(){
     return document.querySelector(root.getAttribute('data-layout')==='branches'?'.branches':'.sections');
   }
@@ -671,7 +698,7 @@ _BODY_SCRIPT = """
   // would silently discard the selection under the user's thumb). Reschedule
   // and try again later instead.
   function tick(){
-    if(inflight||selected().length){setTimeout(tick,RELOAD_MS);return;}
+    if(inflight||syncing||selected().length){setTimeout(tick,RELOAD_MS);return;}
     location.reload();
   }
   setTimeout(tick,RELOAD_MS);
@@ -705,9 +732,46 @@ _BODY_SCRIPT = """
     if(!confirm('Approve all '+n.length+' proposed items?')){return;}
     send('/approve-all',n);
   });}
+  // ---- Sync: kick a sweep, then wait for the queue to actually change ----
+  var sync=document.getElementById('sync');
+  function syncDone(label){
+    syncing=false;
+    if(!sync){return;}
+    sync.textContent=label;
+    setTimeout(function(){
+      if(!syncing){sync.disabled=false;sync.textContent='Sync';}
+    },3000);
+  }
+  // Poll the queue mtime rather than guessing how long a sweep takes: reload
+  // the instant it actually changes, and fall back to a plain reload so a
+  // sweep that dies without writing cannot leave a spinner up forever.
+  function pollMtime(before,deadline){
+    if(Date.now()>deadline){location.reload();return;}
+    fetch('/mtime',{cache:'no-store'})
+      .then(function(r){return r.text();})
+      .then(function(t){
+        if(t&&t.trim()&&t.trim()!==before){location.reload();return;}
+        setTimeout(function(){pollMtime(before,deadline);},POLL_MS);
+      })
+      .catch(function(){setTimeout(function(){pollMtime(before,deadline);},POLL_MS);});
+  }
+  if(sync){sync.addEventListener('click',function(){
+    if(syncing||sync.disabled){return;}
+    syncing=true;sync.disabled=true;sync.textContent='syncing…';
+    var before=(sync.getAttribute('data-mtime')||'').trim();
+    fetch('/sweep',{method:'POST',headers:{'X-Worksweep':'approve'}})
+      .then(function(r){
+        if(r.status===202){pollMtime(before,Date.now()+SYNC_MAX_MS);return;}
+        if(r.status===429){syncDone('just synced');return;}
+        syncDone('sync failed');
+      })
+      .catch(function(){syncDone('sync failed');});
+  });}
   marks();refresh();
 })();
-""" % {"key": _LAYOUT_STORAGE_KEY, "reload": _REFRESH_SECONDS * 1000}
+""" % {"key": _LAYOUT_STORAGE_KEY, "reload": _REFRESH_SECONDS * 1000,
+         "poll": _MTIME_POLL_SECONDS * 1000,
+         "fallback": _SYNC_FALLBACK_SECONDS * 1000}
 
 
 def _link(url: str, label: str) -> str:
@@ -897,13 +961,28 @@ def _telemetry_html(records: Sequence[QueueRecord],
     if queue_mtime:
         stamp = datetime.datetime.fromtimestamp(
             queue_mtime).strftime("%Y-%m-%d %H:%M")
-        sweep = f"last sweep {stamp}"
+        # Relative first because that is the question being asked at a glance
+        # ("is this page stale?"); the absolute stamp stays for precision.
+        sweep = f"{relative_age(queue_mtime, now)} · {stamp}"
     else:
-        sweep = "last sweep unknown"
+        sweep = "never synced"
     week = done_this_week(records, now)
     return (f'<div class="sweep">{_e(sweep)}</div>'
             f'<div class="counts">{pills}'
             f'<span class="cnt cnt-week">done this week: {week}</span></div>')
+
+
+def _sync_html(queue_mtime: Optional[float]) -> str:
+    """The header's Sync control.
+
+    Carries the mtime token the page was rendered from, so after kicking a
+    sweep the page can poll GET /mtime and reload the moment the queue actually
+    changes -- rather than guessing a duration or reloading into the same stale
+    view. Lives in the header, so it is present in all three layouts.
+    """
+    return (f'<button type="button" class="btn-sync" id="sync" '
+            f'data-mtime="{_e(mtime_token(queue_mtime))}" '
+            f'title="run a sweep now">Sync</button>')
 
 
 def _bar_html(records: Sequence[QueueRecord]) -> str:
@@ -939,6 +1018,7 @@ def render_page(records: Sequence[QueueRecord], now: str,
     """
     records = list(records)
     sections = partition_sections(records)
+    sync = _sync_html(queue_mtime)
     toggle = "".join(
         f'<button type="button" class="toggle-btn" data-set-layout="{_e(v)}" '
         f'aria-pressed="false">{_e(v.capitalize())}</button>'
@@ -970,7 +1050,7 @@ def render_page(records: Sequence[QueueRecord], now: str,
         '<header class="head">'
         '<div class="brand">🔭 Worksweep</div>'
         f'<div class="toggle" role="group" aria-label="Layout">{toggle}</div>'
-        f'{telemetry}</header>\n'
+        f'{sync}{telemetry}</header>\n'
         f'{content}\n'
         '</div>\n'
         f'{bar}\n'
@@ -987,6 +1067,46 @@ _ERROR_PAGE = ('<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'
 # =============================================================================
 # HTTP surface
 # =============================================================================
+
+def mtime_token(queue_mtime: Optional[float]) -> str:
+    """Stable string form of the queue mtime, for change detection.
+
+    The page embeds the token it was rendered from and polls GET /mtime for a
+    different one. A string compare needs no clock maths on the client and no
+    agreement about float formatting between the two ends -- only that the same
+    function produced both.
+    """
+    if not queue_mtime:
+        return "0"
+    return "%.6f" % queue_mtime
+
+
+def relative_age(queue_mtime: Optional[float], now: str) -> str:
+    """Human "how stale is this page" text, computed server-side.
+
+    Rendered per request so the client needs no clock maths -- and so a phone
+    in a different timezone, or with a skewed clock, still reads the same
+    truth. Deliberately coarse: the point is glanceable staleness, not
+    precision.
+    """
+    if not queue_mtime:
+        return "never synced"
+    try:
+        seconds = datetime.datetime.fromisoformat(now).timestamp() - queue_mtime
+    except (ValueError, TypeError):
+        return "synced"
+    if seconds < 90:
+        # covers small clock skew (a negative age) as well as a fresh sweep
+        return "synced just now"
+    minutes = int(seconds // 60)
+    if minutes < 60:
+        return f"synced {minutes} min ago"
+    hours = int(seconds // 3600)
+    if hours < 24:
+        return f"synced {hours} hr ago"
+    days = int(seconds // 86400)
+    return f"synced {days} day{'' if days == 1 else 's'} ago"
+
 
 def _queue_mtime(path: str) -> Optional[float]:
     try:
@@ -1082,9 +1202,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
         sys.stderr.write(self._log_line(fmt, args) + "\n")
 
     # -- plumbing --------------------------------------------------------
-    def _send(self, code: int, ctype: str, body: bytes) -> None:
+    def _send(self, code: int, ctype: str, body: bytes,
+              headers: Optional[Dict[str, str]] = None) -> None:
         self.send_response(code)
         self.send_header("Content-Type", ctype)
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.send_header("Content-Length", str(len(body)))
         # The page is a local view of private PLA work: never let it be framed
         # or sniffed, and never let a referrer leak an MR title off the tailnet.
@@ -1094,6 +1217,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
+
+    def _json(self, code: int, payload: dict,
+              headers: Optional[Dict[str, str]] = None) -> None:
+        self._send(code, "application/json",
+                   json.dumps(payload).encode("utf-8"), headers=headers)
 
     def _text(self, code: int, message: str) -> None:
         self._send(code, "text/plain; charset=utf-8",
@@ -1134,7 +1262,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     # -- routes ----------------------------------------------------------
     def do_GET(self) -> None:                                  # noqa: N802
-        if self._path() != "/":
+        path = self._path()
+        if path == "/mtime":
+            # Read-only and side-effect free, so no CSRF guard: it leaks only
+            # "when did the queue last change", which the page already shows.
+            # The Sync flow polls this to know when a kicked sweep has landed.
+            self._text(200, mtime_token(_queue_mtime(self.server.queue_path)))
+            return
+        if path != "/":
             self._text(404, "not found")
             return
         qpath = self.server.queue_path
@@ -1149,7 +1284,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:                                 # noqa: N802
         path = self._path()
-        if path not in ("/approve", "/approve-all"):
+        if path not in ("/approve", "/approve-all", "/sweep"):
             self._text(404, "not found")
             return
         if not self._csrf_ok():
@@ -1159,6 +1294,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
         raw = self._body_bytes()
         if raw is None:
             self._text(400, "bad request")
+            return
+
+        if path == "/sweep":
+            # No body: the sweep takes no arguments. `raw` was still read so
+            # the connection is left in a sane state.
+            try:
+                self._sweep()
+            except Exception as e:                 # never crash the agent
+                print(f"worksweep: dashboard sweep failed: {e}", file=sys.stderr)
+                self._json(500, {"started": False, "error": "sweep failed"})
             return
 
         # BOTH routes now carry `{"numbers": [...]}`. For /approve-all those
@@ -1181,6 +1326,50 @@ class DashboardHandler(BaseHTTPRequestHandler):
         except Exception as e:                     # never crash the agent
             print(f"worksweep: dashboard approval failed: {e}", file=sys.stderr)
             self._text(500, "approval failed")
+
+    def _sweep(self) -> None:
+        """Kick a sweep out-of-process, throttled.
+
+        Deliberately does NOT run the sweep here: it belongs to its own launchd
+        agent with its own environment, log files and Discord digest, it writes
+        the queue itself (running it in-process would mean two writers racing on
+        one file), and it takes ~90s, which would pin one of this server's
+        request threads for the duration.
+
+        The throttle bounds Discord noise -- every sweep posts a digest -- and
+        is per-server rather than module-global so the state cannot leak between
+        tests. The lock is held only across the check-and-set, never across the
+        subprocess, so a sync never blocks an approval.
+        """
+        started_at = time.time()
+        with _WRITE_LOCK:
+            elapsed = started_at - getattr(self.server, "sweep_last", 0.0)
+            if elapsed < _SWEEP_MIN_INTERVAL_SECONDS:
+                retry_after = int(_SWEEP_MIN_INTERVAL_SECONDS - elapsed) + 1
+                self._json(429, {"started": False, "retry_after": retry_after},
+                           headers={"Retry-After": str(retry_after)})
+                return
+            self.server.sweep_last = started_at
+
+        sweep = getattr(self.server, "sweep", None)
+        if sweep is None:
+            with _WRITE_LOCK:                      # nothing was started
+                self.server.sweep_last = 0.0
+            self._json(500, {"started": False, "error": "sweep is not wired"})
+            return
+
+        try:
+            sweep()
+        except Exception as e:
+            # Nothing started, so do not hold the user off for a minute over a
+            # failure that produced no digest -- let them retry immediately.
+            with _WRITE_LOCK:
+                self.server.sweep_last = 0.0
+            print(f"worksweep: dashboard could not start a sweep: {e}",
+                  file=sys.stderr)
+            self._json(500, {"started": False, "error": str(e)[:200]})
+            return
+        self._json(202, {"started": True})
 
     def _approve(self, path: str, numbers: Optional[List[int]]) -> None:
         qpath = self.server.queue_path
@@ -1232,7 +1421,8 @@ class _DashboardServer(ThreadingHTTPServer):
 def make_server(address: Tuple[str, int], queue_path: str,
                 post: Optional[Callable[[str, str], None]] = None,
                 webhook: str = "",
-                now: Optional[Callable[[], str]] = None) -> _DashboardServer:
+                now: Optional[Callable[[], str]] = None,
+                sweep: Optional[Callable[[], None]] = None) -> _DashboardServer:
     """Build (but do not start) the dashboard server.
 
     Split out of `serve` so tests can bind port 0 on a thread and shut it down;
@@ -1243,6 +1433,11 @@ def make_server(address: Tuple[str, int], queue_path: str,
     httpd.post = post
     httpd.webhook = webhook
     httpd.now = now or _now
+    # Injected edge: kicking the sweep agent is the CLI's job (it owns the
+    # launchd knowledge), so this module never learns about launchctl and the
+    # tests never spawn anything.
+    httpd.sweep = sweep
+    httpd.sweep_last = 0.0
     return httpd
 
 
@@ -1312,6 +1507,7 @@ def resolve_bind(bind: str,
 def serve(queue_path: str, port: int = DEFAULT_PORT, bind: str = "auto",
           post: Optional[Callable[[str, str], None]] = None,
           webhook: str = "",
+          sweep: Optional[Callable[[], None]] = None,
           run_subprocess: Callable = subprocess.run,
           sleep: Callable[[float], None] = time.sleep,
           max_attempts: int = 0) -> int:
@@ -1343,7 +1539,7 @@ def serve(queue_path: str, port: int = DEFAULT_PORT, bind: str = "auto",
         if address:
             try:
                 httpd = make_server((address, port), queue_path,
-                                    post=post, webhook=webhook)
+                                    post=post, webhook=webhook, sweep=sweep)
             except OSError as e:
                 print(f"worksweep: dashboard cannot bind {address}:{port} "
                       f"({e})", file=sys.stderr)
