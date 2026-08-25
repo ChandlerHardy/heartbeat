@@ -125,7 +125,8 @@ Hard rules:
 - If you mention an item's age, write it as `(Nd)` immediately after that
   item's line, using the age_days column.
 - No greeting, no sign-off, no markdown headers (bold with ** is fine).
-- Keep the entire reply under 1700 bytes UTF-8.
+- Keep the entire reply under 1200 bytes UTF-8. Brevity wins: prefer
+  truncating titles over dropping required items.
 
 Queue:
 """
@@ -220,7 +221,8 @@ def _allowed_numbers(records: List[QueueRecord]) -> set:
 def validate(output: str, records: List[QueueRecord]) -> bool:
     """Deterministic accept/reject gate for LLM output. Rejects (returns
     False, logging why to stderr) unless:
-      - output is non-empty and <= 1700 bytes UTF-8
+      - output is non-empty and <= _MAX_OUTPUT_BYTES (1300) UTF-8 -- the
+        prompt asks for 1200 so a compliant reply always clears the gate
       - output contains no URL and no markdown link syntax at all -- this is
         the injection bound: an untrusted title riding into the prompt can
         make the LLM say almost anything, but it can never turn that into a
