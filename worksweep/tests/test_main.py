@@ -1,5 +1,6 @@
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+import pytest  # noqa: E402
 from worksweep.models import MergeRequest  # noqa: E402
 from worksweep.config import WorksweepConfig  # noqa: E402
 import worksweep.__main__ as wsmain  # noqa: E402
@@ -299,3 +300,169 @@ def test_run_glab_api_raises_when_glab_is_missing():
             ["api", "x"],
             run_subprocess=lambda cmd, **kw: (_ for _ in ()).throw(
                 FileNotFoundError("glab")))
+
+
+# --- _post_discord: a delivery blip is not a sweep failure -------------------
+
+WEBHOOK = "https://discord.com/api/webhooks/1/x"
+
+
+def _http_error(code, retry_after=None):
+    import email.message
+    import urllib.error
+    headers = email.message.Message()
+    if retry_after is not None:
+        headers["Retry-After"] = str(retry_after)
+    return urllib.error.HTTPError(WEBHOOK, code, f"HTTP {code}", headers, None)
+
+
+class _Opener:
+    """Serves a scripted sequence of outcomes to opener.open()."""
+
+    def __init__(self, outcomes):
+        self.outcomes, self.calls = list(outcomes), 0
+
+    def open(self, req, timeout=None):
+        self.calls += 1
+        outcome = self.outcomes[self.calls - 1]
+        if isinstance(outcome, Exception):
+            raise outcome
+
+        class _Resp:
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *a):
+                return False
+
+            def read(self_inner):
+                return b""
+        return _Resp()
+
+
+def _post(outcomes, monkeypatch):
+    """Run _post_discord against scripted outcomes; return (opener, sleeps)."""
+    import urllib.request
+    opener = _Opener(outcomes)
+    sleeps = []
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *a, **k: opener)
+    return opener, sleeps
+
+
+def test_post_succeeds_first_try_without_sleeping(monkeypatch):
+    opener, sleeps = _post([None], monkeypatch)
+    wsmain._post_discord(WEBHOOK, "hi", sleep=sleeps.append)
+    assert opener.calls == 1
+    assert sleeps == []
+
+
+def test_a_503_then_200_succeeds_after_one_retry(monkeypatch):
+    """Falsifying: this is the live failure -- the sweep had already saved its
+    work, then reported ⚠️ because one POST got a 503."""
+    opener, sleeps = _post([_http_error(503), None], monkeypatch)
+    wsmain._post_discord(WEBHOOK, "hi", sleep=sleeps.append)
+    assert opener.calls == 2
+    assert sleeps == [2]                       # first backoff only
+
+
+def test_three_503s_exhaust_the_retries_and_raise(monkeypatch):
+    import pytest
+    opener, sleeps = _post([_http_error(503)] * 3, monkeypatch)
+    with pytest.raises(RuntimeError) as e:
+        wsmain._post_discord(WEBHOOK, "hi", sleep=sleeps.append)
+    assert opener.calls == 3                   # bounded, not forever
+    assert sleeps == [2, 5]                    # slept between, not after the last
+    assert str(e.value).startswith("discord post failed: ")
+
+
+@pytest.mark.parametrize("code", [500, 502, 503, 504])
+def test_every_5xx_is_retried(monkeypatch, code):
+    opener, sleeps = _post([_http_error(code), None], monkeypatch)
+    wsmain._post_discord(WEBHOOK, "hi", sleep=sleeps.append)
+    assert opener.calls == 2
+
+
+def test_a_url_error_is_retried(monkeypatch):
+    """The network-blip case: DNS hiccup, connection reset, timeout."""
+    import urllib.error
+    opener, sleeps = _post(
+        [urllib.error.URLError("connection reset"), None], monkeypatch)
+    wsmain._post_discord(WEBHOOK, "hi", sleep=sleeps.append)
+    assert opener.calls == 2
+    assert sleeps == [2]
+
+
+def test_429_honours_retry_after_and_counts_as_an_attempt(monkeypatch):
+    opener, sleeps = _post([_http_error(429, retry_after=4), None], monkeypatch)
+    wsmain._post_discord(WEBHOOK, "hi", sleep=sleeps.append)
+    assert opener.calls == 2
+    assert sleeps == [4.0]                     # Discord's value, not our backoff
+
+
+def test_429_retry_after_is_capped(monkeypatch):
+    """Falsifying: an unbounded wait would park the sweep for minutes."""
+    opener, sleeps = _post([_http_error(429, retry_after=600), None], monkeypatch)
+    wsmain._post_discord(WEBHOOK, "hi", sleep=sleeps.append)
+    assert sleeps == [15.0]
+
+
+@pytest.mark.parametrize("value", [None, "not-a-number", "-3",
+                                   "Wed, 21 Oct 2026 07:28:00 GMT"])
+def test_429_without_a_usable_retry_after_falls_back_to_backoff(monkeypatch, value):
+    opener, sleeps = _post([_http_error(429, retry_after=value), None], monkeypatch)
+    wsmain._post_discord(WEBHOOK, "hi", sleep=sleeps.append)
+    assert sleeps == [2]
+
+
+@pytest.mark.parametrize("code", [400, 401, 403, 404, 405])
+def test_other_4xx_raises_immediately_with_no_retry(monkeypatch, code):
+    """Falsifying: a malformed body or a revoked webhook never heals by being
+    sent again -- retrying would just triple the latency of a certain failure."""
+    import pytest as _pytest
+    opener, sleeps = _post([_http_error(code)] * 3, monkeypatch)
+    with _pytest.raises(RuntimeError) as e:
+        wsmain._post_discord(WEBHOOK, "hi", sleep=sleeps.append)
+    assert opener.calls == 1
+    assert sleeps == []
+    assert str(e.value).startswith("discord post failed: ")
+
+
+def test_a_bad_webhook_still_raises_before_any_request(monkeypatch):
+    """Validation and the no-redirect opener are untouched by the retry."""
+    import pytest as _pytest
+    opener, sleeps = _post([None], monkeypatch)
+    with _pytest.raises(RuntimeError):
+        wsmain._post_discord("https://evil.example.com/api/webhooks/1/x", "hi",
+                             sleep=sleeps.append)
+    assert opener.calls == 0
+    assert sleeps == []
+
+
+def test_the_no_redirect_opener_is_still_used(monkeypatch):
+    import urllib.request
+    seen = {}
+    real = urllib.request.build_opener
+
+    def spy(*handlers):
+        seen["handlers"] = handlers
+        return _Opener([None])
+    monkeypatch.setattr(urllib.request, "build_opener", spy)
+    wsmain._post_discord(WEBHOOK, "hi", sleep=lambda s: None)
+    assert any(isinstance(h, wsmain._NoRedirect) for h in seen["handlers"])
+
+
+def test_the_sleeper_defaults_to_real_time_sleep():
+    """Injection is for the tests; production must actually wait."""
+    import inspect
+    import time as _time
+    assert (inspect.signature(wsmain._post_discord)
+            .parameters["sleep"].default is _time.sleep)
+
+
+def test_retry_after_parsing():
+    assert wsmain._retry_after_seconds(_http_error(429, 3)) == 3.0
+    assert wsmain._retry_after_seconds(_http_error(429, "2.5")) == 2.5
+    assert wsmain._retry_after_seconds(_http_error(429, 900)) == 15
+    assert wsmain._retry_after_seconds(_http_error(429)) is None
+    assert wsmain._retry_after_seconds(_http_error(503)) is None
+    assert wsmain._retry_after_seconds(object()) is None

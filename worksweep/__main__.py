@@ -19,6 +19,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -42,6 +43,15 @@ _SWEEP_AGENT_LABEL = "com.chandlerhardy.worksweep"
 _KICKSTART_TIMEOUT_SECONDS = 15
 # Marking a GitLab todo done is a WRITE, unlike collectors._run_glab's reads.
 _GLAB_WRITE_TIMEOUT_SECONDS = 30
+# A Discord 503 is a delivery blip, not a sweep failure. Without a retry the
+# whole sweep reported ⚠️ for work it had already completed and saved
+# (2026-08-25, a Sync-triggered sweep). Three attempts total, so a blip costs
+# ~7s and a real outage still fails fast enough to be seen.
+_POST_ATTEMPTS = 3
+_POST_BACKOFF_SECONDS = (2, 5)      # waited after attempt 1, then after 2
+# Discord's own 429 wait is authoritative, but a pathological value must not
+# park the sweep -- 15s is well under the runner's cadence.
+_POST_RETRY_AFTER_CAP_SECONDS = 15
 
 from . import assessor, collectors, curator, devslots, implementer, keepcurrent
 from .approvals import apply_approvals
@@ -109,19 +119,78 @@ def _validate_webhook(webhook: str) -> None:
         raise RuntimeError(f"refusing to post to non-Discord host: {host!r}")
 
 
-def _post_discord(webhook: str, content: str) -> None:
-    """POST the digest to Discord. Raises RuntimeError on a bad host or network failure."""
+def _retry_after_seconds(error) -> Optional[float]:
+    """Discord's `Retry-After` in seconds, capped, or None when unusable.
+
+    Discord sends a number of seconds (sometimes fractional). Anything else --
+    an HTTP-date, junk, a missing header -- yields None so the caller falls back
+    to its own backoff rather than guessing.
+    """
+    try:
+        raw = error.headers.get("Retry-After")
+    except AttributeError:
+        return None
+    if raw is None:
+        return None
+    try:
+        wait = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    if wait < 0:
+        return None
+    return min(wait, _POST_RETRY_AFTER_CAP_SECONDS)
+
+
+def _post_discord(webhook: str, content: str,
+                  sleep: Callable[[float], None] = time.sleep) -> None:
+    """POST the digest to Discord, retrying transient failures.
+
+    Raises RuntimeError on a bad host, a permanent HTTP error, or exhausted
+    retries -- the same shape as before, so every caller's handling is
+    unchanged.
+
+    Retries a 5xx or a URLError (the network blip case): the sweep has already
+    done its work and saved the queue by the time it posts, so failing the
+    whole run over one 503 reports a delivery problem as a work problem.
+    A 429 waits Discord's own `Retry-After` when it sends one, and counts as an
+    attempt. Any OTHER 4xx raises immediately: a malformed request or a revoked
+    webhook never heals by being sent again.
+
+    `sleep` is injected so the tests never actually wait.
+    """
     _validate_webhook(webhook)
     data = json.dumps({"content": content}).encode("utf-8")
     req = urllib.request.Request(
         webhook, data=data,
         headers={"Content-Type": "application/json", "User-Agent": "WorksweepBot/1.0"})
     opener = urllib.request.build_opener(_NoRedirect())
-    try:
-        with opener.open(req, timeout=15) as resp:
-            resp.read()
-    except (urllib.error.HTTPError, urllib.error.URLError) as e:
-        raise RuntimeError(f"discord post failed: {e}")
+
+    last_error = None
+    for attempt in range(1, _POST_ATTEMPTS + 1):
+        wait: Optional[float] = None
+        try:
+            with opener.open(req, timeout=15) as resp:
+                resp.read()
+            return
+        except urllib.error.HTTPError as e:
+            # MUST be caught before URLError -- HTTPError is a subclass of it,
+            # so the reverse order would treat every 4xx as retryable.
+            last_error = e
+            if e.code == 429:
+                wait = _retry_after_seconds(e)
+            elif not 500 <= e.code < 600:
+                raise RuntimeError(f"discord post failed: {e}")
+        except urllib.error.URLError as e:
+            last_error = e
+
+        if attempt == _POST_ATTEMPTS:
+            break
+        if wait is None:
+            wait = _POST_BACKOFF_SECONDS[attempt - 1]
+        print(f"worksweep: discord post attempt {attempt} failed "
+              f"({last_error}); retrying in {wait}s", file=sys.stderr)
+        sleep(wait)
+    raise RuntimeError(f"discord post failed: {last_error}")
 
 
 def _kickstart_sweep(run_subprocess: Callable = subprocess.run) -> None:
