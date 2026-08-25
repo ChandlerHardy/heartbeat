@@ -281,3 +281,12 @@ def test_handoff_lines_render_as_subtext():
     out = format_digest([_wi(1), handoff])
     assert "-# **Handed off (no action):**" in out
     assert "\n-# ✅ **2.**" in out
+
+
+def test_footer_documents_the_blanket_approval():
+    """AC #7: `✅ all` is only discoverable if the digest footer names it."""
+    from worksweep.formatter import _FOOTER
+    assert "✅ all" in _FOOTER
+    # the numbered form stays documented too -- the blanket form is an addition,
+    # not a replacement
+    assert "✅ 1,3" in _FOOTER

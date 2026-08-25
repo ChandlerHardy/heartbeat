@@ -137,3 +137,43 @@ def test_intake_no_bot_token_returns_1(monkeypatch, tmp_path):
     monkeypatch.setattr(wsmain, "_queue_path", lambda: qp)
     monkeypatch.setattr(wsmain, "_cursor_path", lambda: os.path.join(str(tmp_path), "cursor"))
     assert wsmain.main(["intake"]) == 1
+
+
+def test_intake_blanket_approval_saves_once_and_names_every_flipped_item(
+        monkeypatch, tmp_path):
+    """AC #6: a `✅ all` sweep saves the queue exactly once and posts one
+    confirmation naming all N flipped numbers with executor + repo."""
+    qp = os.path.join(str(tmp_path), "queue.json")
+    save_queue(qp, [_rec(1), _rec(2), _rec(3),
+                    _rec(4, status="needs-input"), _rec(5, status="running")])
+    monkeypatch.setattr(wsmain, "load_config", lambda *a, **k: _cfg())
+    monkeypatch.setattr(wsmain, "_queue_path", lambda: qp)
+    monkeypatch.setattr(wsmain, "_cursor_path", lambda: os.path.join(str(tmp_path), "cursor"))
+    monkeypatch.setattr(wsmain, "fetch_messages",
+                        lambda channel_id, bot_token, after=None: [
+                            DiscordMessage(id="100", author_id=USER,
+                                           content="✅ all", timestamp=T)])
+    posted = []
+    monkeypatch.setattr(wsmain, "_post_discord", lambda wh, content: posted.append(content))
+
+    saves = []
+    real_save = wsmain.save_queue
+    monkeypatch.setattr(wsmain, "save_queue",
+                        lambda path, records: (saves.append(path), real_save(path, records))[1])
+
+    assert wsmain.main(["intake"]) == 0
+
+    # exactly one write of the queue file
+    assert saves == [qp]
+
+    out = {r.number: r.item.status for r in load_queue(qp)}
+    assert out == {1: "approved", 2: "approved", 3: "approved",
+                   4: "needs-input", 5: "running"}
+
+    # exactly one confirmation, naming all three flipped numbers with their
+    # executor and repo -- and NOT the parked or running items
+    assert len(posted) == 1
+    for n in (1, 2, 3):
+        assert f"{n} (magi-review pb-www)" in posted[0]
+    assert "4 (" not in posted[0]
+    assert "5 (" not in posted[0]
