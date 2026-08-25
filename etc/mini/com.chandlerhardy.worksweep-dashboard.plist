@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Worksweep dashboard (mini): long-lived HTTP view of the queue + approval
+     buttons, bound to the Tailscale IP on port 8787. Unlike the runner this is
+     a resident server, so: KeepAlive true, RunAtLoad true, no StartInterval. -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.chandlerhardy.worksweep-dashboard</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/chandlerhardy/repos/heartbeat/bin/worksweep.sh</string>
+        <string>dashboard</string>
+    </array>
+    <key>KeepAlive</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/chandlerhardy/bin:/Users/chandlerhardy/.pyenv/shims:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/chandlerhardy</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>/Users/chandlerhardy/heartbeat-reports/worksweep-dashboard.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/chandlerhardy/heartbeat-reports/worksweep-dashboard.err</string>
+</dict>
+</plist>

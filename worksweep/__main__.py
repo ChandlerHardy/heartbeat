@@ -432,11 +432,17 @@ def _dry_run_implement(item, cfg, boxes):
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="worksweep")
-    ap.add_argument("command", nargs="?", choices=["intake", "run"],
+    ap.add_argument("command", nargs="?", choices=["intake", "run", "dashboard"],
                     help="`intake` polls Discord for approval replies; "
-                         "`run` executes one approved magi-review item")
+                         "`run` executes one approved magi-review item; "
+                         "`dashboard` serves the queue view + approval buttons")
     ap.add_argument("--dry-run", action="store_true", help="print to stdout, no Discord")
     ap.add_argument("--discord", action="store_true", help="post digest to Discord")
+    ap.add_argument("--port", type=int, default=8787,
+                    help="dashboard port (default 8787)")
+    ap.add_argument("--bind", default="auto",
+                    help="dashboard bind address; `auto` resolves the Tailscale "
+                         "IP and falls back to 127.0.0.1")
     args = ap.parse_args(argv)
 
     try:
@@ -447,6 +453,14 @@ def main(argv=None) -> int:
 
     if args.command == "intake":
         return _run_intake(cfg)
+
+    if args.command == "dashboard":
+        from . import dashboard as _dashboard
+        # The Discord poster is INJECTED: dashboard.py must not import this
+        # module (this one imports it), and the injection also keeps the
+        # dashboard tests off the network entirely.
+        return _dashboard.serve(_queue_path(), port=args.port, bind=args.bind,
+                                post=_post_discord, webhook=cfg.discord_webhook)
 
     if args.command == "run":
         from . import runner as _runner
