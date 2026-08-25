@@ -254,7 +254,7 @@ def execute(item: WorkItem, cfg,
         raise RunnerError(f"git fetch failed: {(fetch.stderr or '').strip()[-300:]}")
     try:
         proc = run_subprocess(
-            [cfg.claude_bin, "-p", f"/magi:magi-review !{iid} --draft-findings"],  # unattended: stage Warnings as pending drafts, never publish
+            [cfg.claude_bin, "-p", f"/magi:magi-review !{iid} --draft-findings --no-rebuttal"],  # unattended: stage Warnings as pending drafts, never publish
             cwd=checkout, capture_output=True, text=True,
             stdin=subprocess.DEVNULL,  # claude -p blocks/exits 1 waiting on a non-TTY stdin
             timeout=cfg.runner_timeout)

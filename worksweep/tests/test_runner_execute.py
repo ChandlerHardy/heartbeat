@@ -55,7 +55,7 @@ def test_execute_invokes_fetch_then_claude(tmp_path):
     assert sha == "s1" and report.endswith("tribunal-report-mr-4020-2026-08-07.md")
     assert calls[0][0][:3] == ("git", "-C", str(tmp_path / "pb-www"))
     assert calls[1][0][0] == "claude"
-    assert "/magi:magi-review !4020 --draft-findings" in calls[1][0]
+    assert "/magi:magi-review !4020 --draft-findings --no-rebuttal" in calls[1][0]
     assert calls[1][1] == str(tmp_path / "pb-www")
 
 

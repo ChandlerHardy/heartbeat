@@ -582,7 +582,7 @@ def _magi_advisory(checkout: str, cfg, mr_iid: int,
     note = ""
     try:
         proc = _run(
-            [cfg.claude_bin, "-p", f"/magi:magi-review !{mr_iid} --advisory --draft-findings"],
+            [cfg.claude_bin, "-p", f"/magi:magi-review !{mr_iid} --advisory --draft-findings --no-rebuttal"],
             run_subprocess, cwd=checkout, timeout=_MAGI_TIMEOUT)
         if proc.returncode != 0:
             note = (f"magi-review !{mr_iid} exited {proc.returncode}: "
