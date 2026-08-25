@@ -1,6 +1,6 @@
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from worksweep.approvals import parse_approval  # noqa: E402
+from worksweep.approvals import parse_approval, parse_approve_all  # noqa: E402
 
 
 def test_comma_list():
@@ -70,3 +70,43 @@ def test_reversed_range_ignored():
     # a descending range like 5-1 is not expanded; the marker still present so
     # other tokens parse, but this token contributes nothing
     assert parse_approval("✅ 5-1,9") == {9}
+
+
+# --- `✅ all` blanket-approval predicate (decision 1/2, AC #4) ------------------
+
+def test_approve_all_positive_forms():
+    # the marker immediately followed by "all", either marker spelling, any case
+    assert parse_approve_all("✅ all") is True
+    assert parse_approve_all("approve ALL") is True
+    assert parse_approve_all("Approve all") is True
+    assert parse_approve_all("✅ all please") is True
+
+
+def test_chatty_all_is_not_blanket():
+    # THE false positive the adjacency regex exists to kill: marker present and
+    # the word "all" present, but not adjacent -> not a blanket approval.
+    assert parse_approve_all("✅ sounds good, that's all") is False
+    assert parse_approve_all("approve when you can, that's all I need") is False
+
+
+def test_approve_all_requires_the_marker():
+    # "all" with no ✅/approve marker never approves anything
+    assert parse_approve_all("all") is False
+    assert parse_approve_all("all of them look fine") is False
+    assert parse_approve_all("") is False
+
+
+def test_explicit_numbers_beat_all():
+    # decision 2: the word "all" is only a blanket when the message names NO
+    # numbers. `✅ 1,3 all good` is a numbered approval, not a blanket one.
+    assert parse_approve_all("✅ 1,3 all good") is False
+    assert parse_approval("✅ 1,3 all good") == {1, 3}
+
+
+def test_approve_all_requires_whitespace_after_marker():
+    # deliberate consequence of the `\s+` in the pattern (spec'd, not an accident)
+    assert parse_approve_all("✅all") is False
+
+
+def test_all_must_be_a_whole_word():
+    assert parse_approve_all("✅ allocate the reviewer") is False
