@@ -18,9 +18,9 @@ from __future__ import annotations
 
 import dataclasses
 import re
-from typing import List, Set, Tuple
+from typing import List, Optional, Set, Tuple
 
-from .models import DiscordMessage, QueueRecord
+from .models import RUNNABLE_EXECUTORS, DiscordMessage, QueueRecord
 
 # Require an approval marker: the ✅ emoji or the word "approve" (any case).
 # Without it, numbers in the message are ignored.
@@ -94,6 +94,22 @@ def parse_approve_all(text: str) -> bool:
     return not parse_approval(text)
 
 
+def is_blanket_eligible(item) -> bool:
+    """True when a BLANKET approval may flip this item.
+
+    Two conditions, and the executor one is a safety gate, not a nicety:
+    `proposed` AND an executor the runner will actually claim.
+
+    A blanket approve of a `triage`/`mr-hygiene`/`none` item would strand it
+    permanently -- nothing ever claims it, reconcile preserves `approved`, and
+    worksweep has no un-approve path, so the only way back is hand-editing
+    queue.json. A numbered `✅ N` may still flip those items: naming one is a
+    deliberate human choice, and the human can see what they typed.
+    """
+    return (item.status in _APPROVE_ALL_STATUSES
+            and item.executor in RUNNABLE_EXECUTORS)
+
+
 def flip(records: List[QueueRecord], numbers: Set[int], now: str,
          statuses: Tuple[str, ...]) -> Tuple[List[QueueRecord], Set[int]]:
     """Flip every record in `numbers` whose status is in `statuses` to `approved`.
@@ -131,15 +147,27 @@ def approve_numbers(records: List[QueueRecord], numbers: Set[int],
     return flip(records, numbers, now, _APPROVABLE)
 
 
-def approve_all(records: List[QueueRecord],
-                now: str) -> Tuple[List[QueueRecord], Set[int]]:
+def approve_all(records: List[QueueRecord], now: str,
+                numbers: Optional[Set[int]] = None
+                ) -> Tuple[List[QueueRecord], Set[int]]:
     """Blanket approval (`✅ all`, or the dashboard's "Approve all" button).
 
-    Uses `_APPROVE_ALL_STATUSES` -- `proposed` ONLY. This is NOT symmetric with
-    `approve_numbers` and must not be "cleaned up" into symmetry: a blanket yes
-    must never release a `needs-input` item parked on an unanswered question.
+    Flips exactly the records `is_blanket_eligible` accepts: `proposed` AND
+    runnable. NOT symmetric with `approve_numbers`, and must not be "cleaned up"
+    into symmetry -- a blanket yes must never release a `needs-input` item
+    parked on an unanswered question, nor strand a non-runnable one.
+
+    `numbers` scopes the blanket to a caller-supplied set, intersected with
+    what is eligible RIGHT NOW. The dashboard passes the numbers its page
+    actually rendered, so the user approves the set they were shown and
+    consented to: an item that landed between the render and the tap is not
+    swept in silently (it shows up on the next refresh instead). The Discord
+    path passes None, meaning "every eligible record".
     """
-    return flip(records, {r.number for r in records}, now, _APPROVE_ALL_STATUSES)
+    eligible = {r.number for r in records if is_blanket_eligible(r.item)}
+    if numbers is not None:
+        eligible &= set(numbers)
+    return flip(records, eligible, now, _APPROVE_ALL_STATUSES)
 
 
 def apply_approvals(records: List[QueueRecord], messages: List[DiscordMessage],

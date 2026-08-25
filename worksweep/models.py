@@ -51,6 +51,24 @@ class Issue:
     web_url: str
 
 
+# The executors the runner will actually claim (runner.pick_claim is gated to
+# exactly these: runner.py:353 `(_MAGI, _KEEP_CURRENT)` and runner.py:441
+# `(_IMPLEMENT,)`). `triage`, `mr-hygiene` and `none` items are FYI rows a human
+# acts on by hand -- nothing in worksweep ever executes them.
+#
+# This matters because there is no un-approve path: flipping a non-runnable item
+# to `approved` strands it forever (reconcile preserves `approved`, no runner
+# claims it, and only a hand-edit of queue.json gets it back). So the BLANKET
+# approval paths -- Discord `✅ all` and the dashboard's "Approve all" -- gate on
+# this set. A numbered `✅ N` deliberately does not: naming an item is an
+# explicit human choice.
+#
+# Lives here because models.py is the one module with no worksweep imports, so
+# approvals.py and dashboard.py can both reach it without a cycle.
+# test_runnable_executors_matches_the_runner_claim_gate pins it to the runner.
+RUNNABLE_EXECUTORS = ("magi-review", "keep-current", "implement")
+
+
 @dataclass(frozen=True)
 class WorkItem:
     schema_version: int

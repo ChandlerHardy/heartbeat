@@ -224,3 +224,109 @@ def test_approve_numbers_matches_apply_approvals_byte_for_byte():
     via_dashboard, dashboard_newly = approve_numbers(_one_of_each(), {1, 2, 3}, T1)
     assert via_dashboard == via_discord
     assert dashboard_newly == discord_newly == {1, 2}   # 3 is `running`
+
+
+# --- F1: blanket approval gates on RUNNABLE executors -------------------------
+
+# Everything the assessor can emit. The runner claims only the first three
+# (runner.pick_claim at runner.py:353 and :441); the rest are FYI rows a human
+# handles by hand.
+_RUNNABLE = ("magi-review", "keep-current", "implement")
+_NOT_RUNNABLE = ("triage", "mr-hygiene", "none")
+
+
+def _erec(n, executor, status="proposed"):
+    return QueueRecord(number=n, first_seen=T0, last_seen=T0,
+                       item=WorkItem(schema_version=1, id=f"id{n}", repo="pb-www",
+                                     kind="mr", executor=executor, risk="low",
+                                     why="w", web_url="u", sha="abc", status=status))
+
+
+def test_runnable_executors_matches_the_runner_claim_gate():
+    """The constant and the runner's real claim gate must not drift.
+
+    If someone teaches the runner a fourth executor, this fails and points at
+    RUNNABLE_EXECUTORS -- otherwise `✅ all` would silently keep refusing it.
+    """
+    from worksweep import runner
+    from worksweep.models import RUNNABLE_EXECUTORS
+    assert set(RUNNABLE_EXECUTORS) == set(runner._ALL_EXECUTORS)
+    # and the two claim call sites together cover exactly that set
+    assert set(RUNNABLE_EXECUTORS) == {runner._MAGI, runner._KEEP_CURRENT,
+                                       runner._IMPLEMENT}
+
+
+def test_blanket_approval_skips_non_runnable_executors():
+    """F1 (falsifying): a blanket-approved triage/mr-hygiene/none record is a
+    permanently stuck zombie -- nothing claims it and there is no un-approve
+    path. Drop the executor gate and this goes red."""
+    recs = ([_erec(i, ex) for i, ex in enumerate(_RUNNABLE, start=1)]
+            + [_erec(i, ex) for i, ex in enumerate(_NOT_RUNNABLE, start=4)])
+    out, approved = apply_approvals(recs, [_msg(USER, "✅ all")], USER, T1)
+    by = _by_num(out)
+    assert approved == {1, 2, 3}
+    assert {by[n].item.status for n in (1, 2, 3)} == {"approved"}
+    # the three non-runnable ones are untouched and stay actionable
+    assert {n: by[n].item.status for n in (4, 5, 6)} == {
+        4: "proposed", 5: "proposed", 6: "proposed"}
+
+
+def test_numbered_approval_still_approves_a_non_runnable_item():
+    """F1 keeps the numbered path as-is: naming an item is a deliberate human
+    choice, and the human can see exactly what they typed."""
+    recs = [_erec(1, "triage"), _erec(2, "mr-hygiene")]
+    out, approved = apply_approvals(recs, [_msg(USER, "✅ 1,2")], USER, T1)
+    assert approved == {1, 2}
+    assert {r.item.status for r in out} == {"approved"}
+
+
+def test_is_blanket_eligible_is_the_single_gate():
+    from worksweep.approvals import is_blanket_eligible
+    for ex in _RUNNABLE:
+        assert is_blanket_eligible(_erec(1, ex).item) is True
+        assert is_blanket_eligible(_erec(1, ex, "needs-input").item) is False
+        assert is_blanket_eligible(_erec(1, ex, "running").item) is False
+    for ex in _NOT_RUNNABLE:
+        assert is_blanket_eligible(_erec(1, ex).item) is False
+
+
+# --- F2: the blanket set can be scoped to the numbers the client rendered ----
+
+def test_approve_all_scoped_to_client_numbers():
+    """F2: the dashboard sends the numbers its page actually displayed, so the
+    user approves exactly the set they consented to."""
+    recs = [_erec(1, "magi-review"), _erec(2, "magi-review"), _erec(3, "magi-review")]
+    out, approved = approve_all(recs, T1, numbers={1, 3})
+    by = _by_num(out)
+    assert approved == {1, 3}
+    assert by[2].item.status == "proposed"
+
+
+def test_approve_all_scope_is_intersected_with_current_eligibility():
+    """F2 (falsifying): a number the client rendered but that is no longer
+    eligible must NOT be flipped -- the server re-checks against disk state."""
+    recs = [_erec(1, "magi-review"),                       # still eligible
+            _erec(2, "magi-review", "running"),            # runner claimed it since
+            _erec(3, "triage"),                            # never blanket-eligible
+            _erec(4, "magi-review")]                       # eligible, not rendered
+    out, approved = approve_all(recs, T1, numbers={1, 2, 3})
+    by = _by_num(out)
+    assert approved == {1}
+    assert {n: by[n].item.status for n in (1, 2, 3, 4)} == {
+        1: "approved", 2: "running", 3: "proposed", 4: "proposed"}
+
+
+def test_approve_all_with_no_scope_still_means_every_eligible_record():
+    """The Discord `✅ all` path passes no scope."""
+    recs = [_erec(1, "magi-review"), _erec(2, "implement"), _erec(3, "triage")]
+    out, approved = approve_all(recs, T1)
+    assert approved == {1, 2}
+
+
+def test_empty_client_scope_approves_nothing():
+    """An empty rendered set must not be read as 'no scope' -- that would turn
+    a page showing nothing approvable into a full blanket approval."""
+    recs = [_erec(1, "magi-review"), _erec(2, "magi-review")]
+    out, approved = approve_all(recs, T1, numbers=set())
+    assert approved == set()
+    assert {r.item.status for r in out} == {"proposed"}
