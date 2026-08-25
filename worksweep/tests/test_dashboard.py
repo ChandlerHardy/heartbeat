@@ -749,7 +749,7 @@ def test_page_is_self_contained():
 
 
 def test_layout_toggle_offers_exactly_three_views():
-    """AC #29 / #35."""
+    """AC #29 and AC #35: exactly three views, in switcher order."""
     page = _page([_rec(1)])
     views = re.findall(r'data-set-layout="([a-z]+)"', page)
     assert views == ["checklist", "panels", "branches"]
@@ -768,6 +768,11 @@ def test_layout_is_restored_from_localstorage_before_the_first_section():
     assert 'data-layout=' in page[:page.index("<head")]     # server-side initial
     assert "localStorage.setItem" in page
     assert re.search(r'<meta http-equiv="refresh" content="60"', page)
+    # AC #35: `branches` persists exactly like the other two -- the restore
+    # script must accept all three stored values, not just the original pair
+    restore_src = page[restore - 400:page.index("</script>", restore)]
+    for view in ("checklist", "panels", "branches"):
+        assert f"'{view}'" in restore_src, view
 
 
 def test_layout_state_never_rides_in_the_url():
