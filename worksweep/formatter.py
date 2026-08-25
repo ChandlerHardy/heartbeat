@@ -109,18 +109,50 @@ def _item_line(n: int, it: WorkItem, first_seen: Optional[str] = None,
     return line
 
 
-_HANDOFF_HEADER = "**Handed off (no action):**"
+_HANDOFF_HEADER = "-# **Handed off (no action):**"
 
 
-def _group_handoff_last(numbered: List[tuple]) -> List[tuple]:
-    """Split (number, item, first_seen?) tuples into (non_handoff, handoff),
-    each preserving relative order. Numbers are untouched (stable-numbering
-    contract) -- only render order moves handoff items to a trailing group,
-    so the curator/reader can tell "ready to merge, no action" apart from
-    the actionable list."""
-    non_handoff = [t for t in numbered if t[1].kind != "handoff"]
+def _is_auto_merge(it: WorkItem) -> bool:
+    """keep-current items flow without a ✅ (cfg.auto_approve) -- in the
+    digest they collapse to one informational line instead of one line each.
+    A `needs-input` keep-current item stays in the actionable list: it halted
+    on a human question and IS someone's work."""
+    return it.executor == "keep-current" and it.status != "needs-input"
+
+
+def _split_groups(numbered: List[tuple]) -> tuple:
+    """Split (number, item, first_seen?) tuples into (actionable, auto,
+    handoff), each preserving relative order. Numbers are untouched
+    (stable-numbering contract) -- only render placement changes."""
+    actionable = [t for t in numbered
+                  if t[1].kind != "handoff" and not _is_auto_merge(t[1])]
+    auto = [t for t in numbered if _is_auto_merge(t[1])]
     handoff = [t for t in numbered if t[1].kind == "handoff"]
-    return non_handoff, handoff
+    return actionable, auto, handoff
+
+
+def _ref_link(it: WorkItem) -> str:
+    """`[#4082](url)` masked link for an item, or `#?` when it has no URL."""
+    if not it.web_url:
+        return "#?"
+    ref = it.web_url.rstrip("/").rsplit("/", 1)[-1]
+    return f"[#{ref}]({it.web_url})"
+
+
+def _auto_merge_line(auto: List[tuple]) -> str:
+    """ONE subtext line for every auto-flowing keep-current item -- they need
+    no approval and no per-item attention, so they must not crowd the list."""
+    refs = ", ".join(_ref_link(t[1]) for t in auto)
+    return f"-# 🔄 auto-merging master into {len(auto)} branch(es): {refs}"
+
+
+def _digest_header(actionable, auto, handoff) -> str:
+    bits = [f"{len(actionable)} need you"]
+    if auto:
+        bits.append(f"{len(auto)} auto-merging")
+    if handoff:
+        bits.append(f"{len(handoff)} handed off")
+    return f"{_HEADER} — {' · '.join(bits)}:"
 
 
 def _numbered(items: List[WorkItem]) -> List[tuple]:
@@ -152,7 +184,8 @@ def _format_messages_numbered(numbered: List[tuple],
     if not numbered:
         return [_ALL_CLEAR]
     cap = max_bytes - _LABEL_RESERVE
-    head = f"{_HEADER} — {len(numbered)} item(s) need you:"
+    actionable, auto, handoff = _split_groups(numbered)
+    head = _digest_header(actionable, auto, handoff)
     if preamble:
         head += f"\n{preamble}"
     cont = f"{_HEADER} *(cont.)*"
@@ -168,8 +201,7 @@ def _format_messages_numbered(numbered: List[tuple],
         else:
             cur = candidate
 
-    non_handoff, handoff = _group_handoff_last(numbered)
-    for item_tuple in non_handoff:
+    for item_tuple in actionable:
         n = item_tuple[0]
         it = item_tuple[1]
         first_seen = item_tuple[2] if len(item_tuple) > 2 else None
@@ -178,14 +210,17 @@ def _format_messages_numbered(numbered: List[tuple],
         line = _truncate_bytes(_item_line(n, it, first_seen=first_seen, now=now),
                                max_bytes - 80)
         _append_line(line)
+    if auto:
+        _append_line(_truncate_bytes(_auto_merge_line(auto), max_bytes - 80))
     if handoff:
         _append_line(_HANDOFF_HEADER)
         for item_tuple in handoff:
             n = item_tuple[0]
             it = item_tuple[1]
             first_seen = item_tuple[2] if len(item_tuple) > 2 else None
-            line = _truncate_bytes(_item_line(n, it, first_seen=first_seen, now=now),
-                                   max_bytes - 80)
+            line = _truncate_bytes(
+                "-# " + _item_line(n, it, first_seen=first_seen, now=now),
+                max_bytes - 80)
             _append_line(line)
     with_footer = f"{cur}\n\n{_FOOTER}"
     if len(with_footer.encode("utf-8")) <= cap:
@@ -204,22 +239,24 @@ def _format_digest_numbered(numbered: List[tuple], now: Optional[str] = None,
                             preamble: Optional[str] = None) -> str:
     if not numbered:
         return _ALL_CLEAR
-    lines = [f"{_HEADER} — {len(numbered)} item(s) need you:"]
+    actionable, auto, handoff = _split_groups(numbered)
+    lines = [_digest_header(actionable, auto, handoff)]
     if preamble:
         lines.append(preamble)
-    non_handoff, handoff = _group_handoff_last(numbered)
-    for item_tuple in non_handoff:
+    for item_tuple in actionable:
         n = item_tuple[0]
         it = item_tuple[1]
         first_seen = item_tuple[2] if len(item_tuple) > 2 else None
         lines.append(_item_line(n, it, first_seen=first_seen, now=now))
+    if auto:
+        lines.append(_auto_merge_line(auto))
     if handoff:
         lines.append(_HANDOFF_HEADER)
         for item_tuple in handoff:
             n = item_tuple[0]
             it = item_tuple[1]
             first_seen = item_tuple[2] if len(item_tuple) > 2 else None
-            lines.append(_item_line(n, it, first_seen=first_seen, now=now))
+            lines.append("-# " + _item_line(n, it, first_seen=first_seen, now=now))
     lines.append(f"\n{_FOOTER}")
     return "\n".join(lines)
 

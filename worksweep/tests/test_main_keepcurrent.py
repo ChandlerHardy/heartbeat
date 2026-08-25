@@ -72,7 +72,9 @@ def test_stale_mr_over_threshold_produces_a_stale_item():
                                  diverged_commits=lambda repo, iid: 7))
     assert rc == 0
     joined = "\n".join(_texts(posts))
-    assert "commits behind master" in joined
+    # stale items render as ONE collapsed auto-merge line (2026-08-24), not
+    # per-item "commits behind master" lines
+    assert "auto-merging master into" in joined
     assert "4020" in joined
 
 
@@ -82,7 +84,7 @@ def test_stale_mr_under_threshold_produces_nothing():
                                  diverged_commits=lambda repo, iid: 2))
     assert rc == 0
     joined = "\n".join(_texts(posts))
-    assert "commits behind master" not in joined
+    assert "auto-merging master into" not in joined
 
 
 def test_handed_off_mr_never_gets_a_diverged_commits_call():
@@ -122,7 +124,7 @@ def test_diverged_commits_failure_for_one_mr_does_not_kill_the_sweep():
     assert rc == 0
     joined = "\n".join(_texts(posts))
     assert "4021" in joined
-    assert "commits behind master" in joined
+    assert "auto-merging master into" in joined
 
 
 # --------------------------------------------------------------------------

@@ -105,10 +105,11 @@ Write the briefing as plain text with these rules, in this order:
    and whose status is `proposed` or `approved`. Format each as
    `{number}. {repo} !{ref} -- {short title} -- {why}`.
 2. "Feedback / CI on your MRs:" -- one line per remaining item whose executor
-   is `triage` and whose kind is `feedback` or `ci_red`, OR whose kind is
-   `stale` (executor `keep-current` -- the branch fell behind master;
-   seneschal merges it up automatically, no ✅ needed -- mark these lines
-   with a trailing "(auto)"), same line format.
+   is `triage` and whose kind is `feedback` or `ci_red`, same line format.
+2a. If any items have kind `stale` (executor `keep-current`), write exactly
+   ONE trailing line for ALL of them together: "Auto-merging master into:
+   !{ref}, !{ref}, ..." -- seneschal merges these without a ✅. Never give
+   stale items their own lines and never cite their queue numbers.
 2b. "Assigned issues:" -- one line per item whose kind is `issue`, format
    `{number}. {repo} #{ref} -- {short title}` (an assigned issue is a
    first-class ask; NEVER fold it into the low-priority line). If the
@@ -284,7 +285,9 @@ def curate(records: List[QueueRecord], now: str,
 
     Never raises. Returns None (fall back to the raw digest) when: there are
     no records, run_llm raises/times out, run_llm returns something that
-    isn't a usable string, or the output fails validate().
+    isn't a usable string, or the output fails validate() on BOTH attempts
+    -- one retry (2026-08-24), because rejection is usually sampling
+    variance (a hallucinated number), and a fresh sample tends to pass.
 
     `preamble` (M4 Task F) is forwarded to build_prompt as dev-slot context
     -- see build_prompt's docstring."""
@@ -292,15 +295,19 @@ def curate(records: List[QueueRecord], now: str,
         return None
     try:
         prompt = build_prompt(records, now, preamble=preamble)
-        output = run_llm(prompt)
-        if not isinstance(output, str):
-            print("worksweep: curator LLM returned non-string output",
-                  file=sys.stderr)
-            return None
-        output = output.strip()
-        if not validate(output, records):
-            return None
-        return output
+        for attempt in (1, 2):
+            output = run_llm(prompt)
+            if not isinstance(output, str):
+                print("worksweep: curator LLM returned non-string output",
+                      file=sys.stderr)
+                return None
+            output = output.strip()
+            if validate(output, records):
+                return output
+            if attempt == 1:
+                print("worksweep: curator retrying after validation failure",
+                      file=sys.stderr)
+        return None
     except Exception as e:
         print(f"worksweep: curator LLM call failed: "
               f"{type(e).__name__}: {e}", file=sys.stderr)

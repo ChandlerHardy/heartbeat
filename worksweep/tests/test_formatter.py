@@ -236,3 +236,44 @@ def test_format_messages_and_digest_m1_path_accept_preamble():
     assert out.splitlines()[1] == _SLOT_LINE
     msgs = format_messages([_wi(1)], preamble=_SLOT_LINE)
     assert msgs[0].splitlines()[1] == _SLOT_LINE
+
+
+# --------------------------------------------------------------------------
+# 2026-08-24: auto-flowing keep-current items collapse to one subtext line
+# --------------------------------------------------------------------------
+
+def _stale_wi(i, status="approved"):
+    import dataclasses
+    return dataclasses.replace(
+        _wi(i, executor="keep-current", why="7 commits behind master"),
+        kind="stale", status=status)
+
+
+def test_keep_current_items_collapse_to_one_auto_line():
+    out = format_digest([_wi(1), _stale_wi(2), _stale_wi(3)])
+    assert "auto-merging master into 2 branch(es)" in out
+    assert "[#2]" in out and "[#3]" in out
+    assert "7 commits behind master" not in out       # no per-item lines
+    assert out.count("auto-merging master into") == 1
+
+
+def test_header_counts_actionable_auto_and_handoff_separately():
+    import dataclasses
+    handoff = dataclasses.replace(_wi(4), kind="handoff")
+    out = format_digest([_wi(1), _stale_wi(2), handoff])
+    assert "1 need you · 1 auto-merging · 1 handed off" in out
+
+
+def test_needs_input_keep_current_stays_actionable():
+    out = format_digest([_stale_wi(2, status="needs-input")])
+    assert "auto-merging" not in out
+    assert "`keep-current`" in out                    # renders as its own line
+    assert "7 commits behind master" in out
+
+
+def test_handoff_lines_render_as_subtext():
+    import dataclasses
+    handoff = dataclasses.replace(_wi(4), kind="handoff")
+    out = format_digest([_wi(1), handoff])
+    assert "-# **Handed off (no action):**" in out
+    assert "\n-# ✅ 2." in out

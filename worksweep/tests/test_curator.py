@@ -419,3 +419,29 @@ def test_linkify_never_invents_urls_from_text():
     # a record whose web_url is empty contributes no link
     recs = [_rec_with_url(1, "review:pb-www!4010", "")]
     assert linkify("!4010", recs) == "!4010"
+
+
+def test_curate_retries_once_after_validation_failure():
+    recs = _queue()
+    good = ("1. pb-www !4061 — review requested\n"
+            "3 low-priority items held in queue: 2, 43, 44")
+    calls = []
+
+    def llm(prompt):
+        calls.append(prompt)
+        return "held: 999" if len(calls) == 1 else good
+
+    assert curate(recs, NOW, run_llm=llm) == good
+    assert len(calls) == 2
+
+
+def test_curate_gives_up_after_two_failed_attempts():
+    recs = _queue()
+    calls = []
+
+    def llm(prompt):
+        calls.append(prompt)
+        return "held: 999"
+
+    assert curate(recs, NOW, run_llm=llm) is None
+    assert len(calls) == 2
