@@ -724,3 +724,36 @@ def test_open_draft_mr_raises_only_when_both_forms_miss():
     with pytest.raises(RunnerError, match="could not parse"):
         open_draft_mr("/co", 1, "T", "b", "br",
                       _glab_run(create_out="all done, nothing numeric here\n"))
+
+
+def test_issue_iid_prefers_the_item_id():
+    """The primary id-based parse is untouched by the work_items fix."""
+    assert implementer.issue_iid(_item(iid=1775)) == 1775
+
+
+@pytest.mark.parametrize("url", [
+    "https://gitlab.com/performancelivestock/pb-www/-/work_items/869",
+    "https://gitlab.com/performancelivestock/pb-www/-/issues/869",
+])
+def test_issue_iid_falls_back_to_either_url_form(url):
+    """GitLab now serves issues as /-/work_items/<iid>. The web_url FALLBACK
+    must accept both spellings (mirrors curator.py:377).
+
+    Latent rather than live today -- assessor-built records always carry the
+    `issue:<repo>#<iid>` id the primary parse reads -- but a record that ever
+    reaches here without that id would raise instead of resolving.
+    """
+    item = WorkItem(schema_version=1, id="no-iid-here", repo="pb-www",
+                    kind="issue", executor="implement", risk="low",
+                    why="assigned issue", web_url=url, sha="", title="t")
+    assert implementer.issue_iid(item) == 869
+
+
+def test_issue_iid_still_raises_when_there_is_no_iid_anywhere():
+    """The raise is deliberate: a wrong iid would run /rubric:do against
+    someone else's issue."""
+    item = WorkItem(schema_version=1, id="todo:x", repo="pb-www", kind="todo",
+                    executor="triage", risk="low", why="w",
+                    web_url="https://gitlab.com/dashboard/todos", sha="", title="t")
+    with pytest.raises(RunnerError):
+        implementer.issue_iid(item)

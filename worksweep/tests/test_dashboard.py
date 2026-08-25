@@ -1412,3 +1412,87 @@ def test_timed_reload_skips_while_a_selection_or_post_is_live():
     js = _page([_rec(1)]).replace(" ", "").replace("\n", "")
     assert "if(inflight||selected().length){setTimeout(tick,RELOAD_MS);return;}" in js
     assert "location.reload();" in js
+
+
+# =============================================================================
+# Fix Mode: Attempt 2 -- GitLab now serves issues as /-/work_items/<iid>
+# =============================================================================
+
+# The exact shape Chandler hit on the deployed dashboard: an assigned-issue
+# record whose web_url came back from the GitLab API as a work item, not an
+# issue. `implement` rows are ALL issue-kind (assessor.py:216), so this was
+# every implement row on the page rendering with no link at all.
+_WORK_ITEM_URL = "https://gitlab.com/performancelivestock/pb-www/-/work_items/869"
+_ISSUE_URL = "https://gitlab.com/performancelivestock/pb-www/-/issues/869"
+
+
+@pytest.mark.parametrize("url", [_WORK_ITEM_URL, _ISSUE_URL])
+def test_issue_iid_is_read_from_both_url_forms(url):
+    """Both spellings are the same issue -- GitLab just changed which one it
+    hands back. Mirrors curator.py:377, which was already tolerant."""
+    assert dashboard.issue_iid_of(_rec(1, web_url=url).item) == 869
+    assert dashboard.ref_of(_rec(1, web_url=url).item) == "#869"
+
+
+@pytest.mark.parametrize("url", [_WORK_ITEM_URL, _ISSUE_URL])
+def test_issue_row_renders_a_linked_ref(url):
+    """Falsifying: revert _ISSUE_URL_RE to /-/issues/ only and the work_items
+    case renders no ref and no anchor -- the live bug."""
+    page = _page([_rec(1, kind="issue", executor="implement", web_url=url)])
+    assert f'<a href="{url}">#869</a>' in page
+    assert ">#869<" in page
+
+
+@pytest.mark.parametrize("url", [_WORK_ITEM_URL, _ISSUE_URL])
+def test_issue_url_links_in_a_branches_card_header(url):
+    """The Branches card header links every issue in the workstream (AC #38)."""
+    recs = [_br(1, branch="chardy/869-x", web_url=url),
+            _br(2, branch="chardy/869-x",
+                web_url="https://gitlab.com/performancelivestock/pb-www/"
+                        "-/merge_requests/4821")]
+    groups, ungrouped = dashboard.group_by_workstream(recs)
+    assert ungrouped == []
+    assert len(groups) == 1
+    assert groups[0].issue_links == (url,)
+    assert groups[0].mr_links == (
+        "https://gitlab.com/performancelivestock/pb-www/-/merge_requests/4821",)
+    page = _page(recs)
+    assert f'<a href="{url}">#869</a>' in page
+    assert ">!4821<" in page
+
+
+def test_a_work_item_url_is_not_mistaken_for_an_mr():
+    """The two ref kinds must stay distinct: a work item is `#`, never `!`."""
+    item = _rec(1, web_url=_WORK_ITEM_URL).item
+    assert dashboard.mr_iid_of(item) == 0
+    assert dashboard.ref_of(item) == "#869"
+
+
+def test_work_item_records_still_group_and_stay_ungrouped_correctly():
+    """A work_items URL carries no MR affinity, so a record with one and no
+    branch still lands in Ungrouped (AC #37) rather than inventing a token."""
+    groups, ungrouped = dashboard.group_by_workstream(
+        [_br(1, branch="", web_url=_WORK_ITEM_URL)])
+    assert groups == []
+    assert [r.number for r in ungrouped] == [1]
+
+
+@pytest.mark.parametrize("url,expect_ref", [
+    # a project whose NAME is issues/work_items is still an MR URL: the regex
+    # requires digits immediately after the segment, so `/issues/-/merge...`
+    # cannot match. Guards the widened pattern against over-matching.
+    ("https://gitlab.com/group/issues/-/merge_requests/5", "!5"),
+    ("https://gitlab.com/group/work_items/-/merge_requests/7", "!7"),
+    ("https://gitlab.com/group/issues-tracker/-/merge_requests/5", "!5"),
+    ("https://gitlab.com/performancelivestock/pb-www/-/merge_requests/4821", "!4821"),
+    ("https://gitlab.com/dashboard/todos", ""),
+    ("", ""),
+])
+def test_widened_issue_regex_does_not_over_match(url, expect_ref):
+    assert dashboard.ref_of(_rec(1, web_url=url).item) == expect_ref
+
+
+def test_issue_ref_survives_a_url_with_a_trailing_path():
+    """A designs/notes sub-path still resolves to the parent issue."""
+    item = _rec(1, web_url="https://gl/g/p/-/work_items/869/designs/a.png").item
+    assert dashboard.ref_of(item) == "#869"

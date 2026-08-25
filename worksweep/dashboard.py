@@ -86,7 +86,13 @@ SECTION_NAMES = (_NEEDS_YOU, _IN_PROGRESS, _AUTO, _RECENTLY_DONE, _ERRORS)
 # S12: the same `web_url` -> MR iid derivation keepcurrent.iid_of uses. The
 # regex is copied; its `raise` deliberately is NOT (see mr_iid_of).
 _MR_URL_RE = re.compile(r"/merge_requests/(\d+)")
-_ISSUE_URL_RE = re.compile(r"/-/issues/(\d+)")
+# GitLab serves the same issue under BOTH spellings and has started handing
+# back `/-/work_items/<iid>` from the API (live queue records confirm). Every
+# `implement` row is issue-kind (assessor.py:216), so matching only
+# `/-/issues/` silently dropped the link from every one of them on the
+# deployed page. Tolerant of both, mirroring curator.py:377; the rendered
+# label stays `#<iid>` either way, since it is the same issue.
+_ISSUE_URL_RE = re.compile(r"/(?:issues|work_items)/(\d+)")
 _LINKABLE_SCHEMES = ("https://", "http://")
 
 

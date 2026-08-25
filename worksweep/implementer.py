@@ -100,7 +100,10 @@ def issue_iid(item: WorkItem) -> int:
     m = re.search(r"#(\d+)$", item.id or "")
     if m:
         return int(m.group(1))
-    m = re.search(r"/issues/(\d+)", item.web_url or "")
+    # Both spellings: GitLab now returns `/-/work_items/<iid>` for issues
+    # (mirrors curator.py:377 and dashboard._ISSUE_URL_RE). The id-based
+    # parse above is the primary path and is unchanged.
+    m = re.search(r"/(?:issues|work_items)/(\d+)", item.web_url or "")
     if m:
         return int(m.group(1))
     raise RunnerError(f"cannot find issue iid in {item.id!r} / {item.web_url!r}")
