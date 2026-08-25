@@ -10,6 +10,16 @@ _DEV_URL_RE = re.compile(
     r"https?://[^\s)]*[-.]dev\d*[^\s)]*\.performancebeef\.com", re.I)
 
 
+def has_dev_url(text: str) -> bool:
+    """True when `text` already carries a dev-server link.
+
+    The one detector for Chandler's MR convention: it decides both whether an
+    MR needs parking and whether the park executor should prepend a header, so
+    the two cannot disagree and re-parking cannot stack duplicate headers.
+    """
+    return bool(_DEV_URL_RE.search(text or ""))
+
+
 @dataclass(frozen=True)
 class MergeRequest:
     repo: str
@@ -33,7 +43,7 @@ class MergeRequest:
 
     @property
     def dev_url_present(self) -> bool:
-        return bool(_DEV_URL_RE.search(self.description or ""))
+        return has_dev_url(self.description)
 
 
 @dataclass(frozen=True)
@@ -70,7 +80,7 @@ class Issue:
 # Lives here because models.py is the one module with no worksweep imports, so
 # approvals.py and dashboard.py can both reach it without a cycle.
 # test_runnable_executors_matches_the_runner_claim_gate pins it to the runner.
-RUNNABLE_EXECUTORS = ("magi-review", "keep-current", "implement")
+RUNNABLE_EXECUTORS = ("magi-review", "keep-current", "implement", "park")
 
 
 @dataclass(frozen=True)
@@ -79,7 +89,9 @@ class WorkItem:
     id: str
     repo: str
     kind: str       # "mr" | "review_request" | "feedback" | "ci_red" | "todo" | "issue"
-    executor: str   # "magi-review" | "mr-hygiene" | "triage" | "implement"
+    executor: str   # "magi-review" | "keep-current" | "implement" | "park"
+                    # (runnable, see RUNNABLE_EXECUTORS) | "triage" |
+                    # "mr-hygiene" | "none" (FYI rows a human handles)
     risk: str       # "low" | "medium" | "high"
     why: str
     web_url: str

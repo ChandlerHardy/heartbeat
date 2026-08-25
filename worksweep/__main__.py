@@ -477,6 +477,54 @@ def _execute_implement(item, cfg, boxes):
         http_get=http_status)
 
 
+def _run_glab_api(args, body=None, run_subprocess: Callable = subprocess.run):
+    """The park executor's glab edge: one `glab api` call, optionally with a
+    raw JSON request body on stdin.
+
+    `--input -` rather than `-f key=value` because glab's own help is explicit
+    that "neither --field nor --raw-field parses JSON arrays or objects" -- an
+    MR description full of newlines and markdown must go over as a JSON body or
+    it arrives mangled (the 2026-08 array bug).
+    """
+    try:
+        result = run_subprocess(
+            ["glab", *args],
+            input=body if body is not None else None,
+            stdin=None if body is not None else subprocess.DEVNULL,
+            capture_output=True, text=True,
+            timeout=_GLAB_WRITE_TIMEOUT_SECONDS)
+    except Exception as e:
+        raise RuntimeError(f"glab {' '.join(args)}: {e}")
+    if result.returncode != 0:
+        raise RuntimeError(f"glab {' '.join(args)} exited "
+                           f"{result.returncode}: "
+                           f"{(result.stderr or '').strip()[:200] or 'no output'}")
+    return result.stdout
+
+
+def _execute_park(item, cfg):
+    """Real park edge: probe/classify the boxes, then ssh + http + glab.
+
+    Boxes are re-probed here (not trusted from the digest) for the same reason
+    the implement pass does it: the runner fires minutes to hours after the
+    sweep that proposed the item, and a box that was free then may not be now.
+    """
+    from . import park
+    return park.execute(
+        item, cfg, _implement_boxes(cfg),
+        run_ssh=lambda host, command: run_ssh(
+            host, command, timeout=_SSH_SYNC_TIMEOUT_SECONDS),
+        http_get=http_status,
+        run_glab=_run_glab_api)
+
+
+def _dry_run_park(item, cfg):
+    """--dry-run must never take a box or rewrite an MR."""
+    from . import park
+    return park.ParkResult(iid=0, box_name="(dry-run)", dev_url="",
+                           result_sha=item.sha, description_updated=False)
+
+
 def _execute_keep_current(item, cfg):
     """Real keep-current edge: subprocess + two ssh budgets + an http probe.
     `cfg.dev_boxes` is the raw box-config list — keepcurrent.execute probes
@@ -571,6 +619,7 @@ def main(argv=None) -> int:
                                   else _execute_implement),
             "execute_keep_current": (_dry_run_keep_current if args.dry_run
                                      else _execute_keep_current),
+            "execute_park": (_dry_run_park if args.dry_run else _execute_park),
         }
         return _runner.run_once(cfg, deps)
 

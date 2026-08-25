@@ -231,7 +231,7 @@ def test_approve_numbers_matches_apply_approvals_byte_for_byte():
 # Everything the assessor can emit. The runner claims only the first three
 # (runner.pick_claim at runner.py:353 and :441); the rest are FYI rows a human
 # handles by hand.
-_RUNNABLE = ("magi-review", "keep-current", "implement")
+_RUNNABLE = ("magi-review", "keep-current", "implement", "park")
 _NOT_RUNNABLE = ("triage", "mr-hygiene", "none")
 
 
@@ -253,22 +253,23 @@ def test_runnable_executors_matches_the_runner_claim_gate():
     assert set(RUNNABLE_EXECUTORS) == set(runner._ALL_EXECUTORS)
     # and the two claim call sites together cover exactly that set
     assert set(RUNNABLE_EXECUTORS) == {runner._MAGI, runner._KEEP_CURRENT,
-                                       runner._IMPLEMENT}
+                                       runner._IMPLEMENT, runner._PARK}
 
 
 def test_blanket_approval_skips_non_runnable_executors():
     """F1 (falsifying): a blanket-approved triage/mr-hygiene/none record is a
     permanently stuck zombie -- nothing claims it and there is no un-approve
     path. Drop the executor gate and this goes red."""
-    recs = ([_erec(i, ex) for i, ex in enumerate(_RUNNABLE, start=1)]
-            + [_erec(i, ex) for i, ex in enumerate(_NOT_RUNNABLE, start=4)])
+    runnable = list(enumerate(_RUNNABLE, start=1))
+    not_runnable = list(enumerate(_NOT_RUNNABLE, start=len(_RUNNABLE) + 1))
+    recs = ([_erec(i, ex) for i, ex in runnable]
+            + [_erec(i, ex) for i, ex in not_runnable])
     out, approved = apply_approvals(recs, [_msg(USER, "✅ all")], USER, T1)
     by = _by_num(out)
-    assert approved == {1, 2, 3}
-    assert {by[n].item.status for n in (1, 2, 3)} == {"approved"}
-    # the three non-runnable ones are untouched and stay actionable
-    assert {n: by[n].item.status for n in (4, 5, 6)} == {
-        4: "proposed", 5: "proposed", 6: "proposed"}
+    assert approved == {i for i, _ in runnable}
+    assert {by[i].item.status for i, _ in runnable} == {"approved"}
+    # every non-runnable one is untouched and stays actionable
+    assert {by[i].item.status for i, _ in not_runnable} == {"proposed"}
 
 
 def test_numbered_approval_still_approves_a_non_runnable_item():

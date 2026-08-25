@@ -61,13 +61,13 @@ def test_own_mr_magi_item_when_no_history():
 def test_own_draft_mr_missing_devurl_no_hygiene_item():
     mr = _mr(author="chandler.hardy", is_draft=True, description="no link")
     items = assess_own_mr(mr, "chandler.hardy", has_magi=lambda r, i, s: True)
-    assert not any(i.executor == "mr-hygiene" for i in items)
+    assert not any(i.executor == "park" for i in items)
 
 
 def test_own_non_draft_mr_missing_devurl_still_gets_hygiene_item():
     mr = _mr(author="chandler.hardy", is_draft=False, description="no link")
     items = assess_own_mr(mr, "chandler.hardy", has_magi=lambda r, i, s: True)
-    assert any(i.executor == "mr-hygiene" for i in items)
+    assert any(i.executor == "park" for i in items)
 
 
 # Task A.3 — issue-covered-by-MR suppression

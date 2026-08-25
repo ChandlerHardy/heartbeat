@@ -114,11 +114,16 @@ def assess_own_mr(mr: MergeRequest, username: str,
     # Drafts often don't have a dev link yet (the environment isn't assigned/
     # ready until the MR leaves draft) -- exempt them from the hygiene nag.
     if not mr.is_draft and not mr.dev_url_present:
+        # `park`, not the old inert `mr-hygiene`: the runner can actually fix
+        # this one (put the branch on a free box and write the link back), so
+        # it is real approvable work rather than a nag that sat on the
+        # dashboard forever. `branch` is required by the executor and comes
+        # from the MR itself, exactly as assess_stale does it.
         items.append(WorkItem(
             schema_version=1, id=f"hygiene-devurl:{mr.repo}!{mr.iid}",
-            repo=mr.repo, kind="mr", executor="mr-hygiene", risk="low",
+            repo=mr.repo, kind="mr", executor="park", risk="low",
             why="description missing dev-server link", web_url=mr.web_url,
-            sha=mr.sha, title=mr.title))
+            sha=mr.sha, title=mr.title, branch=mr.source_branch))
     if mr.changes_requested or mr.unresolved_count > 0:
         n = mr.unresolved_count
         why = "changes requested" if mr.changes_requested else ""

@@ -26,17 +26,20 @@ def test_mine_with_magi_does_not_propose_magi_review():
     assert not any(i.executor == "magi-review" for i in items)
 
 
-def test_missing_dev_url_proposes_hygiene():
+def test_missing_dev_url_proposes_park():
+    """The old inert `mr-hygiene` nag is now runnable `park` work."""
     items = assess_mr(_mr(author="chandler.hardy", description="no link"),
                       "chandler.hardy", has_magi=lambda r, i, s: True)
-    assert any(i.executor == "mr-hygiene" for i in items)
+    assert any(i.executor == "park" for i in items)
+    assert not any(i.executor == "mr-hygiene" for i in items)
 
 
-def test_present_dev_url_no_hygiene():
+def test_present_dev_url_no_park():
+    """Vacuous if it still checked `mr-hygiene` -- nothing emits that now."""
     desc = "see https://x-dev4.performancebeef.com/y"
     items = assess_mr(_mr(author="chandler.hardy", description=desc),
                       "chandler.hardy", has_magi=lambda r, i, s: True)
-    assert not any(i.executor == "mr-hygiene" for i in items)
+    assert not any(i.executor == "park" for i in items)
 
 
 def test_review_request_when_im_reviewer_not_author():
@@ -145,3 +148,27 @@ def test_assess_todo_without_an_id_is_zero_not_an_error():
     from worksweep.models import Todo as _Todo
     it = assess_todo(_Todo(target="Issue", action="mentioned", web_url="u"))[0]
     assert it.todo_id == 0
+
+
+def test_park_item_carries_the_source_branch():
+    """Falsifying: the park executor refuses to run without a branch, so an
+    item assessed without one is dead on arrival at the runner."""
+    mr = _mr(author="chandler.hardy", description="no link")
+    import dataclasses
+    mr = dataclasses.replace(mr, source_branch="chardy/1588-ranch-data")
+    items = assess_mr(mr, "chandler.hardy", has_magi=lambda r, i, s: True)
+    park = [i for i in items if i.executor == "park"]
+    assert len(park) == 1
+    assert park[0].branch == "chardy/1588-ranch-data"
+    assert park[0].id == f"hygiene-devurl:{mr.repo}!{mr.iid}"   # identity kept
+    assert park[0].status == "proposed"          # never auto-approved
+
+
+def test_park_item_is_not_auto_approved():
+    """Parking overwrites a dev box, so Chandler decides -- it must not be in
+    the auto-approve set."""
+    from worksweep.config import WorksweepConfig
+    assert WorksweepConfig.__dataclass_fields__["auto_approve"].default == (
+        "keep-current",)
+    assert "park" not in WorksweepConfig.__dataclass_fields__[
+        "auto_approve"].default

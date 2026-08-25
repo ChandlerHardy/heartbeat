@@ -28,7 +28,8 @@ _IMPLEMENT_LOCK_NAME = "runner-implement.lock"
 _MAGI = "magi-review"
 _IMPLEMENT = "implement"
 _KEEP_CURRENT = "keep-current"
-_ALL_EXECUTORS = (_MAGI, _IMPLEMENT, _KEEP_CURRENT)
+_PARK = "park"
+_ALL_EXECUTORS = (_MAGI, _IMPLEMENT, _KEEP_CURRENT, _PARK)
 # Executors that may have at most ONE claim in flight across the whole queue.
 # magi-review is read-only and cheap; implement writes to GitLab and occupies
 # a dev box, so a second one must wait even though it has its own lock file.
@@ -334,10 +335,11 @@ def _guarded_pass(cfg, deps: Dict[str, Callable], kind: str,
 
 
 def _run_magi_pass(cfg, deps: Dict[str, Callable], lock_path: str) -> int:
-    """One claim from magi-review OR keep-current (lowest number wins across
-    both — see pick_claim). keep-current shares this pass/lock deliberately:
-    it's a short git op (fetch/merge/push), not worth a third lock file, and
-    this pass only ever runs one claim per invocation either way."""
+    """One claim from magi-review, keep-current OR park (lowest number wins
+    across all three — see pick_claim). keep-current and park share this
+    pass/lock deliberately: both are short ops (a git fetch/merge/push, or a
+    branch sync plus one API write), not worth their own lock files, and this
+    pass only ever runs one claim per invocation either way."""
     if not acquire_lock(lock_path):
         return 0    # another runner is live — that's fine, not an error
     try:
@@ -350,13 +352,15 @@ def _run_magi_pass(cfg, deps: Dict[str, Callable], lock_path: str) -> int:
             for r in reaped:
                 _post(deps, cfg, f"⚠️ Worksweep runner: reaped stale claim "
                                  f"#{r.number} ({r.item.repo} {r.item.id})")
-        target = pick_claim(records, (_MAGI, _KEEP_CURRENT))
+        target = pick_claim(records, (_MAGI, _KEEP_CURRENT, _PARK))
         if target is None:
             return 0
         records = claim(records, target.number, now)
         deps["save"](records)
         if target.item.executor == _KEEP_CURRENT:
             return _run_keep_current_claim(cfg, deps, target)
+        if target.item.executor == _PARK:
+            return _run_park_claim(cfg, deps, target)
         try:
             result_sha, report_path = deps["execute"](target.item, cfg)
         except RunnerError as e:
@@ -415,6 +419,39 @@ def _run_keep_current_claim(cfg, deps: Dict[str, Callable],
                                deps["now"]()))
     if updated is not None:
         _post(deps, cfg, _keep_current_done_message(result))
+    return 0
+
+
+def _run_park_claim(cfg, deps: Dict[str, Callable],
+                    target: QueueRecord) -> int:
+    """The park half of the shared magi/keep-current/park pass.
+
+    Called with the claim already saved as `running`. Like keep-current, every
+    exit ends in BOTH a queue status and a Discord post: this executor takes
+    over a dev box and rewrites an MR description, so a silent failure would
+    leave a box occupied and nobody told.
+    """
+    number = target.number
+    if "execute_park" not in deps:
+        _fail_and_post(deps, cfg, number,
+                       "park executor is not wired into this runner "
+                       "(no execute_park dep)", _PARK)
+        return 1
+    try:
+        result = deps["execute_park"](target.item, cfg)
+    except RunnerError as e:
+        _fail_and_post(deps, cfg, number, str(e), _PARK)
+        return 1
+    except Exception as e:
+        _fail_and_post(deps, cfg, number, f"{type(e).__name__}: {e}", _PARK)
+        return 1
+    updated = _apply_to_fresh(
+        deps, cfg, number,
+        lambda fresh: complete(fresh, number, result.result_sha, "",
+                               deps["now"]()))
+    if updated is not None:
+        from . import park as _park       # local: park imports implementer
+        _post(deps, cfg, _park.done_message(result))
     return 0
 
 

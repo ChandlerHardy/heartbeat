@@ -247,3 +247,55 @@ def test_mark_todo_done_raises_so_the_dashboard_can_log_and_continue():
         wsmain._mark_todo_done(
             1, run_subprocess=lambda cmd, **kw: (_ for _ in ()).throw(
                 FileNotFoundError("glab")))
+
+
+# --- the park executor's glab edge ------------------------------------------
+
+def test_run_glab_api_sends_a_json_body_on_stdin():
+    """The 2026-08 array bug: glab's own help says neither --field nor
+    --raw-field parses JSON, so an MR description must go over as a raw body."""
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append((cmd, kw))
+        return _Completed(0, '{"ok":true}')
+
+    out = wsmain._run_glab_api(
+        ["api", "projects/x/merge_requests/1", "-X", "PUT", "--input", "-"],
+        body='{"description":"a\\nb"}', run_subprocess=fake_run)
+    cmd, kw = calls[0]
+    assert cmd[0] == "glab"
+    assert cmd[1:3] == ["api", "projects/x/merge_requests/1"]
+    assert kw["input"] == '{"description":"a\\nb"}'
+    assert kw["timeout"] == 30
+    assert kw["capture_output"] is True
+    assert out == '{"ok":true}'
+
+
+def test_run_glab_api_reads_no_stdin_when_there_is_no_body():
+    """A read must never inherit the parent's stdin under launchd."""
+    import subprocess as _sp
+    calls = []
+    wsmain._run_glab_api(["api", "x"],
+                         run_subprocess=lambda cmd, **kw: (calls.append(kw),
+                                                           _Completed(0, "{}"))[1])
+    assert calls[0]["stdin"] is _sp.DEVNULL
+    assert calls[0]["input"] is None
+
+
+def test_run_glab_api_raises_on_a_non_zero_exit():
+    import pytest
+    with pytest.raises(RuntimeError) as e:
+        wsmain._run_glab_api(
+            ["api", "x"],
+            run_subprocess=lambda cmd, **kw: _Completed(1, "", "403 Forbidden"))
+    assert "403 Forbidden" in str(e.value)
+
+
+def test_run_glab_api_raises_when_glab_is_missing():
+    import pytest
+    with pytest.raises(RuntimeError):
+        wsmain._run_glab_api(
+            ["api", "x"],
+            run_subprocess=lambda cmd, **kw: (_ for _ in ()).throw(
+                FileNotFoundError("glab")))
