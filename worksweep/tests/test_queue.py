@@ -1,5 +1,6 @@
 import os, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+import pytest  # noqa: E402
 from worksweep.models import WorkItem, QueueRecord  # noqa: E402
 from worksweep.queue import load_queue, save_queue   # noqa: E402
 
@@ -251,3 +252,81 @@ def test_a_queue_written_before_todo_id_existed_still_loads(tmp_path):
     assert len(records) == 1
     assert records[0].item.todo_id == 0
     assert records[0].number == 3
+
+
+# --- reconcile observes the fresh-wins reset of an approved record ----------
+
+def _mr_item(sha, status="approved", iid=4078):
+    from worksweep.models import WorkItem
+    return WorkItem(schema_version=1, id=f"mr:pb-www!{iid}", repo="pb-www",
+                    kind="mr", executor="magi-review", risk="low",
+                    why="review requested",
+                    web_url=f"https://gl/x/-/merge_requests/{iid}",
+                    sha=sha, status=status)
+
+
+def _prior(number, item):
+    from worksweep.models import QueueRecord
+    return QueueRecord(number=number, first_seen="2026-08-24T09:00:00Z",
+                       last_seen="2026-08-24T09:00:00Z", item=item)
+
+
+def test_reconcile_reports_an_approved_record_reset_by_a_new_sha():
+    """Falsifying: drop the observation and the ✅ is revoked silently, which
+    is exactly the live bug -- the item just reappears as `proposed`."""
+    from worksweep.queue import reconcile
+    prior = [_prior(214, _mr_item("aaa", iid=4078)),
+             _prior(215, _mr_item("aaa", iid=4076))]
+    fresh = [_mr_item("bbb", iid=4078), _mr_item("bbb", iid=4076)]
+    resets = set()
+    out = reconcile(prior, fresh, "2026-08-25T09:00:00Z", resets=resets)
+    assert resets == {214, 215}
+    assert {r.item.status for r in out} == {"proposed"}
+
+
+def test_reconcile_reports_nothing_when_the_sha_is_unchanged():
+    from worksweep.queue import reconcile
+    prior = [_prior(214, _mr_item("aaa"))]
+    resets = set()
+    out = reconcile(prior, [_mr_item("aaa")], "2026-08-25T09:00:00Z",
+                    resets=resets)
+    assert resets == set()
+    assert out[0].item.status == "approved"      # the ✅ still stands
+
+
+@pytest.mark.parametrize("prior_status,expected_status", [
+    ("error", "proposed"),        # a retry, not a revoked decision
+    ("done", "proposed"),         # a resurrection, not a revoked decision
+    ("proposed", "proposed"),     # a no-op
+    ("running", "proposed"),      # reachable, but deliberately out of scope
+    ("needs-input", "needs-input"),
+])
+def test_only_an_approved_reset_is_reported(prior_status, expected_status):
+    """Every other transition through the same branch leaves the set empty --
+    none of them revokes a human's ✅."""
+    from worksweep.queue import reconcile
+    prior = [_prior(214, _mr_item("aaa", status=prior_status))]
+    resets = set()
+    out = reconcile(prior, [_mr_item("bbb")], "2026-08-25T09:00:00Z",
+                    resets=resets)
+    assert resets == set()
+    assert out[0].item.status == expected_status
+
+
+def test_reconcile_without_the_out_param_still_works():
+    """30 existing call sites pass no `resets`; the default must be inert."""
+    from worksweep.queue import reconcile
+    out = reconcile([_prior(214, _mr_item("aaa"))], [_mr_item("bbb")],
+                    "2026-08-25T09:00:00Z")
+    assert out[0].item.status == "proposed"
+
+
+def test_reconcile_reports_only_the_records_that_actually_reset():
+    from worksweep.queue import reconcile
+    prior = [_prior(1, _mr_item("aaa", iid=1)),            # moves -> reported
+             _prior(2, _mr_item("aaa", iid=2)),            # unchanged
+             _prior(3, _mr_item("aaa", iid=3, status="error"))]  # retry
+    fresh = [_mr_item("bbb", iid=1), _mr_item("aaa", iid=2), _mr_item("bbb", iid=3)]
+    resets = set()
+    reconcile(prior, fresh, "2026-08-25T09:00:00Z", resets=resets)
+    assert resets == {1}

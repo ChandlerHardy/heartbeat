@@ -1,6 +1,7 @@
 # worksweep/tests/test_main_v2.py
 """run_sweep: graphql wiring, one-message contract, error post."""
 import json
+import re
 
 from worksweep.__main__ import run_sweep
 from worksweep.config import WorksweepConfig
@@ -173,3 +174,84 @@ def test_uncovered_issue_still_appears_in_digest():
     saved = [args for args in posts if isinstance(args, tuple) and args[0] == "saved"]
     records = saved[-1][1]
     assert any(r.item.kind == "issue" for r in records)
+
+
+# --- a ✅ revoked by a fresh push must be explained, not silent -------------
+
+def _saved(store):
+    """The records from the last `save` call the sweep made."""
+    return [p[1] for p in store if isinstance(p, tuple) and p[0] == "saved"][-1]
+
+
+def _approve_all_with_a_new_sha(records):
+    """Model the live case: Chandler ✅'d, then the author pushed."""
+    import dataclasses
+    return [dataclasses.replace(
+        r, item=dataclasses.replace(r.item, status="approved", sha="OLD-SHA"))
+        for r in records]
+
+
+def test_a_reset_approval_is_explained_in_discord():
+    """Falsifying: without the notice the item silently reappears as proposed,
+    which is exactly what confused Chandler live (2026-08-25)."""
+    posts = []
+    raw = _gql(review_nodes=[_node(iid=4078), _node(iid=4076)])
+    run_sweep(_cfg(), _deps(posts, raw))                  # first sweep numbers them
+    approved = _approve_all_with_a_new_sha(_saved(posts))
+
+    posts2 = []
+    rc = run_sweep(_cfg(), _deps(posts2, raw, queue=approved))
+    assert rc == 0
+    texts = [p for p in posts2 if isinstance(p, str)]
+    notice = [t for t in texts if t.startswith("↩️ re-proposed")]
+    assert len(notice) == 1, texts
+
+    # exact numbers, bolded, with masked refs -- and it lands AFTER the digest
+    nums = sorted(int(n) for n in re.findall(r"\*\*(\d+)\*\*", notice[0]))
+    assert nums == sorted(r.number for r in approved)
+    assert "[#4078](https://gl/x/-/merge_requests/4078)" in notice[0]
+    assert texts.index(notice[0]) == len(texts) - 1
+
+    # and the records really were reset
+    assert {r.item.status for r in _saved(posts2)} == {"proposed"}
+
+
+def test_no_notice_when_nothing_was_reset():
+    """A sweep that revokes no ✅ must stay quiet -- one digest, no footnote."""
+    import dataclasses
+    posts = []
+    raw = _gql(review_nodes=[_node(iid=4078)])
+    run_sweep(_cfg(), _deps(posts, raw))
+    # approved, and the sha did NOT move
+    approved = [dataclasses.replace(
+        r, item=dataclasses.replace(r.item, status="approved"))
+        for r in _saved(posts)]
+
+    posts2 = []
+    assert run_sweep(_cfg(), _deps(posts2, raw, queue=approved)) == 0
+    texts = [p for p in posts2 if isinstance(p, str)]
+    assert not [t for t in texts if t.startswith("↩️ re-proposed")]
+    assert {r.item.status for r in _saved(posts2)} == {"approved"}
+
+
+def test_a_failing_notice_does_not_fail_the_sweep():
+    """Never-silent runs both ways: the digest is the contract, so a broken
+    footnote must not turn a good sweep into a ⚠️ error post."""
+    import worksweep.__main__ as wsmain
+    posts = []
+    raw = _gql(review_nodes=[_node(iid=4078)])
+    run_sweep(_cfg(), _deps(posts, raw))
+    approved = _approve_all_with_a_new_sha(_saved(posts))
+
+    posts2 = []
+    original = wsmain.format_reproposed
+    wsmain.format_reproposed = lambda numbered: (_ for _ in ()).throw(
+        RuntimeError("formatter blew up"))
+    try:
+        rc = run_sweep(_cfg(), _deps(posts2, raw, queue=approved))
+    finally:
+        wsmain.format_reproposed = original
+    assert rc == 0
+    texts = [p for p in posts2 if isinstance(p, str)]
+    assert not [t for t in texts if t.startswith("⚠️")]
+    assert len(texts) >= 1                      # the digest still went out

@@ -143,6 +143,21 @@ def _ref_link(it: WorkItem) -> str:
     return f"[#{ref}]({it.web_url})"
 
 
+def format_reproposed(numbered: List[tuple]) -> str:
+    """ONE line explaining ✅s that the next sweep revoked, or "" for none.
+
+    `numbered` is [(number, WorkItem), ...]. Numbers are bolded for the same
+    reason every other digest line bolds them: Discord parses a line starting
+    `214.` as an ordered list and eats the marker, and the number IS the
+    approval handle. Refs reuse `_ref_link`, so these render as masked links
+    like the rest of the digest (no embed cards).
+    """
+    if not numbered:
+        return ""
+    parts = ", ".join(f"**{n}** {_ref_link(it)}" for n, it in numbered)
+    return f"↩️ re-proposed (MR changed since your ✅): {parts}"
+
+
 def _auto_merge_line(auto: List[tuple]) -> str:
     """ONE subtext line for every auto-flowing keep-current item -- they need
     no approval and no per-item attention, so they must not crowd the list."""

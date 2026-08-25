@@ -181,10 +181,22 @@ def dismiss(records: List[QueueRecord], number: int,
 
 
 def reconcile(existing: List[QueueRecord], fresh: List[WorkItem],
-              now: str, resolved: dict | None = None) -> List[QueueRecord]:
+              now: str, resolved: dict | None = None,
+              resets: set | None = None) -> List[QueueRecord]:
     """Fold a sweep into the queue. M2 rules plus the M3 lifecycle:
     resolutions -> done; error+present -> retry; done+new-sha -> resurrect;
-    terminal retained until 90-day compaction."""
+    terminal retained until 90-day compaction.
+
+    `resets` is an optional OUT-PARAM: when a set is passed, the numbers of
+    records that were `approved` and got re-proposed because the sha moved are
+    added to it. Purely an observation -- no decision here changes -- so the
+    caller can tell the human WHY their ✅ evaporated. Silence was the bug:
+    an approved item whose author pushed simply reappeared as `proposed` with
+    no explanation (2026-08-25).
+
+    An out-param rather than a second return value only because `reconcile`
+    has 30 call sites; the decision logic is untouched either way.
+    """
     resolved = resolved or {}
     by_id = {r.item.id: r for r in existing}
     fresh_ids = {it.id for it in fresh}
@@ -226,6 +238,12 @@ def reconcile(existing: List[QueueRecord], fresh: List[WorkItem],
                                          dev_box=prior.item.dev_box,
                                          mr_iid=prior.item.mr_iid)
         else:
+            # Fresh wins: the sha moved, so whatever the queue thought is stale.
+            # ONLY an approved->proposed reset is reported: `error`->proposed is
+            # a retry, `done`+new-sha is a resurrection, and `proposed`->
+            # proposed is a no-op -- none of those revoke a human decision.
+            if ps == "approved" and resets is not None:
+                resets.add(prior.number)
             merged = dataclasses.replace(it, status="proposed")
         out.append(QueueRecord(number=prior.number, item=merged,
                                first_seen=prior.first_seen, last_seen=now))

@@ -290,3 +290,27 @@ def test_footer_documents_the_blanket_approval():
     # the numbered form stays documented too -- the blanket form is an addition,
     # not a replacement
     assert "✅ 1,3" in _FOOTER
+
+
+def test_format_reproposed_line_shape():
+    """Bold numbers (Discord eats a leading `214.` as an ordered-list marker)
+    and masked refs (25 raw URLs would spawn 25 embed cards)."""
+    from worksweep.formatter import format_reproposed
+    from worksweep.models import WorkItem
+
+    def _it(iid):
+        return WorkItem(schema_version=1, id=f"mr:pb-www!{iid}", repo="pb-www",
+                        kind="mr", executor="magi-review", risk="low", why="w",
+                        web_url=f"https://gl/x/-/merge_requests/{iid}", sha="s")
+
+    line = format_reproposed([(214, _it(4078)), (215, _it(4076))])
+    assert line == ("↩️ re-proposed (MR changed since your ✅): "
+                    "**214** [#4078](https://gl/x/-/merge_requests/4078), "
+                    "**215** [#4076](https://gl/x/-/merge_requests/4076)")
+    assert line.count("**") == 4
+    assert not line.startswith("214")          # never a bare list marker
+
+
+def test_format_reproposed_is_empty_for_no_resets():
+    from worksweep.formatter import format_reproposed
+    assert format_reproposed([]) == ""

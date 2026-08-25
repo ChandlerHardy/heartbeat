@@ -49,7 +49,7 @@ from .config import WorksweepConfig, load_config
 from .discord_read import fetch_messages
 from .formatter import (
     DISCORD_MAX_CHARS, _FOOTER, _HEADER, _truncate_bytes,
-    format_messages_from_records,
+    format_messages_from_records, format_reproposed,
 )
 from .queue import auto_approve, load_queue, reconcile, save_queue
 
@@ -370,7 +370,11 @@ def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
         items = assessor.dedupe(items)
 
         resolved = assessor.resolutions(review_mrs, cfg.username, authored)
-        records = reconcile(records0, items, deps["now"](), resolved=resolved)
+        # Observe (not change) reconcile's fresh-wins rule so a revoked ✅ can
+        # be explained instead of the item just quietly reappearing.
+        reproposed: set = set()
+        records = reconcile(records0, items, deps["now"](), resolved=resolved,
+                            resets=reproposed)
         records = auto_approve(records, cfg.auto_approve)
         try:
             deps["save"](records)
@@ -438,6 +442,20 @@ def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
             _post_all([f"🔍 Worksweep: nothing needs you "
                        f"(checked {len(review_mrs)} review requests, "
                        f"{len(authored)} authored MRs)"])
+
+        # Immediately after the digest, so the explanation sits next to the
+        # items it explains. Never fatal: the digest is the contract, and a
+        # failed footnote must not turn a good sweep into a ⚠️ error post.
+        if reproposed:
+            try:
+                by_num = {r.number: r.item for r in records}
+                line = format_reproposed(
+                    [(n, by_num[n]) for n in sorted(reproposed) if n in by_num])
+                if line:
+                    _post_all([line])
+            except Exception as e:
+                print(f"worksweep: re-proposed notice failed: {e}",
+                      file=sys.stderr)
         return 0
     except Exception as e:
         msg = f"⚠️ Worksweep sweep failed: {type(e).__name__}: {e}"
