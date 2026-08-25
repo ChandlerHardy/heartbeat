@@ -17,9 +17,9 @@ import json
 import os
 import sys
 import tempfile
-from typing import List
+from typing import List, Optional, Tuple
 
-from .models import QueueRecord, WorkItem
+from .models import RUNNABLE_EXECUTORS, QueueRecord, WorkItem
 
 _TERMINAL = ("done", "error")
 # `needs-input` (M4 Task G) is terminal-ish: retained when it drops out of a
@@ -136,6 +136,48 @@ def auto_approve(records: List[QueueRecord],
         else:
             out.append(r)
     return out
+
+
+def is_dismissable(item: WorkItem) -> bool:
+    """True when a row may be dismissed from the dashboard.
+
+    Non-terminal AND non-runnable. The executor half is the safety gate:
+    anything the runner claims is approve-territory, and dismissing it would
+    silently drop work the human meant to run. What is left -- triage,
+    mr-hygiene, and any other executor nothing executes -- are FYI rows whose
+    only resolution is "I looked at it".
+    """
+    return (item.status not in _TERMINAL
+            and item.executor not in RUNNABLE_EXECUTORS)
+
+
+def dismiss(records: List[QueueRecord], number: int,
+            now: str) -> Tuple[List[QueueRecord], Optional[QueueRecord]]:
+    """Retire record `number`: proposed -> done, done_reason "dismissed".
+
+    Returns (updated_records, dismissed_record); the record is None when the
+    number matches nothing or the record is not dismissable, so the caller can
+    reject without a second pass.
+
+    Lives here, beside reconcile, because this is a queue lifecycle transition
+    and the queue owns those -- the dashboard writes no status of its own.
+    Dismissal is durable across sweeps: reconcile retains `done` records that
+    drop out of a sweep, and for a todo (sha "" on both sides) the
+    same-sha branch keeps it `done` even if the todo is still pending in
+    GitLab.
+    """
+    out: List[QueueRecord] = []
+    dismissed: Optional[QueueRecord] = None
+    for r in records:
+        if r.number == number and is_dismissable(r.item):
+            dismissed = QueueRecord(
+                number=r.number, first_seen=r.first_seen, last_seen=now,
+                item=dataclasses.replace(r.item, status="done",
+                                         done_reason="dismissed"))
+            out.append(dismissed)
+        else:
+            out.append(r)
+    return out, dismissed
 
 
 def reconcile(existing: List[QueueRecord], fresh: List[WorkItem],
