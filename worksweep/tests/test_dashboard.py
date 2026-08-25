@@ -139,10 +139,12 @@ class _Server:
         h.update(headers or {})
         return self.request("POST", "/approve", json.dumps({"numbers": numbers}), h)
 
-    def approve_all(self, headers=None):
-        h = {"X-Worksweep": "approve"}
+    def approve_all(self, numbers, headers=None):
+        """F2: the page sends the proposed+runnable numbers it rendered."""
+        h = {"X-Worksweep": "approve", "Content-Type": "application/json"}
         h.update(headers or {})
-        return self.request("POST", "/approve-all", "", h)
+        return self.request("POST", "/approve-all",
+                            json.dumps({"numbers": numbers}), h)
 
     def close(self):
         self.httpd.shutdown()
@@ -393,15 +395,57 @@ def test_resolve_bind_auto_uses_first_tailscale_address():
     lambda cmd, **kw: _Completed(0, "   \n\n"),
     lambda cmd, **kw: (_ for _ in ()).throw(OSError("boom")),
 ])
-def test_resolve_bind_falls_back_to_loopback(fake):
-    """AC #15: missing binary, non-zero exit, or no output -> 127.0.0.1."""
-    assert dashboard.resolve_bind("auto", run_subprocess=fake) == "127.0.0.1"
+def test_resolve_bind_auto_is_unresolved_not_loopback(fake):
+    """F4 (supersedes the old loopback fallback): `auto` that cannot resolve
+    returns "" so the caller RETRIES. Falling back to 127.0.0.1 would leave the
+    dashboard silently unreachable from the phone until someone restarted it."""
+    assert dashboard.resolve_bind("auto", run_subprocess=fake) == ""
 
 
-def test_resolve_bind_passes_an_explicit_address_through():
+def test_resolve_bind_tries_the_app_bundle_when_tailscale_is_not_on_path():
+    """F4: under launchd the mini's PATH does not always have the CLI shim."""
+    tried = []
+
+    def fake(cmd, **kw):
+        tried.append(cmd[0])
+        if cmd[0] == "tailscale":
+            raise FileNotFoundError("tailscale")
+        return _Completed(0, "100.64.0.5\n")
+    assert dashboard.resolve_bind("auto", run_subprocess=fake) == "100.64.0.5"
+    assert tried == ["tailscale",
+                     "/Applications/Tailscale.app/Contents/MacOS/Tailscale"]
+
+
+def test_resolve_bind_ignores_a_non_tailnet_address_from_tailscale():
+    """F4: whatever tailscale says, only a tailnet address is acceptable."""
+    assert dashboard.resolve_bind(
+        "auto", run_subprocess=lambda cmd, **kw: _Completed(0, "192.168.1.5\n")) == ""
+
+
+@pytest.mark.parametrize("address", [
+    "127.0.0.1", "127.0.0.5", "::1", "100.64.0.5", "100.127.255.254"])
+def test_resolve_bind_allows_loopback_and_tailnet(address):
     def boom(cmd, **kw):
         raise AssertionError("must not shell out for an explicit bind")
-    assert dashboard.resolve_bind("10.0.0.9", run_subprocess=boom) == "10.0.0.9"
+    assert dashboard.resolve_bind(address, run_subprocess=boom) == address
+    assert dashboard.is_allowed_bind(address) is True
+
+
+@pytest.mark.parametrize("address", [
+    "0.0.0.0", "10.0.0.9", "192.168.1.5", "8.8.8.8", "100.63.255.255",
+    "100.128.0.0", "not-an-ip", ""])
+def test_resolve_bind_refuses_a_non_tailnet_explicit_bind(address):
+    """F4 (falsifying): the dashboard has no auth and serves private MR titles.
+    An explicit LAN bind or 0.0.0.0 must be a hard error, never a silent
+    publish to the whole network."""
+    if address == "":
+        # "" is not an explicit bind -- it means auto
+        assert dashboard.is_allowed_bind(address) is False
+        return
+    assert dashboard.is_allowed_bind(address) is False
+    with pytest.raises(ValueError) as e:
+        dashboard.resolve_bind(address, run_subprocess=lambda *a, **k: None)
+    assert "refusing to bind" in str(e.value)
 
 
 def test_cli_accepts_dashboard_with_port_and_bind_defaults(monkeypatch, tmp_path):
@@ -503,12 +547,53 @@ def test_post_approve_all_is_proposed_only(serve_queue):
                             _rec(5, status="approved"),
                             _rec(6, status="done"),
                             _rec(7, status="error")])
-    status, _, body = s.approve_all()
+    status, _, body = s.approve_all([1, 2, 3, 4, 5, 6, 7])
     assert status == 200
     assert json.loads(body)["approved"] == [1, 3]
     out = {r.number: r.item.status for r in load_queue(qpath)}
     assert out == {1: "approved", 2: "needs-input", 3: "approved",
                    4: "running", 5: "approved", 6: "done", 7: "error"}
+
+
+def test_post_approve_all_skips_non_runnable_executors(serve_queue):
+    """F1 (falsifying): a blanket-approved triage/mr-hygiene/none record is a
+    permanently-stuck zombie -- nothing claims it and there is no un-approve."""
+    s, qpath = serve_queue([_rec(1, executor="magi-review"),
+                            _rec(2, executor="keep-current"),
+                            _rec(3, executor="implement"),
+                            _rec(4, executor="triage"),
+                            _rec(5, executor="mr-hygiene"),
+                            _rec(6, executor="none")])
+    status, _, body = s.approve_all([1, 2, 3, 4, 5, 6])
+    assert status == 200
+    assert json.loads(body)["approved"] == [1, 2, 3]
+    out = {r.number: r.item.status for r in load_queue(qpath)}
+    assert out == {1: "approved", 2: "approved", 3: "approved",
+                   4: "proposed", 5: "proposed", 6: "proposed"}
+
+
+def test_post_approve_all_only_flips_the_numbers_the_page_rendered(serve_queue):
+    """F2 (falsifying): an item that landed between render and tap was never
+    shown to the user, so it must not be swept in by their tap."""
+    s, qpath = serve_queue([_rec(1), _rec(2), _rec(3)])
+    # the page the user is looking at rendered only 1 and 2
+    status, _, body = s.approve_all([1, 2])
+    assert status == 200
+    assert json.loads(body)["approved"] == [1, 2]
+    out = {r.number: r.item.status for r in load_queue(qpath)}
+    assert out == {1: "approved", 2: "approved", 3: "proposed"}
+
+
+def test_post_approve_all_intersects_with_current_eligibility(serve_queue):
+    """F2: the client's set is a scope, never an authority -- the server
+    re-checks every number against fresh disk state."""
+    s, qpath = serve_queue([_rec(1), _rec(2, status="running"),
+                            _rec(3, executor="triage"), _rec(4)])
+    status, _, body = s.approve_all([1, 2, 3, 99])
+    assert status == 200
+    assert json.loads(body)["approved"] == [1]
+    out = {r.number: r.item.status for r in load_queue(qpath)}
+    assert out == {1: "approved", 2: "running", 3: "proposed", 4: "proposed"}
 
 
 def test_dashboard_holds_no_status_rules_of_its_own():
@@ -618,12 +703,17 @@ def test_malformed_post_body_is_400_and_persists_nothing(serve_queue, body):
     assert open(qpath, "rb").read() == before
 
 
-def test_approve_all_needs_no_body(serve_queue):
-    """The blanket route takes an empty or absent body (Component Spec)."""
+@pytest.mark.parametrize("body", ["", None, "not json", '{"numbers": "1"}'])
+def test_approve_all_rejects_a_malformed_body(serve_queue, body):
+    """F2 supersedes the old no-body contract: /approve-all now carries the
+    client's rendered numbers, so a missing envelope is a 400, not a blanket."""
     s, qpath = serve_queue([_rec(1)])
-    status, _, _ = s.request("POST", "/approve-all", None, {"X-Worksweep": "approve"})
-    assert status == 200
-    assert load_queue(qpath)[0].item.status == "approved"
+    before = open(qpath, "rb").read()
+    status, _, _ = s.request("POST", "/approve-all", body,
+                             {"X-Worksweep": "approve",
+                              "Content-Type": "application/json"})
+    assert status == 400
+    assert open(qpath, "rb").read() == before
 
 
 def test_dashboard_approval_posts_one_discord_confirmation(serve_queue):
@@ -647,7 +737,7 @@ def test_approve_all_posts_its_own_confirmation(serve_queue):
     s, _ = serve_queue([_rec(1), _rec(2, status="needs-input")],
                        post=lambda hook, content: posted.append(content),
                        webhook="https://discord.com/api/webhooks/1/x")
-    assert s.approve_all()[0] == 200
+    assert s.approve_all([1, 2])[0] == 200
     assert len(posted) == 1
     assert "(dashboard)" in posted[0] and "1 (" in posted[0]
     assert "2 (" not in posted[0]
@@ -660,7 +750,7 @@ def test_no_confirmation_when_nothing_flipped(serve_queue):
                        post=lambda hook, content: posted.append(content),
                        webhook="https://discord.com/api/webhooks/1/x")
     assert s.approve([1])[0] == 200
-    assert s.approve_all()[0] == 200
+    assert s.approve_all([1])[0] == 200
     assert posted == []
 
 
@@ -705,14 +795,26 @@ def test_sticky_bottom_bar_holds_exactly_the_two_buttons():
     assert "Approve all" in labels[1]
 
 
-def test_approve_all_button_confirms_with_the_proposed_count():
-    """No un-approve path exists, so the bulk action must not be a stray tap."""
+def test_approve_all_confirms_with_the_count_of_the_set_it_sends():
+    """No un-approve path exists, so the bulk action must not be a stray tap.
+
+    F2: the count and the POSTed numbers both come from the rendered
+    `data-blanket` rows, so they cannot disagree. A server-rendered count would
+    go stale and tell the user they were approving N while sending a different
+    set -- so it must NOT be in the markup at all.
+    """
     page = _page([_rec(1), _rec(2), _rec(3, status="needs-input"),
-                  _rec(4, status="running")])
-    btn = re.search(r'<button[^>]*id="approve-all"[^>]*>', page).group(0)
-    assert 'data-proposed-count="2"' in btn      # proposed only, not needs-input
+                  _rec(4, status="running"), _rec(5, executor="triage")])
+    assert "data-proposed-count" not in page
     assert re.search(r"confirm\(\s*['\"]Approve all", page)
     assert "proposed items?" in page
+    # exactly the proposed AND runnable rows are marked sweepable
+    blanket = [int(re.search(r'value="(\d+)"', t).group(1))
+               for t in re.findall(r"<input[^>]*>", page)
+               if 'data-blanket="1"' in t and 'data-view="sections"' in t]
+    assert sorted(blanket) == [1, 2]
+    # and the button sends that set, not a server-side notion of "all"
+    assert "send('/approve-all',n)" in page.replace(" ", "")
 
 
 def test_desktop_media_query_declares_a_panel_grid_with_gap():
@@ -767,7 +869,10 @@ def test_layout_is_restored_from_localstorage_before_the_first_section():
     assert restore < page.index("Needs you")
     assert 'data-layout=' in page[:page.index("<head")]     # server-side initial
     assert "localStorage.setItem" in page
-    assert re.search(r'<meta http-equiv="refresh" content="60"', page)
+    # F7: the meta refresh is gone -- it could reload mid-POST or discard a
+    # selection. A JS timer reloads instead, and skips while either is true.
+    assert "http-equiv=\"refresh\"" not in page
+    assert "setTimeout(tick," in page.replace(" ", "")
     # AC #35: `branches` persists exactly like the other two -- the restore
     # script must accept all three stored values, not just the original pair
     restore_src = page[restore - 400:page.index("</script>", restore)]
@@ -969,10 +1074,11 @@ def test_grouping_is_pure_and_makes_no_network_call():
     (or an import of the CLI, keepcurrent or runner) breaks the test.
     """
     assert _imported_modules(_dashboard_tree()) == {
-        "datetime", "html", "json", "os", "re", "subprocess", "sys",
+        "datetime", "html", "ipaddress", "json", "os", "re", "subprocess",
+        "sys", "threading", "time",
         "urllib.parse",          # pure string parsing, not network
         "dataclasses", "http.server", "typing", "__future__",
-        ".approvals", ".models", ".queue",
+        ".approvals", ".formatter", ".models", ".queue",
     }
     recs = [_br(1, branch="b"), _br(2, web_url="")]
     snapshot = list(recs)
@@ -996,3 +1102,313 @@ def test_dashboard_does_not_call_the_raising_iid_helpers():
     # the tolerant local helper is what the module actually defines
     assert any(isinstance(n, ast.FunctionDef) and n.name == "mr_iid_of"
                for n in ast.walk(tree))
+
+
+# =============================================================================
+# Fix Mode: Attempt 1 -- review findings
+# =============================================================================
+
+def test_non_runnable_actionable_rows_render_without_a_checkbox():
+    """F1: nothing in worksweep claims triage/mr-hygiene/none, so offering an
+    approve control for one would strand it as a permanently-approved zombie.
+    It still renders -- labelled -- because it does need a human."""
+    page = _page([_rec(1, executor="magi-review"),
+                  _rec(2, executor="keep-current"),
+                  _rec(3, executor="implement"),
+                  _rec(4, executor="triage"),
+                  _rec(5, executor="mr-hygiene", status="needs-input"),
+                  _rec(6, executor="none")])
+    assert sorted(_checkboxes(page, "sections")) == [1, 2, 3]
+    # once per non-runnable row in EACH of the two views that render rows
+    assert page.count('class="manual"') == 6
+    assert sorted(_checkboxes(page, "branches")) == [1, 2, 3]
+    for n in ("#4", "#5", "#6"):                   # still visible on the page
+        assert n in page
+    body = _rule(_style(page), ".manual")
+    assert body is not None
+    assert re.search(r"min-height:\s*44px", body)   # keeps the row rhythm
+
+
+def test_needs_input_is_selectable_but_never_blanket_sweepable():
+    """F1 + decision 1: a checked needs-input box is a deliberate human 'go
+    again'; a blanket sweep must never release it."""
+    page = _page([_rec(1, status="proposed"), _rec(2, status="needs-input")])
+    tags = [t for t in re.findall(r"<input[^>]*>", page)
+            if 'data-view="sections"' in t]
+    by_value = {int(re.search(r'value="(\d+)"', t).group(1)): t for t in tags}
+    assert 'data-blanket="1"' in by_value[1]
+    assert 'data-blanket="1"' not in by_value[2]
+
+
+class _Explosive:
+    """A record whose item raises on every attribute read."""
+    number = 7
+
+    @property
+    def item(self):
+        raise RuntimeError("corrupt record")
+
+
+def test_one_unrenderable_record_costs_one_row_not_the_page(capsys):
+    """F5: a hand-edited or half-typed record must not blank the dashboard --
+    under KeepAlive a blank page gives the human nothing to act on."""
+    good = _rec(1, title="still here")
+    page = dashboard.render_page([good, _Explosive()], NOW, 1_750_000_000.0)
+    assert "still here" in page
+    assert "unrenderable" in page
+    assert "#7" in page
+    assert "Approve selected" in page          # the bar still renders
+    assert "corrupt record" in capsys.readouterr().err
+
+
+def test_tolerant_sorts_survive_junk_timestamps_and_numbers():
+    """F5: sort keys are coerced, so a junk last_seen cannot raise out of a
+    sort and take the whole page with it."""
+    recs = [QueueRecord(number=1, first_seen=T0, last_seen=None,
+                        item=_rec(1, status="done").item),
+            QueueRecord(number=2, first_seen=T0, last_seen=_ago(1),
+                        item=_rec(2, status="done").item)]
+    done = dashboard.partition_sections(recs)["Recently done"]
+    assert sorted(r.number for r in done) == [1, 2]
+    assert "Recently done" in dashboard.render_page(recs, NOW, None)
+
+
+def test_page_encodes_undecodable_content_without_raising(serve_queue):
+    """F5: the final encode uses errors='replace'."""
+    s, _ = serve_queue([_rec(1, title="lone surrogate: \ud800 tail")])
+    status, headers, body = s.request("GET", "/")
+    assert status == 200
+    assert headers["Content-Type"].startswith("text/html")
+    assert b"tail" in body
+
+
+def test_audit_post_is_clamped_under_the_discord_cap():
+    """F6: 'Approve all' is the highest-blast-radius action in worksweep, so it
+    must ALWAYS leave a channel record -- an over-long message would be
+    rejected and the audit trail would vanish for exactly that approval."""
+    from worksweep.formatter import DISCORD_MAX_CHARS
+    records = [_rec(n, repo="pb-www-with-a-long-name",
+                    executor="magi-review") for n in range(1, 301)]
+    msg = dashboard._audit_message(list(range(1, 301)), records)
+    assert len(msg.encode("utf-8")) <= DISCORD_MAX_CHARS
+    assert msg.startswith("✅ Approved: 1 (")
+    assert "(dashboard)" in msg
+    more = re.search(r"\(\+(\d+) more\)", msg)
+    assert more and int(more.group(1)) > 0
+    # the summary accounts for every approved item
+    named = len(re.findall(r"\d+ \(magi-review", msg))
+    assert named + int(more.group(1)) == 300
+
+
+def test_short_audit_post_is_not_truncated():
+    records = [_rec(1), _rec(2)]
+    msg = dashboard._audit_message([1, 2], records)
+    assert msg == ("✅ Approved: 1 (magi-review pb-www), "
+                   "2 (magi-review pb-www) (dashboard)")
+    assert "more)" not in msg
+
+
+def test_concurrent_posts_do_not_lose_an_approval(serve_queue):
+    """F3 (falsifying): ThreadingHTTPServer runs each request on its own
+    thread, so without the module lock two taps interleave their
+    load->flip->save and one whole set is silently lost."""
+    s, qpath = serve_queue([_rec(n) for n in range(1, 21)])
+    results = []
+
+    def approve(numbers):
+        results.append(s.approve(numbers)[0])
+
+    threads = [threading.Thread(target=approve, args=(list(range(1, 11)),)),
+               threading.Thread(target=approve, args=(list(range(11, 21)),))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+
+    assert results == [200, 200]
+    out = {r.number: r.item.status for r in load_queue(qpath)}
+    assert out == {n: "approved" for n in range(1, 21)}
+
+
+def test_log_lines_strip_control_bytes():
+    """F9: the request line is attacker-controlled and lands in a file a human
+    later tails -- raw \\r or \\x1b could forge log lines or drive a terminal."""
+    h = dashboard.DashboardHandler.__new__(dashboard.DashboardHandler)
+    h.client_address = ("127.0.0.1", 5555)
+    line = h._log_line('"%s" 200', ('GET /a\x00\x1b[2J\rFAKE LOG LINE b',))
+    assert "\x00" not in line and "\x1b" not in line and "\r" not in line
+    assert "\n" not in line
+    assert "FAKE LOG LINE" in line          # kept as visible text, defanged
+    assert line.startswith("worksweep-dashboard: 127.0.0.1 - ")
+
+
+def test_log_error_is_sanitized_too():
+    """F9: BaseHTTPRequestHandler routes malformed-request errors to log_error,
+    which would otherwise echo the raw request line to stderr."""
+    assert "log_error" in _dashboard_src()
+    h = dashboard.DashboardHandler.__new__(dashboard.DashboardHandler)
+    h.client_address = ("127.0.0.1", 5555)
+    assert "\x1b" not in h._log_line("bad request \x1b[2J %s", ("x",))
+
+
+def test_every_attribute_interpolation_is_escaped():
+    """F9: no raw f-string value may land inside a quoted attribute."""
+    src = _dashboard_src()
+    # every `="{...}"` interpolation in an HTML attribute goes through _e(
+    for m in re.finditer(r'="\{([^}]+)\}"', src):
+        expr = m.group(1)
+        assert expr.startswith("_e(") or expr.startswith("int("), expr
+
+
+def test_serve_retries_resolution_and_bind_then_serves(monkeypatch):
+    """F4: the agent starts at boot before tailscaled has an address, and the
+    port is briefly held after a restart. Both are transient, so serve() retries
+    in-process instead of crash-looping under KeepAlive."""
+    calls = {"bind": 0}
+    probed = []
+    unresolved_attempts = [2]        # first two resolutions find nothing
+    slept = []
+
+    def fake_run(cmd, **kw):
+        probed.append(cmd[0])
+        if unresolved_attempts[0] > 0:
+            # a full resolution probes BOTH binaries before giving up, so
+            # decrement only when the app-bundle fallback has also been tried
+            if cmd[0] != "tailscale":
+                unresolved_attempts[0] -= 1
+            return _Completed(0, "")
+        return _Completed(0, "100.64.0.5\n")
+
+    class _Fake:
+        def serve_forever(self, *a, **k):
+            raise KeyboardInterrupt
+        def server_close(self):
+            pass
+
+    def fake_make(addr, qpath, **kw):
+        calls["bind"] += 1
+        assert addr == ("100.64.0.5", 8787)
+        if calls["bind"] < 2:
+            raise OSError("address already in use")
+        return _Fake()
+
+    monkeypatch.setattr(dashboard, "make_server", fake_make)
+    # max_attempts bounds the loop: without it a regression that never
+    # resolves would spin this test forever instead of failing it
+    rc = dashboard.serve("/tmp/q.json", bind="auto", run_subprocess=fake_run,
+                         sleep=slept.append, max_attempts=10)
+    assert rc == 0
+    assert calls["bind"] == 2         # first bind raised, second succeeded
+    # two unresolved attempts (each probing both binaries) + one failed bind
+    assert slept == [30, 30, 30]      # 30s backoff between every attempt
+    # the PATH binary is tried first, the app bundle only as a fallback
+    assert probed[:2] == ["tailscale",
+                          "/Applications/Tailscale.app/Contents/MacOS/Tailscale"]
+
+
+def test_serve_refuses_a_bad_explicit_bind_immediately(monkeypatch):
+    """F4: a bad explicit bind is a config error -- retrying would never fix it
+    and would bury the message in a restart storm."""
+    slept = []
+    monkeypatch.setattr(dashboard, "make_server",
+                        lambda *a, **k: pytest.fail("must not bind"))
+    rc = dashboard.serve("/tmp/q.json", bind="0.0.0.0",
+                         run_subprocess=lambda *a, **k: None, sleep=slept.append)
+    assert rc == 1
+    assert slept == []
+
+
+def test_serve_gives_up_after_max_attempts(monkeypatch):
+    slept = []
+    rc = dashboard.serve("/tmp/q.json", bind="auto",
+                         run_subprocess=lambda *a, **k: _Completed(1, ""),
+                         sleep=slept.append, max_attempts=3)
+    assert rc == 1
+    assert slept == [30, 30]
+
+
+def test_refresh_re_enables_both_buttons():
+    """F7: send() disables both for the round trip, so a FAILED post must not
+    leave the page permanently inert."""
+    page = _page([_rec(1)])
+    js = page.replace(" ", "").replace("\n", "")
+    assert "go.disabled=inflight||n===0" in js
+    assert "all.disabled=inflight||blanket().length===0" in js
+    # every failure path clears the in-flight flag and refreshes
+    assert js.count("inflight=false;") >= 2
+
+
+def test_branch_affinity_is_repo_scoped():
+    """F8 (falsifying): short conventional branch names collide across repos --
+    `chardy/fix-login` in pb-www is not the same workstream as the identically
+    named branch in pb-api. Drop the repo from the branch token and these
+    collapse into one card."""
+    recs = [_br(1, repo="pb-www", branch="chardy/fix-login"),
+            _br(2, repo="pb-www", branch="chardy/fix-login"),
+            _br(3, repo="pb-api", branch="chardy/fix-login")]
+    groups, ungrouped = dashboard.group_by_workstream(recs)
+    assert ungrouped == []
+    assert [sorted(r.number for r in g.records) for g in groups] == [[1, 2], [3]]
+    assert [g.title for g in groups] == ["chardy/fix-login", "chardy/fix-login"]
+
+
+def test_a_record_with_no_repo_contributes_no_mr_token():
+    """F8 (falsifying): an iid with no repo has no namespace to scope it to, so
+    it must not merge with a real repo's MR of the same number. Todo-derived
+    records carry no repo."""
+    recs = [_br(1, repo="pb-www",
+                web_url="https://gl/g/pb-www/-/merge_requests/4821"),
+            _br(2, repo="",
+                web_url="https://gl/g/other/-/merge_requests/4821")]
+    groups, ungrouped = dashboard.group_by_workstream(recs)
+    assert [sorted(r.number for r in g.records) for g in groups] == [[1]]
+    assert [r.number for r in ungrouped] == [2]
+
+
+def test_a_record_with_no_repo_still_groups_by_branch():
+    """F8: losing the MR token must not also cost it branch affinity."""
+    recs = [_br(1, repo="", branch="chardy/x"), _br(2, repo="", branch="chardy/x")]
+    groups, ungrouped = dashboard.group_by_workstream(recs)
+    assert ungrouped == []
+    assert [sorted(r.number for r in g.records) for g in groups] == [[1, 2]]
+
+
+def test_every_group_belongs_to_exactly_one_repo():
+    """F8's real invariant: once BOTH token kinds embed the repo, a connected
+    component can no longer span repos at all -- so a workstream card is always
+    one repo's work. This is what stops pb-www and pb-api collapsing together
+    through either a shared branch name or a shared iid."""
+    recs = [_br(1, repo="pb-www", branch="shared",
+                web_url="https://gl/g/pb-www/-/merge_requests/4821"),
+            _br(2, repo="pb-api", branch="shared", mr_iid=4821, web_url=""),
+            _br(3, repo="pb-www", branch="shared"),
+            _br(4, repo="pb-api", branch="shared")]
+    groups, ungrouped = dashboard.group_by_workstream(recs)
+    assert ungrouped == []
+    for g in groups:
+        assert len({r.item.repo for r in g.records}) == 1
+    by_repo = {g.records[0].item.repo: sorted(r.number for r in g.records)
+               for g in groups}
+    assert by_repo == {"pb-www": [1, 3], "pb-api": [2, 4]}
+
+
+def test_bare_iid_suppression_within_a_repo():
+    """An iid that DOES have a URL among the group's records is linked, not
+    bare; one that does not is rendered as unlinked text."""
+    recs = [_br(1, repo="pb-www", branch="b",
+                web_url="https://gl/g/pb-www/-/merge_requests/4821"),
+            _br(2, repo="pb-www", branch="b", mr_iid=4821, web_url=""),
+            _br(3, repo="pb-www", branch="b", mr_iid=4999, web_url="")]
+    groups, _ = dashboard.group_by_workstream(recs)
+    assert len(groups) == 1
+    assert groups[0].mr_links == ("https://gl/g/pb-www/-/merge_requests/4821",)
+    # 4821 is already linked; 4999 has no URL anywhere -> bare
+    assert groups[0].bare_mr_refs == (4999,)
+
+
+def test_timed_reload_skips_while_a_selection_or_post_is_live():
+    """F7 (falsifying): a reload mid-POST tears an approval, and a reload with
+    boxes ticked silently discards the selection under the user's thumb."""
+    js = _page([_rec(1)]).replace(" ", "").replace("\n", "")
+    assert "if(inflight||selected().length){setTimeout(tick,RELOAD_MS);return;}" in js
+    assert "location.reload();" in js

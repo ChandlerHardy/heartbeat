@@ -32,18 +32,23 @@ from __future__ import annotations
 
 import datetime
 import html
+import ipaddress
 import json
 import os
 import re
 import subprocess
 import sys
+import threading
+import time
 import urllib.parse
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from .approvals import _APPROVABLE, approve_all, approve_numbers
-from .models import QueueRecord, WorkItem
+from .approvals import (_APPROVABLE, approve_all, approve_numbers,
+                         is_blanket_eligible)
+from .formatter import DISCORD_MAX_CHARS, _truncate_bytes
+from .models import RUNNABLE_EXECUTORS, QueueRecord, WorkItem
 from .queue import load_queue, save_queue
 
 DEFAULT_PORT = 8787
@@ -58,6 +63,16 @@ _REFRESH_SECONDS = 60
 _DONE_WINDOW_DAYS = 7
 _RECENT_DONE_LIMIT = 20
 _LAYOUT_STORAGE_KEY = "worksweep-layout"
+# Tailnet addresses live in the CGNAT range; anything else (a LAN address, or
+# 0.0.0.0) would put private PLA MR titles on a network this page has no auth
+# for. Loopback is allowed for local testing.
+_TAILNET_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+# The mini does not always have `tailscale` on PATH under launchd.
+_TAILSCALE_FALLBACK_BIN = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+_BIND_RETRY_SECONDS = 30
+# Control bytes from a request line must never reach a log file raw -- they can
+# forge log lines or drive a terminal that later tails the file.
+_CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
 _WIDE_BREAKPOINT = "(min-width: 900px)"
 
 # Section names in render order. These are DISPLAY buckets, not status rules.
@@ -73,6 +88,14 @@ SECTION_NAMES = (_NEEDS_YOU, _IN_PROGRESS, _AUTO, _RECENTLY_DONE, _ERRORS)
 _MR_URL_RE = re.compile(r"/merge_requests/(\d+)")
 _ISSUE_URL_RE = re.compile(r"/-/issues/(\d+)")
 _LINKABLE_SCHEMES = ("https://", "http://")
+
+
+# Serializes THIS process's load -> flip -> save. ThreadingHTTPServer handles
+# each request on its own thread, so two taps could otherwise interleave their
+# read-modify-write and lose one. The cross-PROCESS race with intake/runner
+# stays accepted (documented): os.replace keeps the file atomic, so the worst
+# case there is a lost update, not corruption.
+_WRITE_LOCK = threading.Lock()
 
 
 def _now() -> str:
@@ -94,6 +117,15 @@ def _e(value) -> str:
     every link on the page.
     """
     return html.escape("" if value is None else str(value), quote=True)
+
+
+def _as_int(value) -> int:
+    """Best-effort int for SORT KEYS only. A hand-edited record must not be able
+    to raise TypeError out of a sort and blank the whole page."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _days_between(iso_ts: str, iso_now: str) -> Optional[int]:
@@ -164,9 +196,12 @@ def done_this_week(records: Sequence[QueueRecord], now: str) -> int:
     """
     n = 0
     for r in records:
-        if r.item.status != "done":
-            continue
-        age = _days_between(r.last_seen, now)
+        try:
+            if r.item.status != "done":
+                continue
+            age = _days_between(r.last_seen, now)
+        except Exception:
+            continue            # an unreadable record is simply not counted
         if age is not None and 0 <= age < _DONE_WINDOW_DAYS:
             n += 1
     return n
@@ -196,20 +231,31 @@ def partition_sections(
     """
     out: Dict[str, List[QueueRecord]] = {name: [] for name in SECTION_NAMES}
     for r in records:
-        st = r.item.status
+        try:
+            st = r.item.status
+            executor = r.item.executor
+            actionable = is_actionable(r.item)
+        except Exception as e:
+            # Unreadable record: file it under Errors so it still reaches the
+            # page as a degraded row instead of taking the whole render down.
+            print(f"worksweep: dashboard cannot classify a record: {e}",
+                  file=sys.stderr)
+            out[_ERRORS].append(r)
+            continue
         if st == "error":
             out[_ERRORS].append(r)
-        elif is_actionable(r.item):
+        elif actionable:
             out[_NEEDS_YOU].append(r)
         elif st == "done":
             out[_RECENTLY_DONE].append(r)
-        elif r.item.executor == "keep-current":
+        elif executor == "keep-current":
             out[_AUTO].append(r)
         elif st == "running" or st == "approved":
             out[_IN_PROGRESS].append(r)
         else:
             out[_ERRORS].append(r)
-    out[_RECENTLY_DONE].sort(key=lambda r: (r.last_seen, r.number), reverse=True)
+    out[_RECENTLY_DONE].sort(
+        key=lambda r: (str(r.last_seen or ""), _as_int(r.number)), reverse=True)
     del out[_RECENTLY_DONE][_RECENT_DONE_LIMIT:]
     return out
 
@@ -263,12 +309,26 @@ def group_by_workstream(
     tokenised: List[Tuple[QueueRecord, List[tuple]]] = []
     for r in records:
         toks: List[tuple] = []
-        branch = (r.item.branch or "").strip()
+        try:
+            repo = r.item.repo or ""
+            branch = (r.item.branch or "").strip()
+        except Exception:
+            tokenised.append((r, []))     # unreadable -> Ungrouped
+            continue
         if branch:
-            toks.append(("branch", branch))
-        iid = mr_iid_of(r.item)
-        if iid:
-            toks.append(("mr", r.item.repo or "", iid))
+            # Repo-scoped like the MR token: `chardy/fix-login` in pb-www and
+            # the same branch name in pb-api are two different workstreams, and
+            # short conventional names collide across repos easily.
+            toks.append(("branch", repo, branch))
+        try:
+            iid = mr_iid_of(r.item)
+        except Exception:
+            iid = 0
+        # No repo means no namespace to scope the iid to (todo-derived records
+        # carry none), and an unscoped iid would merge unrelated workstreams.
+        # Such a record groups by branch or lands in Ungrouped.
+        if iid and repo:
+            toks.append(("mr", repo, iid))
         for t in toks:
             find(t)
         for t in toks[1:]:
@@ -284,29 +344,41 @@ def group_by_workstream(
 
     groups: List[Group] = []
     for recs in buckets.values():
-        branches = sorted({(r.item.branch or "").strip()
-                           for r in recs if (r.item.branch or "").strip()})
+        branches = sorted({b for b in (_branch_of(r) for r in recs) if b})
         branch = branches[0] if branches else ""
 
-        mr_links, issue_links, iids = [], [], []
+        mr_links, issue_links = [], []
+        mr_iids_by_repo: Dict[str, set] = {}
+        linked_iids_by_repo: Dict[str, set] = {}
         for r in recs:
-            url = r.item.web_url or ""
-            if _MR_URL_RE.search(url):
+            try:
+                repo = r.item.repo or ""
+                url = r.item.web_url or ""
+            except Exception:
+                continue
+            m = _MR_URL_RE.search(url)
+            if m:
                 mr_links.append(url)
+                linked_iids_by_repo.setdefault(repo, set()).add(int(m.group(1)))
             elif _ISSUE_URL_RE.search(url):
                 issue_links.append(url)
-            iid = mr_iid_of(r.item)
+            try:
+                iid = mr_iid_of(r.item)
+            except Exception:
+                iid = 0
             if iid:
-                iids.append(iid)
+                mr_iids_by_repo.setdefault(repo, set()).add(iid)
         mr_links = sorted(set(mr_links))
         issue_links = sorted(set(issue_links))
-        # An iid with no matching URL among the group's records is "bare": we
-        # render it as text and never construct a URL from repo + iid, because
-        # guessing the host/namespace would be invention.
-        bare = sorted({i for i in iids
-                       if not any(_MR_URL_RE.search(u) and
-                                  int(_MR_URL_RE.search(u).group(1)) == i
-                                  for u in mr_links)})
+        # An iid with no matching URL is "bare" -- rendered as text, never as a
+        # constructed URL, because guessing the host/namespace would be
+        # invention. The comparison is WITHIN one repo: a branch-joined group
+        # can span repos, and pb-api!4821 must not be counted as "already
+        # linked" just because pb-www!4821 has a URL.
+        bare = sorted({iid
+                       for repo, iids in mr_iids_by_repo.items()
+                       for iid in iids
+                       if iid not in linked_iids_by_repo.get(repo, ())})
 
         if branch:
             title = branch
@@ -319,11 +391,11 @@ def group_by_workstream(
 
         groups.append(Group(
             title=title, branch=branch,
-            records=tuple(sorted(recs, key=lambda r: r.number)),
+            records=tuple(sorted(recs, key=lambda r: _as_int(r.number))),
             mr_links=tuple(mr_links), issue_links=tuple(issue_links),
             bare_mr_refs=tuple(bare)))
 
-    groups.sort(key=lambda g: min(r.number for r in g.records))
+    groups.sort(key=lambda g: min(_as_int(r.number) for r in g.records))
     return groups, ungrouped
 
 
@@ -425,6 +497,14 @@ a:hover{text-decoration:underline}
 }
 .check input{width:21px;height:21px;accent-color:var(--accent);cursor:pointer}
 .spacer{flex:0 0 auto;min-width:20px}
+/* An actionable row no runner will ever claim: it needs a human, but not this
+   button, so it gets a label where the checkbox would be. */
+.manual{
+  display:flex;align-items:center;justify-content:center;
+  min-width:44px;min-height:44px;margin:-6px 0 -6px -6px;flex:0 0 auto;
+  font-size:10px;font-weight:650;letter-spacing:.04em;text-transform:uppercase;
+  color:var(--ink-3);
+}
 
 .cell{min-width:0;flex:1 1 auto}
 .line1{display:flex;flex-wrap:wrap;align-items:center;gap:7px;margin-bottom:2px}
@@ -524,26 +604,40 @@ try{d.setAttribute('data-layout',window.matchMedia('%(bp)s').matches?'panels':'c
 
 _BODY_SCRIPT = """
 (function(){
-  var root=document.documentElement,KEY='%(key)s';
+  var root=document.documentElement,KEY='%(key)s',RELOAD_MS=%(reload)d;
+  var inflight=false;
   function scope(){
     return document.querySelector(root.getAttribute('data-layout')==='branches'?'.branches':'.sections');
   }
-  function boxes(){
+  function boxes(sel){
     var s=scope();
-    return s?Array.prototype.slice.call(s.querySelectorAll('input[type=checkbox]')):[];
+    return s?Array.prototype.slice.call(s.querySelectorAll(sel)):[];
   }
-  function selected(){
+  function nums(list){
     var seen={},out=[];
-    boxes().forEach(function(b){
-      if(b.checked&&!seen[b.value]){seen[b.value]=1;out.push(parseInt(b.value,10));}
+    list.forEach(function(b){
+      if(!seen[b.value]){seen[b.value]=1;out.push(parseInt(b.value,10));}
     });
     return out;
   }
+  function selected(){
+    return nums(boxes('input[type=checkbox]').filter(function(b){return b.checked;}));
+  }
+  // The set "Approve all" may sweep: exactly the proposed+runnable rows THIS
+  // page rendered. Sending it (rather than letting the server decide) means the
+  // user approves the set they were actually shown.
+  function blanket(){
+    return nums(boxes('input[type=checkbox][data-blanket="1"]'));
+  }
   function refresh(){
     var n=selected().length,c=document.getElementById('sel-count'),
-        go=document.getElementById('approve-selected');
+        go=document.getElementById('approve-selected'),
+        all=document.getElementById('approve-all');
     if(c){c.textContent=n;}
-    if(go){go.disabled=(n===0);}
+    // Both buttons are re-enabled here: send() disables them for the round
+    // trip, and a failed POST must not leave the page permanently inert.
+    if(go){go.disabled=inflight||n===0;}
+    if(all){all.disabled=inflight||blanket().length===0;}
   }
   function setLayout(v){
     root.setAttribute('data-layout',v);
@@ -557,16 +651,24 @@ _BODY_SCRIPT = """
       b[i].setAttribute('aria-pressed',b[i].getAttribute('data-set-layout')===cur?'true':'false');
     }
   }
-  function send(url,body){
-    var btns=document.querySelectorAll('.bar .btn');
-    for(var i=0;i<btns.length;i++){btns[i].disabled=true;}
-    fetch(url,{method:'POST',headers:{'X-Worksweep':'approve','Content-Type':'application/json'},body:body})
+  function send(url,list){
+    inflight=true;refresh();
+    fetch(url,{method:'POST',headers:{'X-Worksweep':'approve','Content-Type':'application/json'},body:JSON.stringify({numbers:list})})
       .then(function(r){
         if(r.status===200){location.reload();return;}
-        alert('Approval failed ('+r.status+')');refresh();
+        inflight=false;alert('Approval failed ('+r.status+')');refresh();
       })
-      .catch(function(e){alert('Approval failed: '+e);refresh();});
+      .catch(function(e){inflight=false;alert('Approval failed: '+e);refresh();});
   }
+  // A timed reload instead of <meta refresh>: never reload mid-POST (which
+  // would tear an approval) and never reload while boxes are ticked (which
+  // would silently discard the selection under the user's thumb). Reschedule
+  // and try again later instead.
+  function tick(){
+    if(inflight||selected().length){setTimeout(tick,RELOAD_MS);return;}
+    location.reload();
+  }
+  setTimeout(tick,RELOAD_MS);
   document.addEventListener('click',function(e){
     var t=e.target&&e.target.closest?e.target.closest('[data-set-layout]'):null;
     if(t){setLayout(t.getAttribute('data-set-layout'));}
@@ -585,20 +687,21 @@ _BODY_SCRIPT = """
   if(sel){sel.addEventListener('click',function(){
     var n=selected();
     if(!n.length){return;}
-    send('/approve',JSON.stringify({numbers:n}));
+    send('/approve',n);
   });}
   var all=document.getElementById('approve-all');
   if(all){all.addEventListener('click',function(){
     // There is NO un-approve path anywhere in worksweep, and this is one tap
-    // wide on a phone -- so the bulk action confirms with its blast radius.
-    var n=parseInt(all.getAttribute('data-proposed-count'),10)||0;
-    if(!n){alert('Nothing is proposed right now.');return;}
-    if(!confirm('Approve all '+n+' proposed items?')){return;}
-    send('/approve-all','');
+    // wide on a phone -- so the bulk action confirms with its blast radius,
+    // counting exactly the set it is about to send.
+    var n=blanket();
+    if(!n.length){alert('Nothing is proposed right now.');return;}
+    if(!confirm('Approve all '+n.length+' proposed items?')){return;}
+    send('/approve-all',n);
   });}
   marks();refresh();
 })();
-""" % {"key": _LAYOUT_STORAGE_KEY}
+""" % {"key": _LAYOUT_STORAGE_KEY, "reload": _REFRESH_SECONDS * 1000}
 
 
 def _link(url: str, label: str) -> str:
@@ -613,11 +716,29 @@ def _link(url: str, label: str) -> str:
 
 
 def _checkbox(record: QueueRecord, view: str) -> str:
-    if not is_actionable(record.item):
+    """The approval control for a row, or a reason there isn't one.
+
+    A non-runnable actionable record (`triage`/`mr-hygiene`/`none`) gets NO
+    checkbox: nothing in worksweep would ever execute it, so approving it would
+    strand it as a permanently-`approved` zombie with no un-approve path. It
+    still renders -- labelled "manual" -- because it genuinely does need a human,
+    just not through this button.
+
+    `data-blanket` marks the rows "Approve all" is allowed to sweep, so the
+    page sends exactly the set it displayed and the confirm dialog counts the
+    same set (never a server-side count the user never saw).
+    """
+    item = record.item
+    if not is_actionable(item):
         return '<span class="spacer"></span>'
+    if item.executor not in RUNNABLE_EXECUTORS:
+        return ('<span class="manual" title="no runner claims this executor '
+                '- handle it by hand">manual</span>')
+    blanket = ' data-blanket="1"' if is_blanket_eligible(item) else ''
     return (f'<label class="check">'
-            f'<input type="checkbox" data-view="{view}" value="{record.number}" '
-            f'aria-label="approve item {record.number}"></label>')
+            f'<input type="checkbox" data-view="{_e(view)}" '
+            f'value="{_e(record.number)}"{blanket} '
+            f'aria-label="approve item {_e(record.number)}"></label>')
 
 
 def _chip(record: QueueRecord) -> str:
@@ -633,7 +754,7 @@ def _age(record: QueueRecord, now: str) -> str:
 def _section_row(record: QueueRecord, now: str, section: str) -> str:
     item = record.item
     ref = ref_of(item)
-    bits = [f'<span class="num">#{record.number}</span>',
+    bits = [f'<span class="num">#{_e(record.number)}</span>',
             f'<span class="exec">{_e(item.executor)}</span>']
     if ref:
         bits.append(_link(item.web_url, ref))
@@ -664,12 +785,48 @@ def _section_row(record: QueueRecord, now: str, section: str) -> str:
             f'{"".join(detail)}</div>{meta}</div>')
 
 
+def _status_of(record) -> str:
+    try:
+        return record.item.status
+    except Exception:
+        return "unreadable"
+
+
+def _branch_of(record) -> str:
+    try:
+        return (record.item.branch or "").strip()
+    except Exception:
+        return ""
+
+
+def _degraded_row(record, error: Exception) -> str:
+    """Fallback for a record that could not be rendered.
+
+    One malformed record costs one ugly row, never the whole page -- a blank
+    dashboard under KeepAlive gives the human nothing to act on.
+    """
+    print(f"worksweep: dashboard row render failed: {error}", file=sys.stderr)
+    number = _e(getattr(record, "number", "?"))
+    return (f'<div class="row"><span class="spacer"></span>'
+            f'<div class="cell"><div class="line1">'
+            f'<span class="num">#{number}</span>'
+            f'<span class="chip" data-st="error">unrenderable</span>'
+            f'</div></div></div>')
+
+
+def _safe(render, record, *args) -> str:
+    try:
+        return render(record, *args)
+    except Exception as e:
+        return _degraded_row(record, e)
+
+
 def _sections_html(sections: Dict[str, List[QueueRecord]], now: str) -> str:
     out = []
     for name, records in sections.items():
         if not records:
             continue
-        rows = "".join(_section_row(r, now, name) for r in records)
+        rows = "".join(_safe(_section_row, r, now, name) for r in records)
         out.append(
             f'<section class="section"><div class="section-h">{_e(name)}'
             f'<span class="section-n">{len(records)}</span></div>'
@@ -681,13 +838,13 @@ def _card_row(record: QueueRecord) -> str:
     item = record.item
     return (f'<div class="row">{_checkbox(record, "branches")}'
             f'<div class="cell"><div class="line1">'
-            f'<span class="num">#{record.number}</span>'
+            f'<span class="num">#{_e(record.number)}</span>'
             f'<span class="exec">{_e(item.executor)}</span>{_chip(record)}'
             f'</div><div class="why">{_e(item.why)}</div></div></div>')
 
 
 def _card(title: str, refs_html: str, records: Sequence[QueueRecord]) -> str:
-    rows = "".join(_card_row(r) for r in records)
+    rows = "".join(_safe(_card_row, r) for r in records)
     refs = f'<div class="card-refs">{refs_html}</div>' if refs_html else ""
     return (f'<section class="card"><div class="card-h">'
             f'<div class="card-t">{_e(title)}</div>{refs}</div>'
@@ -704,13 +861,13 @@ def _branches_html(groups: Sequence[Group],
         for iid in g.bare_mr_refs:
             # No URL to link -- render the reference as plain text rather than
             # constructing a URL we do not actually have.
-            refs.append(f'<span class="ref-bare">!{iid}</span>')
+            refs.append(f'<span class="ref-bare">!{_e(iid)}</span>')
         for url in g.issue_links:
             refs.append(_link(url, f"#{int(_ISSUE_URL_RE.search(url).group(1))}"))
         cards.append(_card(g.title, "".join(refs), g.records))
     if ungrouped:
         cards.append(_card("Ungrouped", "",
-                           sorted(ungrouped, key=lambda r: r.number)))
+                           sorted(ungrouped, key=lambda r: _as_int(r.number))))
     return f'<div class="branches">{"".join(cards)}</div>'
 
 
@@ -719,13 +876,13 @@ def _telemetry_html(records: Sequence[QueueRecord],
                     now: str, queue_mtime: Optional[float]) -> str:
     counts: Dict[str, int] = {}
     for r in records:
-        counts[r.item.status] = counts.get(r.item.status, 0) + 1
+        counts[_status_of(r)] = counts.get(_status_of(r), 0) + 1
     # Ordered by the section a status lands in (so the things needing Chandler
     # come first), then alphabetically inside a section -- deterministic, and
     # without declaring a status ordering of its own.
     ordered, seen = [], set()
     for recs in sections.values():
-        for st in sorted({r.item.status for r in recs}):
+        for st in sorted({_status_of(r) for r in recs}, key=str):
             if st not in seen:
                 seen.add(st)
                 ordered.append(st)
@@ -744,13 +901,21 @@ def _telemetry_html(records: Sequence[QueueRecord],
 
 
 def _bar_html(records: Sequence[QueueRecord]) -> str:
-    proposed = sum(1 for r in records if r.item.status == "proposed")
+    """The sticky action bar.
+
+    Deliberately carries NO server-side count: the page computes both the
+    confirm-dialog count and the numbers it POSTs from the same rendered
+    `data-blanket` rows, so the two can never disagree. A server-rendered count
+    would go stale the moment the queue changed and would tell the user they
+    were approving N items while sending a different set.
+    """
+    del records                      # the page derives the set from the DOM
     return (
         '<div class="bar">'
         '<button type="button" class="btn" id="approve-selected" disabled>'
         'Approve selected (<span id="sel-count">0</span>)</button>'
-        f'<button type="button" class="btn btn-go" id="approve-all" '
-        f'data-proposed-count="{proposed}">Approve all</button>'
+        '<button type="button" class="btn btn-go" id="approve-all" disabled>'
+        'Approve all</button>'
         '</div>')
 
 
@@ -769,8 +934,8 @@ def render_page(records: Sequence[QueueRecord], now: str,
     records = list(records)
     sections = partition_sections(records)
     toggle = "".join(
-        f'<button type="button" class="toggle-btn" data-set-layout="{v}" '
-        f'aria-pressed="false">{v.capitalize()}</button>'
+        f'<button type="button" class="toggle-btn" data-set-layout="{_e(v)}" '
+        f'aria-pressed="false">{_e(v.capitalize())}</button>'
         for v in ("checklist", "panels", "branches"))
 
     if records:
@@ -791,7 +956,6 @@ def render_page(records: Sequence[QueueRecord], now: str,
         '<meta charset="utf-8">\n'
         '<meta name="viewport" content="width=device-width, initial-scale=1, '
         'viewport-fit=cover">\n'
-        f'<meta http-equiv="refresh" content="{_REFRESH_SECONDS}">\n'
         '<title>Worksweep</title>\n'
         f'<style>{_CSS}</style>\n'
         f'<script>{_HEAD_SCRIPT}</script>\n'
@@ -846,6 +1010,37 @@ def _valid_numbers(payload) -> Optional[List[int]]:
     return out
 
 
+def _audit_message(numbers: Sequence[int],
+                   updated: Sequence[QueueRecord]) -> str:
+    """Build the Discord confirmation, clamped under the Discord byte cap.
+
+    "Approve all" is the highest-blast-radius action in worksweep, so it must
+    ALWAYS leave a channel record. An unclamped message naming 200 items would
+    be rejected by Discord and the audit trail would silently vanish for exactly
+    the approval that most needed one -- so overflow is summarised instead.
+    """
+    by_num = {r.number: r for r in updated}
+    parts = [f"{n} ({by_num[n].item.executor} {by_num[n].item.repo})".strip()
+             for n in numbers if n in by_num]
+    prefix, suffix = "✅ Approved: ", " (dashboard)"
+
+    full = prefix + ", ".join(parts) + suffix
+    if len(full.encode("utf-8")) <= DISCORD_MAX_CHARS:
+        return full
+
+    kept = list(parts)
+    while kept:
+        kept.pop()
+        candidate = (prefix + ", ".join(kept)
+                     + f" … (+{len(parts) - len(kept)} more)" + suffix)
+        if len(candidate.encode("utf-8")) <= DISCORD_MAX_CHARS:
+            return candidate
+    # Even one entry does not fit (absurd repo/executor strings) -- still say
+    # something rather than nothing.
+    return _truncate_bytes(f"{prefix}{len(parts)} items{suffix}",
+                           DISCORD_MAX_CHARS)
+
+
 class DashboardHandler(BaseHTTPRequestHandler):
     """GET `/` renders; POST `/approve` and `/approve-all` persist.
 
@@ -855,12 +1050,30 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     server_version = "worksweep-dashboard/1"
 
+    def _log_line(self, fmt, args) -> str:
+        """Render a log line with control bytes stripped.
+
+        The request line is attacker-controlled and lands in a file a human
+        later tails: raw \r / \x1b would let a request forge log lines or drive
+        the reader's terminal.
+        """
+        try:
+            body = fmt % args if args else str(fmt)
+        except Exception:
+            body = repr((fmt, args))
+        line = f"worksweep-dashboard: {self.address_string()} - {body}"
+        return _CTRL_RE.sub("?", line)
+
     def log_message(self, fmt, *args):   # noqa: A003
         # Access logs to stdout (the .log file) so .err stays meaningful for
         # actual failures under launchd.
-        sys.stdout.write("worksweep-dashboard: %s - %s\n"
-                         % (self.address_string(), fmt % args))
+        sys.stdout.write(self._log_line(fmt, args) + "\n")
         sys.stdout.flush()
+
+    def log_error(self, fmt, *args):
+        # BaseHTTPRequestHandler routes malformed-request errors here and would
+        # otherwise echo the raw request line to stderr unsanitised.
+        sys.stderr.write(self._log_line(fmt, args) + "\n")
 
     # -- plumbing --------------------------------------------------------
     def _send(self, code: int, ctype: str, body: bytes) -> None:
@@ -921,7 +1134,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         qpath = self.server.queue_path
         try:
             body = render_page(load_queue(qpath), self.server.now(),
-                               _queue_mtime(qpath)).encode("utf-8")
+                               _queue_mtime(qpath)).encode("utf-8",
+                                                            errors="replace")
         except Exception as e:                     # never crash the agent
             print(f"worksweep: dashboard render failed: {e}", file=sys.stderr)
             body = _ERROR_PAGE.encode("utf-8")
@@ -941,17 +1155,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self._text(400, "bad request")
             return
 
-        numbers: Optional[List[int]] = None
-        if path == "/approve":
-            try:
-                payload = json.loads(raw.decode("utf-8"))
-            except (UnicodeDecodeError, ValueError):
-                self._text(400, "bad request")
-                return
-            numbers = _valid_numbers(payload)
-            if numbers is None:
-                self._text(400, "bad request")
-                return
+        # BOTH routes now carry `{"numbers": [...]}`. For /approve-all those
+        # are the proposed+runnable numbers the page actually displayed: the
+        # server flips that set INTERSECTED with what is still eligible, so the
+        # user approves exactly what they were shown and consented to. An item
+        # that landed between render and tap is not swept in silently.
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            self._text(400, "bad request")
+            return
+        numbers = _valid_numbers(payload)
+        if numbers is None:
+            self._text(400, "bad request")
+            return
 
         try:
             self._approve(path, numbers)
@@ -962,20 +1179,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def _approve(self, path: str, numbers: Optional[List[int]]) -> None:
         qpath = self.server.queue_path
         now = self.server.now()
-        # Load FRESH from disk, never from the rendered snapshot: the page may
-        # be up to 60s stale and the runner may have claimed items since.
-        # Flipping a cached list would resurrect stale statuses over newer ones
-        # on save_queue's whole-file replace.
-        records = load_queue(qpath)
-        if path == "/approve":
-            updated, newly = approve_numbers(records, set(numbers or []), now)
-        else:
-            updated, newly = approve_all(records, now)
-
+        with _WRITE_LOCK:
+            # Load FRESH from disk, never from the rendered snapshot: the page
+            # may be stale and the runner may have claimed items since.
+            # Flipping a cached list would resurrect stale statuses over newer
+            # ones on save_queue's whole-file replace. The lock keeps two
+            # concurrent taps in THIS process from interleaving their
+            # read-modify-write; the cross-process race stays accepted.
+            records = load_queue(qpath)
+            if path == "/approve":
+                updated, newly = approve_numbers(records, set(numbers or []), now)
+            else:
+                updated, newly = approve_all(records, now,
+                                             numbers=set(numbers or []))
+            if newly:
+                # Durable BEFORE the audit post: a Discord failure must not be
+                # able to roll this back.
+                save_queue(qpath, updated)
         if newly:
-            # Durable BEFORE the audit post: a Discord failure must not be able
-            # to roll this back.
-            save_queue(qpath, updated)
             self._audit(sorted(newly), updated)
         self._send(200, "application/json",
                    json.dumps({"approved": sorted(newly)}).encode("utf-8"))
@@ -985,11 +1206,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         """Never-silent: the channel stays the single history of what was
         approved. A failed post is logged and swallowed -- the approval already
         reached disk and must not be undone."""
-        by_num = {r.number: r for r in updated}
-        details = ", ".join(
-            f"{n} ({by_num[n].item.executor} {by_num[n].item.repo})".strip()
-            for n in numbers if n in by_num)
-        confirm = f"✅ Approved: {details} (dashboard)"
+        confirm = _audit_message(numbers, updated)
         post, webhook = self.server.post, self.server.webhook
         if post and webhook:
             try:
@@ -1023,54 +1240,123 @@ def make_server(address: Tuple[str, int], queue_path: str,
     return httpd
 
 
+def is_allowed_bind(address: str) -> bool:
+    """True for loopback or a Tailscale CGNAT address, False for anything else.
+
+    Tailnet-only exposure IS the security model here (decision 5): there is no
+    auth layer, and the page shows private PLA MR titles and whys. Binding a LAN
+    address or 0.0.0.0 would publish all of it to anyone on the network.
+    """
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    return ip.is_loopback or ip in _TAILNET_NETWORK
+
+
+def _tailscale_ipv4(run_subprocess: Callable) -> str:
+    """First IPv4 address tailscale reports, or "" if it cannot be asked.
+
+    Tries the PATH binary first, then the app bundle: under launchd the mini's
+    PATH does not always include the CLI shim.
+    """
+    for binary in ("tailscale", _TAILSCALE_FALLBACK_BIN):
+        try:
+            result = run_subprocess([binary, "ip", "-4"],
+                                    capture_output=True, text=True, timeout=10)
+        except Exception:
+            continue          # not installed at this path -- try the next
+        if getattr(result, "returncode", 1) != 0:
+            continue
+        for line in (getattr(result, "stdout", "") or "").splitlines():
+            address = line.strip()
+            if address:
+                return address
+    return ""
+
+
 def resolve_bind(bind: str,
                  run_subprocess: Callable = subprocess.run) -> str:
-    """Resolve `--bind`. `auto` -> the first `tailscale ip -4` address.
+    """Resolve `--bind` to an address, or "" when `auto` cannot resolve YET.
 
-    Tailnet-only exposure is the whole security model here (decision 5): PLA MR
-    titles must not sit on the open LAN, and there is no auth layer. Falling
-    back to loopback when tailscale is missing, failing, or silent keeps the
-    agent up and the page private -- unreachable beats world-readable.
+    An explicit bind is VALIDATED and rejected hard if it is not loopback or
+    tailnet -- a typo must never quietly publish the queue to the LAN.
+
+    `auto` returns "" rather than falling back to loopback: falling back would
+    strand the dashboard unreachable until someone noticed and restarted it.
+    The caller retries instead (see `serve`), so a dashboard that starts before
+    tailscaled simply picks up the address a few seconds later.
     """
     if bind and bind != "auto":
+        if not is_allowed_bind(bind):
+            raise ValueError(
+                f"refusing to bind {bind!r}: the dashboard has no auth and "
+                f"serves private PLA work, so it may only bind loopback or a "
+                f"Tailscale address (100.64.0.0/10)")
         return bind
-    try:
-        result = run_subprocess(["tailscale", "ip", "-4"],
-                                capture_output=True, text=True, timeout=10)
-    except Exception as e:
-        print(f"worksweep: tailscale ip failed ({e}); binding {_LOOPBACK}",
-              file=sys.stderr)
-        return _LOOPBACK
-    if getattr(result, "returncode", 1) != 0:
-        print(f"worksweep: tailscale ip exited non-zero; binding {_LOOPBACK}",
-              file=sys.stderr)
-        return _LOOPBACK
-    for line in (getattr(result, "stdout", "") or "").splitlines():
-        addr = line.strip()
-        if addr:
-            return addr
-    print(f"worksweep: tailscale ip printed nothing; binding {_LOOPBACK}",
-          file=sys.stderr)
-    return _LOOPBACK
+    address = _tailscale_ipv4(run_subprocess)
+    if address and is_allowed_bind(address):
+        return address
+    if address:
+        print(f"worksweep: tailscale reported {address!r}, which is not a "
+              f"tailnet address; ignoring", file=sys.stderr)
+    return ""
 
 
 def serve(queue_path: str, port: int = DEFAULT_PORT, bind: str = "auto",
           post: Optional[Callable[[str, str], None]] = None,
           webhook: str = "",
-          run_subprocess: Callable = subprocess.run) -> int:
+          run_subprocess: Callable = subprocess.run,
+          sleep: Callable[[float], None] = time.sleep,
+          max_attempts: int = 0) -> int:
     """Serve the dashboard until interrupted. Blocks forever -- CLI only.
 
-    `post` and `webhook` are injected by the caller: this module must not import
-    the CLI that owns the Discord poster (that module imports this one).
+    Resolution AND bind live in one retry loop. Both of the failures that
+    actually happen on the mini are transient: the agent starts at boot before
+    tailscaled has an address, and the port is briefly held after a restart.
+    Retrying in-process beats the alternatives -- crash-looping under KeepAlive
+    (which buries the reason in a restart storm) or falling back to loopback
+    permanently (silently unreachable).
+
+    `post` and `webhook` are injected: this module must not import the CLI that
+    owns the Discord poster, because that module imports this one.
+    `max_attempts` is for tests; 0 means retry forever.
     """
-    address = resolve_bind(bind, run_subprocess=run_subprocess)
-    httpd = make_server((address, port), queue_path, post=post, webhook=webhook)
-    print(f"worksweep: dashboard serving http://{address}:{port} "
-          f"({queue_path})", flush=True)
-    try:
-        httpd.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        httpd.server_close()
-    return 0
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            address = resolve_bind(bind, run_subprocess=run_subprocess)
+        except ValueError as e:
+            # A bad EXPLICIT bind is a configuration error, not a transient
+            # one: retrying would never fix it and would hide the message.
+            print(f"worksweep: {e}", file=sys.stderr)
+            return 1
+
+        httpd = None
+        if address:
+            try:
+                httpd = make_server((address, port), queue_path,
+                                    post=post, webhook=webhook)
+            except OSError as e:
+                print(f"worksweep: dashboard cannot bind {address}:{port} "
+                      f"({e})", file=sys.stderr)
+        else:
+            print("worksweep: no tailscale address yet", file=sys.stderr)
+
+        if httpd is not None:
+            print(f"worksweep: dashboard serving http://{address}:{port} "
+                  f"({queue_path})", flush=True)
+            try:
+                httpd.serve_forever()
+            except KeyboardInterrupt:
+                pass
+            finally:
+                httpd.server_close()
+            return 0
+
+        if max_attempts and attempt >= max_attempts:
+            return 1
+        print(f"worksweep: dashboard retrying in {_BIND_RETRY_SECONDS}s "
+              f"(attempt {attempt})", file=sys.stderr)
+        sleep(_BIND_RETRY_SECONDS)
