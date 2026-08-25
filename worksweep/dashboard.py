@@ -221,24 +221,18 @@ def is_actionable(item: WorkItem) -> bool:
 
 
 def todo_id_of(item) -> int:
-    """The GitLab todo id for a todo record, or 0 when the queue does not carry one.
+    """The GitLab todo id for a record, or 0 when it carries none.
 
-    IMPORTANT, and the reason this returns 0 in practice: worksweep never
-    captures a todo's numeric id. `collectors.parse_todos` reads only
-    `target_type`, `action_name` and `target_url`, `models.Todo` has no id
-    field, and `assessor.assess_todo` builds the WorkItem id as
-    `todo:<action_name>:<target_url>` -- verified against the live queue, where
-    real ids look like `todo:assigned:https://.../work_items/1719`.
-
-    So the `todo:<digits>:` shape this parses does not occur today and the
-    GitLab "mark as done" edge cannot fire. The local dismiss is unaffected and
-    is durable across sweeps regardless (see the reconcile tests). Capturing the
-    id needs a decision -- a new persisted field, or a lookup by target_url at
-    dismiss time -- so it is reported rather than invented here. The moment an
-    id IS carried, this and the injected edge light up with no other change.
+    Read from the persisted `todo_id` field (captured by `collectors.parse_todos`
+    and threaded on by `assessor.assess_todo`). Returns 0 -- never raises -- for
+    every non-todo kind and for todo records written before the field existed;
+    those refresh on the next sweep, and until then Dismiss falls back to a
+    local-only dismiss with a loud stderr note.
     """
-    m = re.match(r"todo:(\d+):", getattr(item, "id", "") or "")
-    return int(m.group(1)) if m else 0
+    try:
+        return int(getattr(item, "todo_id", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def done_this_week(records: Sequence[QueueRecord], now: str) -> int:

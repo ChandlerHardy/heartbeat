@@ -1829,13 +1829,14 @@ class _Marker:
             raise self.fail
 
 
-def _todo(n, todo_id=None, status="proposed"):
-    """A todo record. `todo_id` synthesises the `todo:<digits>:` shape that the
-    GitLab edge needs; the REAL queue never carries one (see todo_id_of)."""
-    ident = (f"todo:{todo_id}:https://gl/x/-/merge_requests/9" if todo_id
-             else "todo:assigned:https://gl/x/-/work_items/1719")
-    return _rec(n, kind="todo", executor="triage", status=status, id=ident,
-                web_url="https://gl/x/-/work_items/1719")
+def _todo(n, todo_id=0, status="proposed"):
+    """A todo record. `todo_id` 0 models a LEGACY record -- one written before
+    the field existed -- which dismisses locally but cannot be cleared in
+    GitLab. The id STRING is unchanged either way: it is the queue's identity
+    key, so carrying the todo id there would renumber every todo."""
+    return _rec(n, kind="todo", executor="triage", status=status,
+                id="todo:assigned:https://gl/x/-/work_items/1719",
+                web_url="https://gl/x/-/work_items/1719", todo_id=todo_id)
 
 
 def test_dismiss_flips_a_non_runnable_row_to_done(serve_queue):
@@ -1927,10 +1928,11 @@ def test_a_glab_failure_still_dismisses_locally(serve_queue, capsys):
     assert (out.status, out.done_reason) == ("done", "dismissed")
 
 
-def test_a_real_todo_record_dismisses_locally_and_says_why_not_in_gitlab(
+def test_a_legacy_todo_record_dismisses_locally_and_says_why_not_in_gitlab(
         serve_queue, capsys):
-    """The live queue's todo ids are `todo:<action>:<url>` -- no numeric id
-    anywhere -- so the GitLab edge cannot fire. That must be LOUD, not silent."""
+    """A todo record written before `todo_id` existed carries 0, so the GitLab
+    edge cannot fire for it. It still dismisses locally, and the miss must be
+    LOUD rather than silent -- these refresh on the next sweep."""
     marker = _Marker()
     s, qpath = serve_queue([_todo(1)], mark_todo_done=marker)
     assert s.dismiss(1)[0] == 200
@@ -1941,12 +1943,18 @@ def test_a_real_todo_record_dismisses_locally_and_says_why_not_in_gitlab(
     assert "no todo id" in err
 
 
-def test_todo_id_of_reads_a_numeric_id_and_zero_otherwise():
+def test_todo_id_of_reads_the_persisted_field():
     assert dashboard.todo_id_of(_todo(1, todo_id=4242).item) == 4242
-    # the shape the live queue actually carries
+    # a legacy todo record, written before the field existed
     assert dashboard.todo_id_of(_todo(1).item) == 0
+    # every non-todo kind, and anything unparseable, is 0 and never raises
     assert dashboard.todo_id_of(_rec(1, id="issue:pb-www#869").item) == 0
-    assert dashboard.todo_id_of(_rec(1, id="").item) == 0
+    assert dashboard.todo_id_of(_rec(1, kind="mr").item) == 0
+
+    class _Junk:
+        todo_id = "not-a-number"
+    assert dashboard.todo_id_of(_Junk()) == 0
+    assert dashboard.todo_id_of(object()) == 0
 
 
 def test_dismiss_posts_a_discord_audit(serve_queue):

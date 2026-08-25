@@ -41,6 +41,10 @@ class Todo:
     target: str
     action: str
     web_url: str
+    # GitLab's own todo id, needed to mark it done (`todos/<id>/mark_as_done`).
+    # Trails the required fields with a default so existing constructions and
+    # any todo parsed before this field existed keep working.
+    id: int = 0
 
 
 @dataclass(frozen=True)
@@ -95,6 +99,14 @@ class WorkItem:
     mr_iid: int = 0           # Draft MR iid opened by the `implement` executor
     branch: str = ""          # M4 Task H: mr.source_branch, set by assess_stale --
                               # the `keep-current` executor's checkout target
+    todo_id: int = 0          # GitLab todo id for `kind == "todo"` items, so the
+                              # dashboard's Dismiss can mark the todo done. 0 for
+                              # every other kind, and for todo records written
+                              # before this field existed (they refresh on the
+                              # next sweep). The WorkItem `id` string is
+                              # deliberately unchanged -- it is the queue's
+                              # identity key, so touching it would renumber
+                              # every todo.
 
 
 @dataclass(frozen=True)

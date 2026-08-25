@@ -82,6 +82,7 @@ def parse_todos(raw_json: str) -> List[Todo]:
                 target=it.get("target_type", ""),
                 action=it.get("action_name", ""),
                 web_url=it.get("target_url", ""),
+                id=int(it.get("id", 0) or 0),
             ))
         except (ValueError, TypeError, AttributeError) as e:
             print(f"worksweep: parse_todos skipping bad row: {e}", file=sys.stderr)

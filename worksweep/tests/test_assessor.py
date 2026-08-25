@@ -127,3 +127,21 @@ def test_has_magi_report_matches_repo_and_iid_across_slots(tmp_path, monkeypatch
     assert has_magi_report("pb-www", 3920) is True
     assert has_magi_report("pb-www", 1) is False     # wrong iid
     assert has_magi_report("pb-api", 3920) is False  # wrong repo
+
+
+def test_assess_todo_threads_the_gitlab_todo_id():
+    """Falsifying: without this the id is parsed and then dropped on the floor
+    before it ever reaches the queue."""
+    from worksweep.models import Todo as _Todo
+    it = assess_todo(_Todo(target="MergeRequest", action="assigned",
+                           web_url="https://gl/x/-/merge_requests/9", id=4242))[0]
+    assert it.todo_id == 4242
+    # the identity key is deliberately unchanged -- carrying the id there would
+    # renumber every todo in the queue
+    assert it.id == "todo:assigned:https://gl/x/-/merge_requests/9"
+
+
+def test_assess_todo_without_an_id_is_zero_not_an_error():
+    from worksweep.models import Todo as _Todo
+    it = assess_todo(_Todo(target="Issue", action="mentioned", web_url="u"))[0]
+    assert it.todo_id == 0

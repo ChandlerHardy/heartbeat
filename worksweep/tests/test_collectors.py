@@ -153,3 +153,43 @@ def test_collect_diverged_commits_count_non_object_json_raises():
     with patch("subprocess.run", _fake_run("[1, 2]")):
         with pytest.raises(RuntimeError, match="not an object"):
             collect_diverged_commits_count("pb-www", 4020)
+
+
+# --- the GitLab todo id, needed to mark a todo done from the dashboard -------
+
+def test_parse_todos_captures_the_gitlab_todo_id():
+    """Falsifying: drop `id=` from parse_todos and Dismiss can never clear the
+    todo in GitLab -- the row goes away locally and comes back in the todo list."""
+    raw = json.dumps([{
+        "id": 4242, "target_type": "MergeRequest", "action_name": "assigned",
+        "target_url": "https://gitlab.com/x/-/merge_requests/9",
+    }])
+    todos = parse_todos(raw)
+    assert len(todos) == 1
+    assert todos[0].id == 4242
+    assert todos[0].action == "assigned"
+
+
+@pytest.mark.parametrize("payload,expected", [
+    ({"id": 77}, 77),
+    ({"id": "77"}, 77),          # the REST payload is JSON; be liberal
+    ({}, 0),                     # absent -> 0, never a KeyError
+    ({"id": None}, 0),
+    ({"id": 0}, 0),
+])
+def test_parse_todos_todo_id_coercion(payload, expected):
+    row = {"target_type": "MergeRequest", "action_name": "assigned",
+           "target_url": "u"}
+    row.update(payload)
+    assert parse_todos(json.dumps([row]))[0].id == expected
+
+
+def test_parse_todos_skips_a_row_with_an_unusable_id_without_losing_the_rest():
+    raw = json.dumps([
+        {"id": "not-a-number", "target_type": "MergeRequest",
+         "action_name": "assigned", "target_url": "u1"},
+        {"id": 9, "target_type": "Issue", "action_name": "mentioned",
+         "target_url": "u2"},
+    ])
+    todos = parse_todos(raw)
+    assert [t.id for t in todos] == [9]

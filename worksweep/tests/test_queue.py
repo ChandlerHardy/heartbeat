@@ -177,3 +177,77 @@ def test_a_dismissed_todo_stays_dismissed_even_if_gitlab_still_lists_it():
     assert after[0].item.status == "done"
     assert after[0].item.done_reason == "dismissed"
     assert after[0].number == 1                    # and keeps its handle
+
+
+# --- todo_id across sweeps ---------------------------------------------------
+
+def _todo_item(todo_id, status="proposed"):
+    from worksweep.models import WorkItem
+    return WorkItem(schema_version=1,
+                    id="todo:assigned:https://gl/x/-/work_items/9", repo="",
+                    kind="todo", executor="triage", risk="low",
+                    why="assigned on MergeRequest",
+                    web_url="https://gl/x/-/work_items/9", sha="",
+                    status=status, todo_id=todo_id)
+
+
+def test_reconcile_refreshes_todo_id_from_the_fresh_sweep_item():
+    """No carry is needed, and a carry would actively be WRONG here.
+
+    Todos have sha "" on both sides, so reconcile's same-sha branch fires every
+    sweep and rebuilds from the FRESH item -- which now carries todo_id. That is
+    what heals a legacy record written before the field existed: it picks the id
+    up on the next sweep with no migration. (dev_box/mr_iid are carried from the
+    prior item because the executor owns those; the todo id is upstream data, so
+    the fresh value is the authoritative one.)
+    """
+    from worksweep.models import QueueRecord
+    from worksweep.queue import reconcile
+    prior = [QueueRecord(number=5, first_seen="2026-08-20T09:00:00Z",
+                         last_seen="2026-08-20T09:00:00Z", item=_todo_item(0))]
+    out = reconcile(prior, [_todo_item(77)], "2026-08-25T09:00:00Z")
+    assert len(out) == 1
+    assert out[0].item.todo_id == 77          # legacy 0 healed by the sweep
+    assert out[0].number == 5                 # and it keeps its approval handle
+    assert out[0].item.status == "proposed"
+
+
+def test_reconcile_does_not_carry_a_stale_todo_id_over_a_fresh_one():
+    from worksweep.models import QueueRecord
+    from worksweep.queue import reconcile
+    prior = [QueueRecord(number=5, first_seen="2026-08-20T09:00:00Z",
+                         last_seen="2026-08-20T09:00:00Z", item=_todo_item(11))]
+    out = reconcile(prior, [_todo_item(22)], "2026-08-25T09:00:00Z")
+    assert out[0].item.todo_id == 22
+
+
+def test_a_dismissed_todo_keeps_its_id_and_stays_done():
+    """The dismissed record is retained verbatim, so its id survives whether or
+    not the todo is still pending upstream."""
+    from worksweep.models import QueueRecord
+    from worksweep.queue import dismiss, reconcile
+    prior = [QueueRecord(number=5, first_seen="2026-08-20T09:00:00Z",
+                         last_seen="2026-08-20T09:00:00Z", item=_todo_item(77))]
+    dismissed, _ = dismiss(prior, 5, "2026-08-25T09:00:00Z")
+    for fresh in ([_todo_item(77)], []):       # still pending, and cleared
+        out = reconcile(dismissed, fresh, "2026-08-25T13:00:00Z")
+        assert len(out) == 1
+        assert out[0].item.status == "done"
+        assert out[0].item.done_reason == "dismissed"
+        assert out[0].item.todo_id == 77
+
+
+def test_a_queue_written_before_todo_id_existed_still_loads(tmp_path):
+    """Additive field: an old queue.json has no `todo_id` key at all."""
+    import json as _json
+    from worksweep.queue import load_queue
+    qp = os.path.join(str(tmp_path), "queue.json")
+    item = {"schema_version": 1, "id": "todo:assigned:u", "repo": "",
+            "kind": "todo", "executor": "triage", "risk": "low", "why": "w",
+            "web_url": "u", "sha": "", "status": "proposed"}
+    _json.dump([{"number": 3, "first_seen": "t", "last_seen": "t", "item": item}],
+               open(qp, "w"))
+    records = load_queue(qp)
+    assert len(records) == 1
+    assert records[0].item.todo_id == 0
+    assert records[0].number == 3

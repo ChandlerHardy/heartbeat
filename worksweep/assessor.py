@@ -171,7 +171,7 @@ def assess_todo(todo: Todo) -> List[WorkItem]:
     return [WorkItem(
         schema_version=1, id=f"todo:{todo.action}:{todo.web_url}", repo="", kind="todo",
         executor="triage", risk="low", why=f"{todo.action} on {todo.target}",
-        web_url=todo.web_url, sha="")]
+        web_url=todo.web_url, sha="", todo_id=todo.id)]
 
 
 # Two narrow patterns instead of a blanket "#\d+ anywhere in the title" scan
