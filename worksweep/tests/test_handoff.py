@@ -221,7 +221,8 @@ def test_item_line_no_title_segment_when_title_empty():
                  executor="magi-review", risk="low", why="review requested",
                  web_url="https://gl/x/-/merge_requests/4061", sha="s")
     line = _item_line(12, it)
-    assert "*" not in line
+    # only the bold number's asterisks remain -- no *title* emphasis segment
+    assert "*" not in line.replace("**12.**", "", 1)
 
 
 def test_item_line_handoff_gets_checkmark_prefix():

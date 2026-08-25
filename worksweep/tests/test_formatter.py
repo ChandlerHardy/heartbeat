@@ -63,7 +63,7 @@ def test_every_message_within_byte_cap_multibyte_safe():
 def test_all_items_present_across_messages():
     n = 80
     joined = "\n".join(format_messages([_wi(i) for i in range(n)]))
-    assert "1. " in joined and f"{n}. " in joined  # first and last survive
+    assert "**1.** " in joined and f"**{n}.** " in joined  # first and last survive
 
 
 def test_oversized_single_item_line_truncated_byte_safe():
@@ -81,8 +81,8 @@ def test_digest_from_records_uses_persisted_numbers():
     # render as "1." and "3." — never re-enumerate to "1."/"2."
     recs = [_rec(1, _wi(10, why="first")), _rec(3, _wi(30, why="third"))]
     out = format_digest_from_records(recs)
-    assert "1. " in out
-    assert "3. " in out
+    assert "**1.** " in out
+    assert "**3.** " in out
     assert "2. " not in out
 
 
@@ -90,7 +90,7 @@ def test_digest_from_records_renders_in_number_order():
     # records given out of order must still render ascending by number
     recs = [_rec(3, _wi(30, why="third")), _rec(1, _wi(10, why="first"))]
     out = format_digest_from_records(recs)
-    assert out.index("1. ") < out.index("3. ")
+    assert out.index("**1.** ") < out.index("**3.** ")
 
 
 def test_messages_from_records_empty_is_all_clear():
@@ -101,7 +101,7 @@ def test_messages_from_records_empty_is_all_clear():
 def test_messages_from_records_uses_persisted_number():
     recs = [_rec(7, _wi(42, why="lucky"))]
     joined = "\n".join(format_messages_from_records(recs))
-    assert "7. " in joined
+    assert "**7.** " in joined
     assert "[#42](https://gitlab.com/x/-/merge_requests/42)" in joined
 
 
@@ -197,8 +197,10 @@ def test_digest_from_records_renders_preamble_under_header():
     rec = _rec(1, _wi(1))
     out = format_digest_from_records([rec], preamble=_SLOT_LINE)
     lines = out.splitlines()
-    assert lines[0].startswith("🔭")
-    assert lines[1] == _SLOT_LINE
+    assert lines[0].startswith("###")
+    # header is now two lines (title + bold counts); preamble renders as
+    # subtext directly beneath them
+    assert lines[2] == f"-# {_SLOT_LINE}"
 
 
 def test_digest_from_records_no_preamble_when_none():
@@ -218,8 +220,10 @@ def test_messages_from_records_renders_preamble_under_header():
     rec = _rec(1, _wi(1))
     msgs = format_messages_from_records([rec], preamble=_SLOT_LINE)
     lines = msgs[0].splitlines()
-    assert lines[0].startswith("🔭")
-    assert lines[1] == _SLOT_LINE
+    assert lines[0].startswith("###")
+    # header is now two lines (title + bold counts); preamble renders as
+    # subtext directly beneath them
+    assert lines[2] == f"-# {_SLOT_LINE}"
 
 
 def test_messages_from_records_preamble_survives_multipart_split():
@@ -233,9 +237,9 @@ def test_messages_from_records_preamble_survives_multipart_split():
 def test_format_messages_and_digest_m1_path_accept_preamble():
     # M1 (no-queue) entry points thread preamble too, for symmetry.
     out = format_digest([_wi(1)], preamble=_SLOT_LINE)
-    assert out.splitlines()[1] == _SLOT_LINE
+    assert out.splitlines()[2] == f"-# {_SLOT_LINE}"
     msgs = format_messages([_wi(1)], preamble=_SLOT_LINE)
-    assert msgs[0].splitlines()[1] == _SLOT_LINE
+    assert msgs[0].splitlines()[2] == f"-# {_SLOT_LINE}"
 
 
 # --------------------------------------------------------------------------
@@ -261,7 +265,7 @@ def test_header_counts_actionable_auto_and_handoff_separately():
     import dataclasses
     handoff = dataclasses.replace(_wi(4), kind="handoff")
     out = format_digest([_wi(1), _stale_wi(2), handoff])
-    assert "1 need you · 1 auto-merging · 1 handed off" in out
+    assert "**1 need you** · 1 auto-merging · 1 handed off" in out
 
 
 def test_needs_input_keep_current_stays_actionable():
@@ -276,4 +280,4 @@ def test_handoff_lines_render_as_subtext():
     handoff = dataclasses.replace(_wi(4), kind="handoff")
     out = format_digest([_wi(1), handoff])
     assert "-# **Handed off (no action):**" in out
-    assert "\n-# ✅ 2." in out
+    assert "\n-# ✅ **2.**" in out

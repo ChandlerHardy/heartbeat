@@ -15,9 +15,9 @@ from .models import QueueRecord, WorkItem
 
 DISCORD_MAX_CHARS = 1900
 
-_HEADER = "🔭 **Worksweep**"
-_FOOTER = "Reply e.g. `✅ 1,3` to approve (approved items run automatically; keep-current merges need no ✅)."
-_ALL_CLEAR = "✅ Worksweep: nothing needs you right now."
+_HEADER = "### 🔭 Worksweep"
+_FOOTER = "-# Reply e.g. `✅ 1,3` to approve (approved items run automatically; keep-current merges need no ✅)."
+_ALL_CLEAR = "### 🔭 Worksweep\n✅ Nothing needs you right now."
 
 
 def _truncate_bytes(s: str, max_bytes: int = DISCORD_MAX_CHARS) -> str:
@@ -88,8 +88,12 @@ def _item_line(n: int, it: WorkItem, first_seen: Optional[str] = None,
     # ref number stays visible. The leading `n.` is the approval handle for M2.
     # `handoff` items (ready-to-merge, handed to a maintainer) are informational
     # rather than actionable, so they render with a leading ✅.
+    # `**n.**` (not bare `n.`): Discord parses a line starting `185.` as a
+    # markdown ORDERED LIST and renumbers/eats the marker — the queue number
+    # the user must ✅ literally disappeared from the rendered digest
+    # (2026-08-24). Leading bold breaks list parsing and reads better anyway.
     prefix = "✅ " if it.kind == "handoff" else ""
-    parts = [f"{prefix}{n}.", f"`{it.executor}`"]
+    parts = [f"{prefix}**{n}.**", f"`{it.executor}`"]
     if it.repo:
         parts.append(it.repo)
     if it.web_url:
@@ -152,7 +156,7 @@ def _digest_header(actionable, auto, handoff) -> str:
         bits.append(f"{len(auto)} auto-merging")
     if handoff:
         bits.append(f"{len(handoff)} handed off")
-    return f"{_HEADER} — {' · '.join(bits)}:"
+    return f"{_HEADER}\n**{bits[0]}**" + "".join(f" · {b}" for b in bits[1:])
 
 
 def _numbered(items: List[WorkItem]) -> List[tuple]:
@@ -187,7 +191,7 @@ def _format_messages_numbered(numbered: List[tuple],
     actionable, auto, handoff = _split_groups(numbered)
     head = _digest_header(actionable, auto, handoff)
     if preamble:
-        head += f"\n{preamble}"
+        head += f"\n-# {preamble}"
     cont = f"{_HEADER} *(cont.)*"
     msgs: List[str] = []
     cur = head
@@ -242,7 +246,7 @@ def _format_digest_numbered(numbered: List[tuple], now: Optional[str] = None,
     actionable, auto, handoff = _split_groups(numbered)
     lines = [_digest_header(actionable, auto, handoff)]
     if preamble:
-        lines.append(preamble)
+        lines.append(f"-# {preamble}")
     for item_tuple in actionable:
         n = item_tuple[0]
         it = item_tuple[1]

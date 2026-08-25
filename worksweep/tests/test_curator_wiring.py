@@ -57,7 +57,7 @@ def test_curated_digest_posts_single_message_with_curated_header():
     assert rc == 0
     texts = [p for p in posts if isinstance(p, str)]
     assert len(texts) == 1
-    assert "(curated)" in texts[0]
+    assert "· curated" in texts[0]
     assert "1. pb-www [!4061](<https://gl/x/-/merge_requests/4061>) -- review requested" in texts[0]  # linkified post-validation
     assert "1 actionable" in texts[0]
 
@@ -71,7 +71,7 @@ def test_curator_llm_exception_falls_back_to_raw_digest():
     assert rc == 0
     texts = [p for p in posts if isinstance(p, str)]
     assert len(texts) == 1
-    assert "(curated)" not in texts[0]
+    assert "· curated" not in texts[0]
     assert "review" in texts[0].lower()
 
 
@@ -83,7 +83,7 @@ def test_curator_validation_failure_falls_back_to_raw_digest():
     assert rc == 0
     texts = [p for p in posts if isinstance(p, str)]
     assert len(texts) == 1
-    assert "(curated)" not in texts[0]
+    assert "· curated" not in texts[0]
 
 
 def test_curate_false_skips_llm_entirely():
@@ -98,7 +98,7 @@ def test_curate_false_skips_llm_entirely():
     assert calls == []
     texts = [p for p in posts if isinstance(p, str)]
     assert len(texts) == 1
-    assert "(curated)" not in texts[0]
+    assert "· curated" not in texts[0]
 
 
 def test_missing_llm_dep_skips_curation_raw_path_used():
@@ -111,7 +111,7 @@ def test_missing_llm_dep_skips_curation_raw_path_used():
     assert rc == 0
     texts = [p for p in posts if isinstance(p, str)]
     assert len(texts) == 1
-    assert "(curated)" not in texts[0]
+    assert "· curated" not in texts[0]
 
 
 def test_assembled_curated_message_never_exceeds_discord_cap():
@@ -133,7 +133,7 @@ def test_assembled_curated_message_never_exceeds_discord_cap():
     assert rc == 0
     texts = [p for p in posts if isinstance(p, str)]
     assert len(texts) == 1
-    assert "(curated)" in texts[0]
+    assert "· curated" in texts[0]
     assert len(texts[0].encode("utf-8")) <= DISCORD_MAX_CHARS
 
 

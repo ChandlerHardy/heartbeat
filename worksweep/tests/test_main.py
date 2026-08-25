@@ -151,6 +151,6 @@ def test_post_persists_queue_and_posted_number_matches_record_number(monkeypatch
     joined = "\n".join(posted)
     # every persisted record's number appears in the posted digest as "<n>. "
     for r in records:
-        assert f"{r.number}. " in joined
+        assert f"**{r.number}.** " in joined
     # and the queue holds the same count of proposed items the digest rendered
     assert all(r.item.status == "proposed" for r in records)

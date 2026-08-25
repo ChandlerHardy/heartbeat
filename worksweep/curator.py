@@ -101,17 +101,19 @@ Below is one line per open queue item:
 `number | kind | executor | repo | ref | why | age_days | status | title`.
 
 Write the briefing as plain text with these rules, in this order:
-1. "Needs your review:" -- one line per item whose executor is `magi-review`
+1. "**Needs your review:**" -- one line per item whose executor is `magi-review`
    and whose status is `proposed` or `approved`. Format each as
-   `{number}. {repo} !{ref} -- {short title} -- {why}`.
-2. "Feedback / CI on your MRs:" -- one line per remaining item whose executor
+   `**{number}.** {repo} !{ref} -- {short title} -- {why}` (the number
+   MUST be bolded `**{number}.**` -- a bare leading `12.` makes Discord
+   render the line as an ordered list and eat the number).
+2. "**Feedback / CI on your MRs:**" -- one line per remaining item whose executor
    is `triage` and whose kind is `feedback` or `ci_red`, same line format.
 2a. If any items have kind `stale` (executor `keep-current`), write exactly
    ONE trailing line for ALL of them together: "Auto-merging master into:
    !{ref}, !{ref}, ..." -- seneschal merges these without a ✅. Never give
    stale items their own lines and never cite their queue numbers.
-2b. "Assigned issues:" -- one line per item whose kind is `issue`, format
-   `{number}. {repo} #{ref} -- {short title}` (an assigned issue is a
+2b. "**Assigned issues:**" -- one line per item whose kind is `issue`, format
+   `**{number}.** {repo} #{ref} -- {short title}` (an assigned issue is a
    first-class ask; NEVER fold it into the low-priority line). If the
    preamble names a free/reclaimable dev slot, append " -- ✅ to implement"
    to each; otherwise append " -- no dev slot free".

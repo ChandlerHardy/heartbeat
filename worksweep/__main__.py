@@ -353,8 +353,8 @@ def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
             if curated is not None:
                 curated = curator.linkify(curated, actionable)  # deterministic, post-validation
                 n, m = curator.partition_counts(actionable)
-                head = (f"{_HEADER} (curated) — {n} actionable / {m} held:\n"
-                        + (f"{slot_line}\n" if slot_line else ""))
+                head = (f"{_HEADER}\n**{n} actionable** · {m} held · curated\n"
+                        + (f"-# {slot_line}\n" if slot_line else ""))
                 tail = f"\n{_FOOTER}"
                 # Fixed parts (header, slot line, footer) must always survive:
                 # give the LLM body whatever budget remains and truncate ONLY

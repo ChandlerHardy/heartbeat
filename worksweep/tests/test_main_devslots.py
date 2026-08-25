@@ -189,6 +189,6 @@ def test_curated_message_keeps_slot_line_and_footer_under_cap(monkeypatch):
     assert m.run_sweep(cfg, deps) == 0
     msg = [p for p in posts if isinstance(p, str)][0]
     assert len(msg.encode("utf-8")) <= DISCORD_MAX_CHARS
-    assert msg.startswith("🔭")
+    assert msg.startswith("### 🔭")
     assert "Dev slots:" in msg
     assert msg.rstrip().endswith(_FOOTER.rstrip())
