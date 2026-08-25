@@ -39,6 +39,13 @@ class WorksweepConfig:
     # `diverged_commits_count` isn't in the GraphQL MR node, so this is
     # sensed with one REST call per authored MR -- see collectors.
     stale_threshold: int = 5
+    # M5 (2026-08-24): when non-empty, the implement executor stops running
+    # `/rubric:do` + its own MR/magi steps and instead has ONE claude run
+    # drive this command end-to-end (the full pla-pipeline: implement ->
+    # ship gate -> full-magi fix loop -> park+QA -> Draft MR), passing the
+    # claimed slot via --dev. The executor then verifies the outcome (state
+    # file, Draft read-back, box 200) instead of producing it.
+    pipeline_command: str = ""
     # Executors whose freshly-proposed items skip the Discord ✅ gate and go
     # straight to `approved` at sweep time. keep-current is the only default:
     # a master merge is low-risk, aborts cleanly on conflict, and Chandler
@@ -87,6 +94,11 @@ def load_config(path: str | None = None) -> WorksweepConfig:
         raise RuntimeError(
             f"config runner.stale_threshold must be an integer, "
             f"got {stale_raw!r}")
+    pipeline_raw = rn.get("pipeline_command", "")
+    if not isinstance(pipeline_raw, str):
+        raise RuntimeError(
+            f"config runner.pipeline_command must be a string, "
+            f"got {pipeline_raw!r}")
     aa_raw = rn.get("auto_approve", ["keep-current"])
     if not isinstance(aa_raw, list) or not all(isinstance(x, str) for x in aa_raw):
         raise RuntimeError(
@@ -106,5 +118,6 @@ def load_config(path: str | None = None) -> WorksweepConfig:
         curate=curate_raw,
         dev_boxes=tuple(dev_boxes_raw),
         stale_threshold=stale_threshold,
+        pipeline_command=pipeline_raw,
         auto_approve=tuple(aa_raw),
     )

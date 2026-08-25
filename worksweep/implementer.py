@@ -27,6 +27,7 @@ nothing this executor produces can be merged by accident.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from dataclasses import dataclass, replace as _dc_replace
@@ -387,6 +388,9 @@ def execute(item: WorkItem, cfg, boxes: Sequence[DevBox],
     slot = select_slot(boxes)
     if slot is None:
         raise RunnerError("no dev slot available — free one or reclaim")
+    if getattr(cfg, "pipeline_command", ""):
+        return _execute_pipeline(cfg, iid, slot, checkout,
+                                 run_subprocess, http_get)
     branch = branch_name(iid, item.title or "")
 
     _git(run_subprocess, checkout, ["fetch", "origin"], timeout=_FETCH_TIMEOUT)
@@ -451,6 +455,118 @@ def execute(item: WorkItem, cfg, boxes: Sequence[DevBox],
         reassigned_from=(str(slot.mr_iid)
                          if slot.tier == _TIER_HANDED_OFF and slot.mr_iid else ""),
         magi_note=magi_note)
+
+
+_PIPELINE_CONSTRAINTS = """
+Unattended seneschal run — hard constraints on top of the skill:
+- FULL MAGI: never pass --lite; let magi-core's auto-gate pick panel mode. \
+Less human oversight requires more review, never less.
+- The MR must be created as a Draft and stay a Draft.
+- Chandler is away: never stop for input — record decisions per the skill \
+and keep going.
+- git-push-sync reads .vscode/sftp.json from the repo root; if the worktree \
+lacks one, create it: host chandlerhardy-dev.aws0.pla-net.cc, protocol \
+sftp, port 22, username chandlerhardy, openSsh true, remotePath \
+/home/chandlerhardy/{box}.chandlerhardy-dev/pb-www."""
+
+
+def _execute_pipeline(cfg, iid: int, slot: DevBox, checkout: str,
+                      run_subprocess: Callable,
+                      http_get: Callable[[str], int]) -> ImplementResult:
+    """M5: one claude run drives cfg.pipeline_command (the full pla-pipeline)
+    end-to-end; this executor shrinks to claim -> run -> PROVE. The pipeline
+    itself implements, ship-gates, runs the full magi fix loop, parks on the
+    claimed box, and opens the Draft MR — so this path must never create an
+    MR, run magi, or push. It verifies instead: the pipeline's state file
+    names an MR, that MR reads back as (or is forced) Draft, and the box
+    serves 200."""
+    devnum = re.sub(r"\D", "", slot.name) or slot.name
+    prompt = (f"{cfg.pipeline_command} #{iid} --dev {devnum}"
+              + _PIPELINE_CONSTRAINTS.format(box=slot.name))
+    try:
+        proc = _run([cfg.claude_bin, "-p", prompt], run_subprocess,
+                    cwd=checkout, timeout=cfg.implement_timeout)
+    except subprocess.TimeoutExpired:
+        raise RunnerError(f"{cfg.pipeline_command} #{iid} exceeded "
+                          f"{cfg.implement_timeout}s")
+    transcript = f"{proc.stdout or ''}\n{proc.stderr or ''}"
+    halt = detect_halt(transcript)
+    if halt:
+        raise NeedsInputError(halt)
+    if proc.returncode != 0:
+        raise RunnerError(f"{cfg.pipeline_command} #{iid} exited "
+                          f"{proc.returncode}: {_tail(transcript)}")
+
+    state_path, state = _find_pipeline_state(checkout, iid)
+    if state is None:
+        raise RunnerError(f"pipeline run for #{iid} left no state file under "
+                          f".claude/state/pla-pipelines/ — cannot prove an MR "
+                          f"exists; inspect the checkout by hand")
+    url_m = re.search(r"https?://\S*/-/merge_requests/(\d+)", state)
+    bang_m = re.search(r"MR[^\n]*?!(\d+)", state)
+    if url_m:
+        mr_iid, mr_url = int(url_m.group(1)), url_m.group(0)
+    elif bang_m:
+        mr_iid, mr_url = int(bang_m.group(1)), ""
+    else:
+        raise RunnerError(f"pipeline state for #{iid} names no MR "
+                          f"({state_path}) — the run did not reach Phase 7")
+    _ensure_draft(checkout, mr_iid, run_subprocess, mr_url)
+    branch, head = _mr_branch_sha(checkout, mr_iid, run_subprocess)
+
+    note = ""
+    try:
+        status = http_get(slot.url)
+    except Exception as e:
+        status, note = 0, f"dev-site probe failed: {e}"
+    if status != 200 and not note:
+        note = f"dev site {slot.url} returned {status} after pipeline QA"
+
+    magi_line = next((ln.strip() for ln in state.splitlines()
+                      if "MAGI" in ln.upper() and ("[x]" in ln or "SHIP" in ln)),
+                     "")
+    verdict = "SHIP" if re.search(r"SHIP|RESOLVED|review-clean", magi_line) else ""
+    return ImplementResult(
+        iid=iid, mr_iid=mr_iid, mr_url=mr_url, dev_url=slot.url,
+        dev_box=slot.name, branch=branch, report_path=state_path,
+        verdict=verdict, result_sha=head,
+        reassigned_from=(str(slot.mr_iid)
+                         if slot.tier == _TIER_HANDED_OFF and slot.mr_iid else ""),
+        magi_note=note or magi_line)
+
+
+def _find_pipeline_state(checkout: str, iid: int) -> tuple:
+    """(path, contents) of the pipeline's state.md for issue `iid` -- state
+    dirs are slugged `<iid>-<words>` (pla-pipeline skill convention). ("",
+    None) when absent."""
+    root = os.path.join(checkout, ".claude", "state", "pla-pipelines")
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return "", None
+    for name in names:
+        if re.match(rf"{iid}(\D|$)", name):
+            path = os.path.join(root, name, "state.md")
+            try:
+                with open(path) as f:
+                    return path, f.read()
+            except OSError:
+                continue
+    return "", None
+
+
+def _mr_branch_sha(checkout: str, mr_iid: int,
+                   run_subprocess: Callable) -> tuple:
+    """(source_branch, head_sha) read back from the MR; ("", "") on any
+    failure -- display fields only, never worth failing a finished run."""
+    try:
+        proc = _run(["glab", "mr", "view", str(mr_iid), "-F", "json"],
+                    run_subprocess, cwd=checkout, timeout=_GLAB_TIMEOUT)
+        data = json.loads(proc.stdout or "{}")
+        return (str(data.get("source_branch") or ""),
+                str(data.get("sha") or ""))
+    except Exception:
+        return "", ""
 
 
 def _magi_advisory(checkout: str, cfg, mr_iid: int,
