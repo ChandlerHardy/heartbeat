@@ -34,6 +34,12 @@ _SSH_TIMEOUT_SECONDS = 20
 # network on the far side — the 20s read-only probe budget is far too short.
 _SSH_SYNC_TIMEOUT_SECONDS = 300
 _HTTP_PROBE_TIMEOUT_SECONDS = 20
+# The launchd agent that runs a digest sweep (etc/mini/com.chandlerhardy.worksweep.plist).
+# The dashboard's Sync button kickstarts this rather than sweeping in-process.
+_SWEEP_AGENT_LABEL = "com.chandlerhardy.worksweep"
+# kickstart returns as soon as launchd has started the job, so this is a
+# generous ceiling on a call that normally takes milliseconds.
+_KICKSTART_TIMEOUT_SECONDS = 15
 
 from . import assessor, collectors, curator, devslots, implementer, keepcurrent
 from .approvals import apply_approvals
@@ -114,6 +120,36 @@ def _post_discord(webhook: str, content: str) -> None:
             resp.read()
     except (urllib.error.HTTPError, urllib.error.URLError) as e:
         raise RuntimeError(f"discord post failed: {e}")
+
+
+def _kickstart_sweep(run_subprocess: Callable = subprocess.run) -> None:
+    """Ask launchd to run the sweep agent now. Raises RuntimeError on failure.
+
+    This is the dashboard's "Sync" edge, injected into `dashboard.serve` so the
+    dashboard module never learns about launchctl (and its tests never spawn a
+    process).
+
+    `kickstart` runs the job under its OWN agent -- its environment, its log
+    files, its Discord digest -- and returns as soon as launchd has started it,
+    so this call is fast even though the sweep itself takes ~90s. That
+    out-of-process property is the point: the sweep writes the queue, and
+    running it inside the dashboard would mean two writers on one file plus a
+    blocked request thread.
+    """
+    target = f"gui/{os.getuid()}/{_SWEEP_AGENT_LABEL}"
+    try:
+        result = run_subprocess(
+            ["launchctl", "kickstart", target],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            timeout=_KICKSTART_TIMEOUT_SECONDS)
+    except Exception as e:
+        raise RuntimeError(f"launchctl kickstart {target}: {e}")
+    if getattr(result, "returncode", 1) != 0:
+        detail = ((getattr(result, "stderr", "") or
+                   getattr(result, "stdout", "") or "").strip()[:200])
+        raise RuntimeError(
+            f"launchctl kickstart {target} exited "
+            f"{result.returncode}: {detail or 'no output'}")
 
 
 def run_ssh(host: str, command: str, timeout: int = _SSH_TIMEOUT_SECONDS) -> str:
@@ -460,7 +496,8 @@ def main(argv=None) -> int:
         # module (this one imports it), and the injection also keeps the
         # dashboard tests off the network entirely.
         return _dashboard.serve(_queue_path(), port=args.port, bind=args.bind,
-                                post=_post_discord, webhook=cfg.discord_webhook)
+                                post=_post_discord, webhook=cfg.discord_webhook,
+                                sweep=_kickstart_sweep)
 
     if args.command == "run":
         from . import runner as _runner

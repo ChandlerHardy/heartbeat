@@ -154,3 +154,66 @@ def test_post_persists_queue_and_posted_number_matches_record_number(monkeypatch
         assert f"**{r.number}.** " in joined
     # and the queue holds the same count of proposed items the digest rendered
     assert all(r.item.status == "proposed" for r in records)
+
+
+# --- the dashboard's Sync edge: launchctl kickstart --------------------------
+
+class _Completed:
+    def __init__(self, returncode=0, stdout="", stderr=""):
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+
+def test_kickstart_sweep_targets_the_sweep_agent_in_the_gui_domain():
+    """The label must match the committed plist, and the domain must be this
+    user's GUI session -- a system-domain target would not find the agent."""
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append((cmd, kw))
+        return _Completed(0)
+
+    wsmain._kickstart_sweep(run_subprocess=fake_run)
+    cmd, kw = calls[0]
+    assert cmd == ["launchctl", "kickstart",
+                   f"gui/{os.getuid()}/com.chandlerhardy.worksweep"]
+    assert wsmain._SWEEP_AGENT_LABEL == "com.chandlerhardy.worksweep"
+    # kickstart returns immediately; the sweep runs under its own agent
+    assert kw["timeout"] == 15
+    assert kw["capture_output"] is True
+    # never hand the parent's stdin to a launchd child
+    import subprocess as _sp
+    assert kw["stdin"] is _sp.DEVNULL
+
+
+def test_kickstart_sweep_label_matches_the_committed_plist():
+    """Guards against the label drifting away from the agent that exists."""
+    import plistlib, re
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    path = os.path.join(root, "etc", "mini", "com.chandlerhardy.worksweep.plist")
+    raw = open(path, "rb").read()
+    # plistlib/expat rejects the file's `--` inside an XML comment (Apple's own
+    # parser accepts it), so read the Label out directly rather than parsing.
+    label = re.search(rb"<key>Label</key>\s*<string>([^<]+)</string>", raw).group(1)
+    assert label.decode() == wsmain._SWEEP_AGENT_LABEL
+    assert b"--discord" in raw          # the agent really does post a digest
+
+
+def test_kickstart_sweep_raises_on_a_non_zero_exit():
+    """A failed kickstart must surface, not look like success -- the dashboard
+    turns this into a 500 and leaves the button retryable."""
+    import pytest
+    with pytest.raises(RuntimeError) as e:
+        wsmain._kickstart_sweep(
+            run_subprocess=lambda cmd, **kw: _Completed(3, "", "Bad request"))
+    assert "exited 3" in str(e.value)
+    assert "Bad request" in str(e.value)
+
+
+def test_kickstart_sweep_raises_when_launchctl_is_missing_or_times_out():
+    import pytest
+    for boom in (FileNotFoundError("launchctl"),
+                 OSError("no such process"),
+                 Exception("timed out")):
+        with pytest.raises(RuntimeError):
+            wsmain._kickstart_sweep(
+                run_subprocess=lambda cmd, _b=boom, **kw: (_ for _ in ()).throw(_b))
