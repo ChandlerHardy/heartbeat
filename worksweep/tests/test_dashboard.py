@@ -2126,3 +2126,79 @@ def test_completed_cards_render_under_a_quiet_divider_and_before_ungrouped():
 def test_no_divider_when_every_card_is_active():
     page = _page([_act(1, "b", "2026-06-29T00:00:00Z")])
     assert 'class="divider"' not in page
+
+
+# =============================================================================
+# Fix Mode: Attempt 7 -- the sticky bar hides when nothing visible is approvable
+# =============================================================================
+
+def test_bar_is_hidden_when_no_row_is_approvable():
+    """Falsifying: a queue of only running/done rows rendered a bar offering
+    "Approve selected" over a page with nothing selectable -- dead chrome across
+    the bottom of a phone screen."""
+    page = _page([_rec(1, status="running"), _rec(2, status="done"),
+                  _rec(3, status="error"), _rec(4, status="approved")])
+    assert re.search(r'<div class="bar" hidden>', page)
+    assert _checkboxes(page, "sections") == []
+
+
+def test_bar_is_hidden_when_every_actionable_row_is_non_runnable():
+    """triage/mr-hygiene rows render Dismiss, never a checkbox, so the approve
+    bar has nothing to act on."""
+    page = _page([_rec(1, executor="triage"), _rec(2, executor="mr-hygiene"),
+                  _rec(3, executor="none")])
+    assert re.search(r'<div class="bar" hidden>', page)
+
+
+@pytest.mark.parametrize("status", ["proposed", "needs-input"])
+def test_bar_is_visible_when_something_is_approvable(status):
+    page = _page([_rec(1, status=status), _rec(2, status="done")])
+    assert '<div class="bar">' in page
+    assert "hidden" not in re.search(r'<div class="bar"[^>]*>', page).group(0)
+
+
+def test_bar_hidden_state_matches_the_rows_that_got_a_checkbox():
+    """The initial state and the rendered controls share one predicate, so they
+    cannot disagree."""
+    for recs in ([_rec(1, status="running")],
+                 [_rec(1, executor="triage")],
+                 [_rec(1, status="proposed")],
+                 [_rec(1, status="running"), _rec(2, status="needs-input")]):
+        page = _page(recs)
+        any_checkbox = bool(_checkboxes(page, "sections"))
+        bar = re.search(r'<div class="bar"[^>]*>', page).group(0)
+        assert ("hidden" in bar) is (not any_checkbox), (bar, recs[0].item.status)
+        assert any(dashboard.has_checkbox(r.item) for r in recs) is any_checkbox
+
+
+def test_hidden_bar_is_actually_removed_from_layout():
+    """`display:none`, not merely disabled. A class rule outranks the UA's
+    [hidden] style, so without this the hidden bar would still lay out."""
+    css = _style(_page([_rec(1)]))
+    assert ".bar[hidden]{display:none}" in css.replace(" ", "")
+    # and the rule must come after the .bar layout rule to win
+    assert css.index(".bar{") < css.index(".bar[hidden]")
+
+
+def test_bar_visibility_is_recomputed_on_every_filter_and_view_change():
+    """Falsifying: drop the recompute and the bar stays up under a `done`
+    filter even though every visible row lost its checkbox."""
+    js = _page([_rec(1)]).replace(" ", "").replace("\n", "")
+    assert "varbar=document.querySelector('.bar');" in js
+    assert "if(bar){bar.hidden=boxes('input[type=checkbox]').length===0;}" in js
+    # refresh() is the single place it happens, and both change paths end there
+    assert "marks();applyFilter();refresh();" in js
+    assert js.count("applyFilter();") >= 2          # setLayout + init
+    assert "refresh();}" in js                      # applyFilter ends in refresh
+
+
+def test_only_visible_rows_count_as_selectable():
+    """A row filtered out by a status pill is not on offer: it must not be
+    counted, submitted, or keep the bar up. This is also what stops a stranded
+    invisible selection wedging the live-poll guard."""
+    js = _page([_rec(1)]).replace(" ", "").replace("\n", "")
+    assert "varrow=b.closest?b.closest('.row'):null;" in js
+    assert "return!row||row.style.display!=='none';" in js
+    # selected(), blanket() and the bar count all go through boxes()
+    assert "returnnums(boxes('input[type=checkbox]')" in js
+    assert "returnnums(boxes('input[type=checkbox][data-blanket=\"1\"]'));" in js

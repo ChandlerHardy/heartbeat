@@ -697,6 +697,9 @@ button.cnt:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
   background:var(--panel);border-top:1px solid var(--line);
   box-shadow:0 -3px 14px var(--shadow);
 }
+/* A class rule outranks the UA's [hidden]{display:none}, so say it here or a
+   hidden bar would still lay out. */
+.bar[hidden]{display:none}
 .bar .btn{
   appearance:none;flex:1 1 0;min-height:52px;
   font:inherit;font-size:15px;font-weight:650;
@@ -752,9 +755,15 @@ _BODY_SCRIPT = """
   function scope(){
     return document.querySelector(root.getAttribute('data-layout')==='branches'?'.branches':'.sections');
   }
+  // Only rows the user can actually SEE. A row filtered out by a status pill
+  // is not on offer: it must not be counted, submitted, or keep the bar up.
   function boxes(sel){
     var s=scope();
-    return s?Array.prototype.slice.call(s.querySelectorAll(sel)):[];
+    if(!s){return [];}
+    return Array.prototype.slice.call(s.querySelectorAll(sel)).filter(function(b){
+      var row=b.closest?b.closest('.row'):null;
+      return !row||row.style.display!=='none';
+    });
   }
   function nums(list){
     var seen={},out=[];
@@ -783,6 +792,12 @@ _BODY_SCRIPT = """
     if(c){c.textContent=n;}
     if(go){go.disabled=inflight||n===0;}
     if(all){all.disabled=inflight||blanket().length===0;}
+    // Hide the whole bar, not merely disable it: under a `running`/`done`
+    // filter none of the visible rows is approvable, so the bar is dead chrome
+    // covering the bottom of a phone screen. applyFilter() and setLayout() both
+    // end here, so this recomputes on every view and filter change.
+    var bar=document.querySelector('.bar');
+    if(bar){bar.hidden=boxes('input[type=checkbox]').length===0;}
   }
   function setLayout(v){
     root.setAttribute('data-layout',v);
@@ -949,6 +964,16 @@ def _link(url: str, label: str) -> str:
     return f"<span>{_e(label)}</span>"
 
 
+def has_checkbox(item) -> bool:
+    """True when a row renders an approval checkbox.
+
+    Single-sourced so the sticky bar's initial visibility cannot disagree with
+    which rows actually got a control -- a bar offering "Approve selected" over
+    a page with nothing selectable is the bug this exists to prevent.
+    """
+    return is_actionable(item) and item.executor in RUNNABLE_EXECUTORS
+
+
 def _checkbox(record: QueueRecord, view: str) -> str:
     """The approval control for a row, or a reason there isn't one.
 
@@ -965,7 +990,7 @@ def _checkbox(record: QueueRecord, view: str) -> str:
     item = record.item
     if not is_actionable(item):
         return '<span class="spacer"></span>'
-    if item.executor not in RUNNABLE_EXECUTORS:
+    if not has_checkbox(item):
         # Nothing executes these, so the only resolution is "I looked at it".
         # A Dismiss button is that resolution; an approve checkbox here would
         # strand the record as a permanently-approved zombie.
@@ -1179,9 +1204,13 @@ def _bar_html(records: Sequence[QueueRecord]) -> str:
     would go stale the moment the queue changed and would tell the user they
     were approving N items while sending a different set.
     """
-    del records                      # the page derives the set from the DOM
+    # Hidden from the first paint when nothing on the page is approvable (an
+    # all running/done queue). The page recomputes this on every filter and
+    # layout change; rendering it server-side too avoids a flash of a bar that
+    # cannot be used.
+    hidden = "" if any(has_checkbox(r.item) for r in records) else " hidden"
     return (
-        '<div class="bar">'
+        f'<div class="bar"{hidden}>'
         '<button type="button" class="btn" id="approve-selected" disabled>'
         'Approve selected (<span id="sel-count">0</span>)</button>'
         '<button type="button" class="btn btn-go" id="approve-all" disabled>'
