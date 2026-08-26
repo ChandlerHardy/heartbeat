@@ -255,3 +255,139 @@ def test_a_failing_notice_does_not_fail_the_sweep():
     texts = [p for p in posts2 if isinstance(p, str)]
     assert not [t for t in texts if t.startswith("⚠️")]
     assert len(texts) >= 1                      # the digest still went out
+
+
+# --- the discussions probe seam (address-feedback, 2026-08-25) -------------
+#
+# Opt-in exactly like deps["diverged_commits"]: absent -> the sweep never
+# probes and simply proposes no address-feedback work; present -> the authored
+# MergeRequest is rebound with its unaddressed_count BEFORE assess_own_mr sees
+# it. Every other consumer of `authored` (bootstrap_magi_records, the stale
+# loop, resolutions) reads the rebound list, so the two can never disagree.
+
+def _authored(iid=3997, unresolved=2, changes_requested=False):
+    reviewers = ([{"username": "leyang", "mergeRequestInteraction":
+                   {"reviewState": "REQUESTED_CHANGES"}}]
+                 if changes_requested else [])
+    return {"iid": str(iid), "title": "Ranch data tab", "draft": False,
+            "webUrl": f"https://gl/x/-/merge_requests/{iid}",
+            "diffHeadSha": f"s{iid}", "updatedAt": "2026-08-25T00:00:00Z",
+            "description": "Available on "
+                           "https://dev2.chandlerhardy-dev.performancebeef.com/",
+            "sourceBranch": "chardy/1588-ranch-data",
+            "approved": False, "detailedMergeStatus": "",
+            "assignees": {"nodes": []},
+            "project": {"fullPath": "performancelivestock/pb-www"},
+            "author": {"username": "me"},
+            "reviewers": {"nodes": reviewers},
+            "headPipeline": {"status": "success"},
+            "resolvableDiscussionsCount": unresolved,
+            "resolvedDiscussionsCount": 0}
+
+
+def _threads(*authors):
+    return json.dumps([
+        {"id": f"t{i}", "notes": [{"body": "look at this", "system": False,
+                                   "resolvable": True, "resolved": False,
+                                   "author": {"username": a}}]}
+        for i, a in enumerate(authors)])
+
+
+def _probe_deps(store, raw, discussions=None, queue=None):
+    d = _deps(store, raw, queue=queue)
+    if discussions is not None:
+        d["discussions"] = discussions
+    return d
+
+
+def _saved_items(store):
+    saved = [p for p in store if isinstance(p, tuple) and p[0] == "saved"]
+    return {r.item.id: r.item for r in saved[-1][1]} if saved else {}
+
+
+def test_no_discussions_dep_never_probes_and_proposes_no_feedback_work():
+    posts = []
+    rc = run_sweep(_cfg(), _deps(posts, _gql(authored_nodes=[_authored()])))
+    assert rc == 0
+    assert "feedback:pb-www!3997" not in _saved_items(posts)
+
+
+def test_the_probe_rebinds_the_mr_before_the_assessor_sees_it():
+    posts = []
+    rc = run_sweep(_cfg(), _probe_deps(
+        posts, _gql(authored_nodes=[_authored()]),
+        discussions=lambda repo, iid: _threads("leyang", "me")))
+    assert rc == 0
+    item = _saved_items(posts)["feedback:pb-www!3997"]
+    assert item.executor == "address-feedback"
+    assert item.why == "1 unaddressed thread"      # "me" thread doesn't count
+    assert item.branch == "chardy/1588-ranch-data"
+
+
+def test_each_authored_mr_is_probed_exactly_once():
+    calls = []
+    posts = []
+    run_sweep(_cfg(), _probe_deps(
+        posts, _gql(authored_nodes=[_authored(iid=3997), _authored(iid=4001)]),
+        discussions=lambda repo, iid: (calls.append((repo, iid)),
+                                       _threads("leyang"))[1]))
+    assert calls == [("pb-www", 3997), ("pb-www", 4001)]
+
+
+def test_an_mr_with_no_unresolved_threads_is_never_probed():
+    """Decision 1's cost gate: only authored MRs that have unresolved threads
+    at all are worth a REST call."""
+    calls = []
+    posts = []
+    run_sweep(_cfg(), _probe_deps(
+        posts, _gql(authored_nodes=[_authored(iid=3997, unresolved=0)]),
+        discussions=lambda repo, iid: (calls.append(iid), "[]")[1]))
+    assert calls == []
+
+
+def test_a_failing_probe_degrades_that_one_mr_and_never_aborts_the_sweep():
+    """AC #7: one bad glab call must not cost the whole digest. The MR falls
+    back to unaddressed_count 0 -- so a changes-requested MR still shows up,
+    as the informational row."""
+    posts = []
+
+    def flaky(repo, iid):
+        if iid == 3997:
+            raise RuntimeError("glab api timed out after 30s")
+        return _threads("leyang")
+
+    rc = run_sweep(_cfg(), _probe_deps(
+        posts, _gql(authored_nodes=[_authored(iid=3997, changes_requested=True),
+                                    _authored(iid=4001)]),
+        discussions=flaky))
+    assert rc == 0
+    items = _saved_items(posts)
+    assert items["feedback:pb-www!3997"].executor == "triage"
+    assert items["feedback:pb-www!3997"].why == "changes requested"
+    assert items["feedback:pb-www!4001"].executor == "address-feedback"
+
+
+def test_a_handed_off_mr_is_never_probed():
+    calls = []
+    posts = []
+    node = _authored(iid=3997)
+    node["approved"] = True
+    node["detailedMergeStatus"] = "MERGEABLE"
+    node["assignees"] = {"nodes": [{"username": "maintainer"}]}
+    run_sweep(_cfg(), _probe_deps(
+        posts, _gql(authored_nodes=[node]),
+        discussions=lambda repo, iid: (calls.append(iid), _threads("leyang"))[1]))
+    assert calls == []
+    assert "feedback:pb-www!3997" not in _saved_items(posts)
+
+
+def test_run_sweep_wires_the_real_discussions_edge():
+    from unittest.mock import patch
+    from worksweep import __main__ as m
+    from worksweep import collectors
+    seen = {}
+    with patch.object(m, "load_config", _cfg), \
+            patch.object(m, "run_sweep",
+                         lambda cfg, deps: (seen.update(deps=deps), 0)[1]):
+        assert m.main([]) == 0
+    assert seen["deps"]["discussions"] is collectors.collect_discussions

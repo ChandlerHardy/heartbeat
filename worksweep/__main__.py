@@ -14,6 +14,7 @@ posts exactly one digest (or 🔍 heartbeat, or ⚠️ error) — never silence.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import datetime
 import json
 import os
@@ -361,6 +362,29 @@ def _run_intake(cfg: WorksweepConfig) -> int:
     return 0
 
 
+def _with_unaddressed(mr, cfg: WorksweepConfig,
+                      discussions: Callable[[str, int], str]):
+    """`mr` rebound with its unaddressed-thread count. Never raises.
+
+    Skipped (count stays 0) for an MR with nothing unresolved -- there is
+    nothing for the probe to find -- and for one already handed off, whose
+    threads belong to the maintainer who will merge it. A probe failure prints
+    and returns the MR untouched: a missing count under-proposes work, which
+    is the safe direction.
+    """
+    if mr.unresolved_count <= 0 or assessor.is_handed_off(mr, cfg.username):
+        return mr
+    try:
+        raw = discussions(mr.repo, mr.iid)
+    except Exception as e:
+        print(f"worksweep: discussions probe for {mr.repo}!{mr.iid} failed: "
+              f"{type(e).__name__}: {e}", file=sys.stderr)
+        return mr
+    return dataclasses.replace(
+        mr, unaddressed_count=collectors.parse_unaddressed_count(
+            raw, cfg.username))
+
+
 def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
     """One sweep under the message contract: digest, 🔍 heartbeat, or ⚠️ error —
     never silence. All I/O arrives via `deps` so tests stay hermetic."""
@@ -378,6 +402,22 @@ def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
         raw = deps["graphql"]()
         review_mrs, authored, assigned = collectors.parse_graphql_sweep(
             raw, cfg.username, cfg.repos)
+
+        # Which of the authored MRs' unresolved threads are actually waiting
+        # on Chandler? The GraphQL sweep only knows the COUNT, so the answer
+        # comes from one targeted REST call per authored MR that has any
+        # unresolved thread (typically two or three across the whole queue),
+        # and the MergeRequest is REBOUND with the answer right here -- before
+        # bootstrap_magi_records, the assess loop, the stale loop and
+        # resolutions all read the same `authored` list, so none of them can
+        # disagree about it. Opt-in via deps["discussions"] (absent -> skipped,
+        # matching the Task H diverged-commits pattern) and never fatal: a bad
+        # call degrades that ONE MR to zero unaddressed threads, which costs a
+        # sweep of address-feedback work, not the digest.
+        discussions_edge = deps.get("discussions")
+        if discussions_edge is not None:
+            authored = [_with_unaddressed(mr, cfg, discussions_edge)
+                        for mr in authored]
 
         items = []
         for mr in review_mrs:
@@ -720,6 +760,9 @@ def main(argv=None) -> int:
     # MR), so --dry-run still runs it for real -- same reasoning as "ssh"
     # above. run_sweep only ever calls it for authored MRs not handed off.
     deps["diverged_commits"] = collectors.collect_diverged_commits_count
+    # Same reasoning: one read-only GET per authored MR with unresolved
+    # threads, so --dry-run runs it for real too.
+    deps["discussions"] = collectors.collect_discussions
     return run_sweep(cfg, deps)
 
 
