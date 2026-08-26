@@ -596,3 +596,69 @@ def test_a_proposed_magi_row_is_still_re_proposed_every_sweep():
     assert len(rows) == 1
     assert rows[0].item.status == "proposed"
     assert rows[0].number == 13
+
+
+# --- a parked question un-strands end to end (live finding, !4082) ---------
+
+def _parked_feedback(number=12, status="needs-input", iid=3997):
+    from worksweep.models import QueueRecord, WorkItem
+    return QueueRecord(
+        number=number, first_seen="2026-08-25T00:00:00+00:00",
+        last_seen="2026-08-25T00:00:00+00:00",
+        item=WorkItem(
+            schema_version=1, id=f"feedback:pb-www!{iid}", repo="pb-www",
+            kind="feedback", executor="address-feedback", risk="low",
+            why="1 unaddressed thread",
+            web_url=f"https://gl/x/-/merge_requests/{iid}", sha=f"s{iid}",
+            status=status, error_summary="1 thread needs your call",
+            branch="chardy/1588-ranch-data"))
+
+
+def _bot_answered(tid="t1"):
+    """Reviewer asks, Chandler answers, an access-token bot replies last."""
+    bot = "group2846274botbb6bad6ee97bbb14c73a6e3e39ff610d"
+    return json.dumps([{"id": tid, "notes": [
+        {"body": "q", "system": False, "resolvable": True, "resolved": False,
+         "author": {"username": "leyang"}},
+        {"body": "answered", "system": False, "resolvable": True,
+         "resolved": False, "author": {"username": "me"}},
+        {"body": "analysis", "system": False, "resolvable": True,
+         "resolved": False, "author": {"username": bot}}]}])
+
+
+def test_the_bot_fix_un_strands_the_row_it_parked():
+    """The two halves meeting: the bot filter clears the signal, and the row
+    that was parked on that signal closes instead of asking forever."""
+    posts = []
+    run_sweep(_cfg(), _probe_deps(
+        posts, _gql(authored_nodes=[_authored()]),
+        discussions=lambda repo, iid: _bot_answered(),
+        queue=[_parked_feedback()]))
+    row = {r.item.id: r for r in _saved(posts)}["feedback:pb-www!3997"]
+    assert row.item.status == "done"
+    assert row.item.done_reason == "signal-cleared"
+    assert row.number == 12
+
+
+def test_a_parked_row_whose_threads_still_wait_keeps_asking():
+    """FALSIFYING the other direction: the reviewer's question is still the
+    last word, so the row must stay parked and keep its summary."""
+    posts = []
+    run_sweep(_cfg(), _probe_deps(
+        posts, _gql(authored_nodes=[_authored()]),
+        discussions=lambda repo, iid: _threads("leyang"),
+        queue=[_parked_feedback()]))
+    row = {r.item.id: r for r in _saved(posts)}["feedback:pb-www!3997"]
+    assert row.item.status == "needs-input"
+    assert row.item.error_summary == "1 thread needs your call"
+
+
+def test_a_parked_row_is_not_closed_when_the_probe_could_not_look():
+    posts = []
+    def boom(repo, iid):
+        raise RuntimeError("glab timed out")
+    run_sweep(_cfg(), _probe_deps(posts, _gql(authored_nodes=[_authored()]),
+                                  discussions=boom,
+                                  queue=[_parked_feedback()]))
+    row = {r.item.id: r for r in _saved(posts)}["feedback:pb-www!3997"]
+    assert row.item.done_reason != "signal-cleared"
