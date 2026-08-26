@@ -12,7 +12,7 @@ import sys
 import urllib.parse
 from typing import List
 
-from .models import Issue, MergeRequest, Todo
+from .models import Issue, MergeRequest, ReviewThread, Todo
 
 PROJECT_PREFIX = "performancelivestock"
 
@@ -149,6 +149,83 @@ def collect_diverged_commits_count(repo: str, iid: int) -> int:
                            f"was not an object")
     return int(data.get("diverged_commits_count") or 0)
 
+
+# --- discussions probe: which threads are still waiting on Chandler? --------
+#
+# The GraphQL sweep only carries resolvable/resolved COUNTS, so it cannot tell
+# "the reviewer asked something and is waiting" from "I answered and the
+# reviewer hasn't resolved it yet". Those two feel identical in a digest and
+# only one is work. Decision 1 (2026-08-25) makes the second signal a targeted
+# per-MR REST call, run only for authored MRs that have unresolved threads at
+# all -- typically two or three across the whole queue.
+
+
+def parse_threads(raw_json: str) -> tuple:
+    """Every discussion on an MR as a ReviewThread. Malformed payload -> ().
+
+    A thread's resolvable/resolved state lives on its notes, not on the
+    discussion object: it is `resolvable` when ANY note is, and `resolved`
+    only when EVERY resolvable note is (GitLab resolves a whole thread at
+    once, so in practice they agree -- `all` is the conservative reading,
+    since a half-resolved thread is not finished).
+    """
+    out = []
+    for d in _loads_list(raw_json, "parse_threads"):
+        if not isinstance(d, dict):
+            continue
+        notes = [n for n in (d.get("notes") or []) if isinstance(n, dict)]
+        resolvable_notes = [n for n in notes if n.get("resolvable")]
+        human = [n for n in notes if not n.get("system")]
+        last = human[-1] if human else None
+        out.append(ReviewThread(
+            id=str(d.get("id") or ""),
+            resolvable=bool(resolvable_notes),
+            resolved=bool(resolvable_notes)
+                     and all(bool(n.get("resolved")) for n in resolvable_notes),
+            last_author=((last or {}).get("author") or {}).get("username", ""),
+            last_note=(last or {}).get("body") or "",
+        ))
+    return tuple(out)
+
+
+def unaddressed_threads(raw_json: str, username: str) -> tuple:
+    """The threads on this MR that are waiting on `username`.
+
+    Unaddressed iff resolvable, NOT resolved, and the last non-system note is
+    somebody else's. The three exclusions each drop a thread that is genuinely
+    not Chandler's move:
+
+    * not resolvable -- an ordinary comment thread, nothing to answer;
+    * resolved -- the owner already closed it;
+    * my own reply is the last word -- the ball is in the reviewer's court,
+      and this is the whole class the old `unresolved_count` signal nagged
+      about forever.
+
+    A thread with no human note at all (`last_author == ""`, e.g. nothing but
+    GitLab's own "added 1 commit") is nobody's question and is excluded too.
+    """
+    return tuple(t for t in parse_threads(raw_json)
+                 if t.resolvable and not t.resolved
+                 and t.last_author and t.last_author != username)
+
+
+def parse_unaddressed_count(raw_json: str, username: str) -> int:
+    return len(unaddressed_threads(raw_json, username))
+
+
+def collect_discussions(repo: str, iid: int) -> str:
+    """Shell edge: one GET of an MR's discussions, returned RAW.
+
+    Raw rather than parsed because the two callers want different slices of
+    the same payload -- the sweep wants a count, the `address-feedback`
+    executor wants the threads themselves -- and both go through the pure
+    parse_* functions above, which are the only things tests need to exercise.
+    Raises via `_run_glab`; the sweep wraps this per-MR so one bad call
+    degrades that one MR to zero rather than losing the whole sweep.
+    """
+    return _run_glab(["api",
+        f"projects/{_project(repo)}/merge_requests/{int(iid)}"
+        f"/discussions?per_page=100"])
 
 # --- GraphQL sweep (M3): one query mirroring the "Your work / MRs" dashboard ---
 
