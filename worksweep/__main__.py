@@ -160,7 +160,13 @@ def _post_discord(webhook: str, content: str,
     `sleep` is injected so the tests never actually wait.
     """
     _validate_webhook(webhook)
-    data = json.dumps({"content": content}).encode("utf-8")
+    # `allowed_mentions: {"parse": []}` is global on purpose. Worksweep quotes
+    # text other people wrote -- MR titles, and now review thread bodies -- and
+    # a quoted "@everyone" must render as characters rather than ring every
+    # phone on the server. Setting it at the one place every post funnels
+    # through means no future caller can forget it.
+    data = json.dumps({"content": content,
+                       "allowed_mentions": {"parse": []}}).encode("utf-8")
     req = urllib.request.Request(
         webhook, data=data,
         headers={"Content-Type": "application/json", "User-Agent": "WorksweepBot/1.0"})

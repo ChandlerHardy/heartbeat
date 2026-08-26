@@ -84,6 +84,9 @@ _SHORT_NOTE_MAX = 90
 _REPLY_QUOTE_MAX = 120
 # Longest list of names any single error message will spell out.
 _MAX_LISTED = 8
+# Lines of quoted third-party text one Discord post will carry. The
+# COUNTS always tell the whole truth; only the rendering is capped.
+_MAX_POSTED_LINES = 5
 # Threads handed to one run. A flat count rather than byte accounting: it is
 # the number a human can sanity-check, and the overflow is escalated rather
 # than dropped, so nothing goes missing either way.
@@ -330,7 +333,7 @@ def execute(item: WorkItem, cfg,
         raise NeedsInputError(
             f"!{iid}: {len(escalated)} thread"
             f"{'s' if len(escalated) != 1 else ''} need your call - "
-            + "; ".join(escalated))
+            + "; ".join(_capped(escalated)))
 
     return FeedbackResult(
         iid=iid, waiting=len(before), addressed=len(addressed),
@@ -636,8 +639,22 @@ def done_message(result: FeedbackResult) -> str:
     on his phone, the moment they go out, IS the review step.
     """
     msg = f"\U0001f4ac !{result.iid} \u2014 {tally(result)}"
-    for line in result.replies:
+    for line in _capped(result.replies):
         msg += f"\nsaid: {line}"
-    for line in result.escalated:
+    for line in _capped(result.escalated):
         msg += f"\nneeds you: {line}"
     return msg
+
+
+def _capped(lines: Sequence[str]) -> List[str]:
+    """At most `_MAX_POSTED_LINES`, with an honest count of what was left out.
+
+    Discord rejects an over-long post outright, and a rejected post is
+    silence -- so the rendering is bounded here rather than trusting twenty
+    threads of arbitrary reviewer prose to fit.
+    """
+    lines = list(lines)
+    if len(lines) <= _MAX_POSTED_LINES:
+        return lines
+    kept = lines[:_MAX_POSTED_LINES]
+    return kept + [f"\u2026and {len(lines) - _MAX_POSTED_LINES} more"]

@@ -24,6 +24,7 @@ IMPLEMENT_REAP_GRACE_SECONDS = 900
 _ERROR_SUMMARY_MAX = 500
 _LOCK_DEFAULT = os.path.expanduser("~/.worksweep/runner.lock")
 _IMPLEMENT_LOCK_NAME = "runner-implement.lock"
+_ADDRESS_FEEDBACK_LOCK_NAME = "runner-address-feedback.lock"
 
 _MAGI = "magi-review"
 _IMPLEMENT = "implement"
@@ -300,23 +301,37 @@ def _apply_to_fresh(deps, cfg, number: int,
 
 
 def run_once(cfg, deps: Dict[str, Callable], lock_path: str = _LOCK_DEFAULT,
-             implement_lock_path: Optional[str] = None) -> int:
-    """One runner pass: reap stale claims, then run at most ONE magi-review
-    item and at most ONE implement item.
+             implement_lock_path: Optional[str] = None,
+             address_feedback_lock_path: Optional[str] = None) -> int:
+    """One runner pass: reap stale claims, then run at most ONE item from each
+    of the three executor families.
 
-    The two executors hold separate lock files so a 90-minute implement run
-    never starves the (much shorter) magi-review queue, and an overlapping
-    launchd fire still can't double-run either kind. `implement_lock_path`
-    defaults to a sibling of `lock_path` (so a test passing a tmp lock path
-    keeps BOTH locks inside its tmp dir, never touching ~/.worksweep).
+    Each family holds its own lock file, so a long run never starves a short
+    queue and an overlapping launchd fire still can't double-run any of them.
+    The short-op pass (magi-review, keep-current, park) also owns the stale
+    reap, which is precisely why address-feedback was moved OUT of it: that
+    pass would otherwise sit on the lock for the length of a claude run, and
+    nothing — not even the reap that exists to clean up stuck claims — could
+    make progress for 30 minutes.
+
+    Both extra lock paths default to siblings of `lock_path`, so a test
+    passing a tmp path keeps ALL THREE inside its tmp dir, never touching
+    ~/.worksweep.
     """
+    def _sibling(name: str) -> str:
+        return os.path.join(os.path.dirname(lock_path) or ".", name)
+
     if implement_lock_path is None:
-        implement_lock_path = os.path.join(os.path.dirname(lock_path) or ".",
-                                           _IMPLEMENT_LOCK_NAME)
+        implement_lock_path = _sibling(_IMPLEMENT_LOCK_NAME)
+    if address_feedback_lock_path is None:
+        address_feedback_lock_path = _sibling(_ADDRESS_FEEDBACK_LOCK_NAME)
     rc = _guarded_pass(cfg, deps, _MAGI, _run_magi_pass, lock_path)
     rc_implement = _guarded_pass(cfg, deps, _IMPLEMENT, _run_implement_pass,
                                  implement_lock_path)
-    return rc or rc_implement
+    rc_feedback = _guarded_pass(cfg, deps, _ADDRESS_FEEDBACK,
+                                _run_address_feedback_pass,
+                                address_feedback_lock_path)
+    return rc or rc_implement or rc_feedback
 
 
 def _guarded_pass(cfg, deps: Dict[str, Callable], kind: str,
@@ -355,8 +370,7 @@ def _run_magi_pass(cfg, deps: Dict[str, Callable], lock_path: str) -> int:
             for r in reaped:
                 _post(deps, cfg, f"⚠️ Worksweep runner: reaped stale claim "
                                  f"#{r.number} ({r.item.repo} {r.item.id})")
-        target = pick_claim(records, (_MAGI, _KEEP_CURRENT, _PARK,
-                                      _ADDRESS_FEEDBACK))
+        target = pick_claim(records, (_MAGI, _KEEP_CURRENT, _PARK))
         if target is None:
             return 0
         records = claim(records, target.number, now)
@@ -365,8 +379,6 @@ def _run_magi_pass(cfg, deps: Dict[str, Callable], lock_path: str) -> int:
             return _run_keep_current_claim(cfg, deps, target)
         if target.item.executor == _PARK:
             return _run_park_claim(cfg, deps, target)
-        if target.item.executor == _ADDRESS_FEEDBACK:
-            return _run_address_feedback_claim(cfg, deps, target)
         try:
             result_sha, report_path = deps["execute"](target.item, cfg)
         except RunnerError as e:
@@ -461,9 +473,39 @@ def _run_park_claim(cfg, deps: Dict[str, Callable],
     return 0
 
 
+def _run_address_feedback_pass(cfg, deps: Dict[str, Callable],
+                               lock_path: str) -> int:
+    """At most one address-feedback item, on its own lock.
+
+    It shared the short-op pass at first, on the theory that it was another
+    quick git op. It is not: it runs an unattended claude pass that can take
+    half an hour, and holding the short-op lock that long would block
+    magi-review, keep-current, park and the stale-claim reap behind it.
+    Mirrors _run_implement_pass: cheap pre-check, then the lock.
+    """
+    try:
+        if pick_claim(deps["load"](), (_ADDRESS_FEEDBACK,)) is None:
+            return 0
+    except Exception as e:
+        _post(deps, cfg, f"⚠️ Worksweep runner: could not read the queue for "
+                         f"the address-feedback pass — {type(e).__name__}: {e}")
+        return 1
+    if not acquire_lock(lock_path):
+        return 0    # another address-feedback run is live under this lock
+    try:
+        records = deps["load"]()
+        target = pick_claim(records, (_ADDRESS_FEEDBACK,))
+        if target is None:
+            return 0                   # raced with another pass — fine
+        deps["save"](claim(records, target.number, deps["now"]()))
+        return _run_address_feedback_claim(cfg, deps, target)
+    finally:
+        release_lock(lock_path)
+
+
 def _run_address_feedback_claim(cfg, deps: Dict[str, Callable],
                                 target: QueueRecord) -> int:
-    """The address-feedback half of the shared pass.
+    """The body of the address-feedback pass.
 
     Called with the claim already saved as `running`. Unlike its siblings this
     one has THREE outcomes, not two, and the middle one is why it cannot just
@@ -490,7 +532,7 @@ def _run_address_feedback_claim(cfg, deps: Dict[str, Callable],
                 deps, cfg, number,
                 lambda fresh: needs_input(fresh, number, str(e),
                                           deps["now"]())) is not None:
-            _post(deps, cfg, f"❓ #{number} needs your input: {e}")
+            _post(deps, cfg, _clamped(f"❓ #{number} needs your input: {e}"))
         return 0        # a question is a handled outcome, not a failure
     except RunnerError as e:
         _fail_and_post(deps, cfg, number, str(e), _ADDRESS_FEEDBACK)
@@ -505,7 +547,7 @@ def _run_address_feedback_claim(cfg, deps: Dict[str, Callable],
                                deps["now"]()))
     if updated is not None:
         from . import feedback as _feedback   # local: feedback imports runner
-        _post(deps, cfg, _feedback.done_message(result))
+        _post(deps, cfg, _clamped(_feedback.done_message(result)))
     return 0
 
 
@@ -633,6 +675,14 @@ def _keep_current_done_message(result) -> str:
         names = ", ".join(f.rsplit("/", 1)[-1] for f in resolved)
         msg += f" · auto-resolved conflicts: {names}"
     return msg
+
+
+def _clamped(message: str) -> str:
+    """Discord REJECTS an over-long post outright, so an unclamped one turns a
+    reported outcome back into silence. The address-feedback messages quote
+    arbitrary third-party thread text, up to twenty threads at a time, so they
+    are the ones most likely to get there."""
+    return _truncate_bytes(message or "", DISCORD_MAX_CHARS - 100)
 
 
 def _fail_and_post(deps, cfg, number: int, summary: str, kind: str) -> None:

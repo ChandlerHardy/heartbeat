@@ -74,13 +74,14 @@ def test_pick_claim_includes_address_feedback_by_default():
     assert pick_claim([_rec(1)]).number == 1
 
 
-def test_pick_claim_spans_all_four_shared_executors_lowest_first():
-    recs = [_rec(3, executor=_ADDRESS_FEEDBACK),
+def test_the_shared_short_op_pass_no_longer_claims_address_feedback():
+    """It runs a claude pass, not a git op -- it belongs on its own lock."""
+    recs = [_rec(1, executor=_ADDRESS_FEEDBACK),
             _rec(2, executor=_KEEP_CURRENT, iid=1),
             _rec(4, executor=_MAGI, iid=2),
             _rec(5, executor=_PARK, iid=3)]
-    got = pick_claim(recs, (_MAGI, _KEEP_CURRENT, _PARK, _ADDRESS_FEEDBACK))
-    assert got.number == 2
+    assert pick_claim(recs, (_MAGI, _KEEP_CURRENT, _PARK)).number == 2
+    assert pick_claim(recs, (_ADDRESS_FEEDBACK,)).number == 1
 
 
 def test_a_proposed_address_feedback_item_is_never_claimed():
@@ -255,3 +256,70 @@ def test_dry_run_never_posts_a_reply(tmp_path):
     assert seen["deps"]["execute_address_feedback"] is m._dry_run_address_feedback
     result = m._dry_run_address_feedback(_rec(1).item, None)
     assert (result.addressed, result.replied, result.escalated) == (0, 0, ())
+
+
+# --- lock hold (fix-mode round 2, warning 13) ------------------------------
+
+def test_a_feedback_run_does_not_hold_the_short_op_lock(tmp_path):
+    """A 30-minute claude pass inside the shared pass would block magi,
+    keep-current, park AND the stale-claim reap for its whole duration --
+    long enough for the reap window itself to be missed."""
+    from worksweep.runner import acquire_lock, release_lock
+    locks = _locks(tmp_path)
+    held = {}
+
+    def execute(item, cfg):
+        # Mid-run: could another pass take the short-op lock right now?
+        held["short_op_free"] = acquire_lock(locks["lock_path"])
+        if held["short_op_free"]:
+            release_lock(locks["lock_path"])
+        return _result()
+
+    deps, _, _, state = _deps([_rec(7)], execute=execute)
+    assert run_once(_cfg(tmp_path), deps, **locks) == 0
+    assert held["short_op_free"] is True
+    assert state["records"][0].item.status == "done"
+
+
+def test_the_feedback_pass_takes_its_own_lock(tmp_path):
+    """And it is a REAL lock: a second overlapping fire must not double-run a
+    claim that posts replies under Chandler's name."""
+    from worksweep.runner import acquire_lock
+    locks = _locks(tmp_path)
+    feedback_lock = str(tmp_path / "runner-address-feedback.lock")
+    assert acquire_lock(feedback_lock)
+
+    ran = []
+    deps, posts, _, state = _deps(
+        [_rec(7)], execute=lambda i, c: (ran.append(1), _result())[1])
+    assert run_once(_cfg(tmp_path), deps, **locks) == 0
+    assert ran == []                       # the other fire still holds it
+    assert state["records"][0].item.status == "approved"
+    assert posts == []
+
+
+def test_the_done_post_is_clamped_under_the_discord_cap(tmp_path):
+    """A thread body is arbitrary third-party text and there can be twenty of
+    them. An over-long post is REJECTED by Discord, which turns a completed
+    run into silence -- exactly the outcome that is never allowed."""
+    from worksweep.formatter import DISCORD_MAX_CHARS
+    huge = tuple(f"leyang: {'x' * 400} — call {i}" for i in range(20))
+    deps, posts, _, _ = _deps(
+        [_rec(7)], execute=lambda i, c: _result(escalated=huge, waiting=20))
+    assert run_once(_cfg(tmp_path), deps, **_locks(tmp_path)) == 0
+    done = [p for p in posts if p.startswith("💬")][0]
+    assert len(done.encode("utf-8")) <= DISCORD_MAX_CHARS - 100
+    assert "20 waiting:" in done
+
+
+def test_the_needs_input_post_is_clamped_too(tmp_path):
+    from worksweep.formatter import DISCORD_MAX_CHARS
+    question = "!3997: 20 threads need your call - " + "; ".join(
+        f"leyang: {'y' * 400} — call {i}" for i in range(20))
+    deps, posts, _, state = _deps(
+        [_rec(7)],
+        execute=lambda i, c: (_ for _ in ()).throw(NeedsInputError(question)))
+    assert run_once(_cfg(tmp_path), deps, **_locks(tmp_path)) == 0
+    asked = [p for p in posts if p.startswith("❓")][0]
+    assert len(asked.encode("utf-8")) <= DISCORD_MAX_CHARS - 100
+    assert state["records"][0].item.status == "needs-input"

@@ -321,9 +321,11 @@ class _Opener:
 
     def __init__(self, outcomes):
         self.outcomes, self.calls = list(outcomes), 0
+        self.last_request = None
 
     def open(self, req, timeout=None):
         self.calls += 1
+        self.last_request = req
         outcome = self.outcomes[self.calls - 1]
         if isinstance(outcome, Exception):
             raise outcome
@@ -466,3 +468,19 @@ def test_retry_after_parsing():
     assert wsmain._retry_after_seconds(_http_error(429)) is None
     assert wsmain._retry_after_seconds(_http_error(503)) is None
     assert wsmain._retry_after_seconds(object()) is None
+
+
+# --- mention hygiene (fix-mode round 2, warning 9) -------------------------
+
+def test_every_post_disables_mention_parsing(monkeypatch):
+    """Worksweep quotes text other people wrote -- MR titles, and now review
+    thread bodies. A quoted `@everyone` must render as characters, not ring
+    every phone on the server. Global, so it protects every post rather than
+    the one caller that remembered."""
+    import json as _json
+    opener, sleeps = _post([None], monkeypatch)
+    wsmain._post_discord(WEBHOOK, "leyang said @everyone ship it",
+                         sleep=sleeps.append)
+    body = _json.loads(opener.last_request.data.decode("utf-8"))
+    assert body["allowed_mentions"] == {"parse": []}
+    assert body["content"] == "leyang said @everyone ship it"

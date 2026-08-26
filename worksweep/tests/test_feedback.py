@@ -856,3 +856,53 @@ def test_the_tally_names_its_denominator(tmp_path, worktree):
     assert feedback.tally(result) == (
         "2 waiting: 0 addressed, 2 replied, 0 escalated")
     assert feedback.done_message(result).startswith("💬 !3997 — 2 waiting:")
+
+
+# --- post size (fix-mode round 2, blocker 7) -------------------------------
+
+def test_the_done_message_caps_how_many_lines_it_renders():
+    """Twenty threads of arbitrary reviewer prose is a post Discord rejects,
+    and a rejected post is silence. The count still tells the whole truth."""
+    result = feedback.FeedbackResult(
+        iid=3997, waiting=20, replied=1,
+        escalated=tuple(f"leyang: call {i}" for i in range(20)),
+        replies=tuple(f"t{i}: said something" for i in range(20)))
+    msg = feedback.done_message(result)
+    # five real lines plus the "…and N more" line that accounts for the rest
+    assert msg.count("needs you: ") == feedback._MAX_POSTED_LINES + 1
+    assert msg.count("said: ") == feedback._MAX_POSTED_LINES + 1
+    assert msg.count(f"and {20 - feedback._MAX_POSTED_LINES} more") == 2
+    assert "20 waiting: 0 addressed, 1 replied, 20 escalated" in msg
+
+
+def test_a_short_run_renders_every_line():
+    result = feedback.FeedbackResult(
+        iid=3997, waiting=2, replied=1,
+        escalated=("leyang: one call",), replies=("t1: said it",))
+    msg = feedback.done_message(result)
+    assert "more" not in msg
+    assert "needs you: leyang: one call" in msg
+
+
+def test_the_escalation_question_is_capped_too(tmp_path, worktree):
+    threads = [_thread(f"t{i}") for i in range(20)]
+    sub = _Subprocess(worktree, report=_report(
+        escalated=[{"thread": f"t{i}", "reason": f"call {i}"}
+                   for i in range(20)]))
+    glab = _Glab(_payload(*threads), _payload(*threads))
+    with pytest.raises(NeedsInputError) as e:
+        feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                         run_glab=glab, now=lambda: RUN_START)
+    assert str(e.value).count("; ") == feedback._MAX_POSTED_LINES
+    assert "and 15 more" in str(e.value)
+    assert "20 threads need your call" in str(e.value)
+
+
+def test_a_reviewer_cannot_ping_the_channel_through_an_escalation():
+    """The quote is reviewer-written text on its way into Discord. It gets the
+    same scrub an untrusted MR title already gets."""
+    line = feedback._escalation_line(
+        None, "see https://evil.example/x and `@everyone` [click](http://x)",
+        "t1")
+    assert "http://" not in line and "https://" not in line
+    assert "[" not in line and "]" not in line and "`" not in line
