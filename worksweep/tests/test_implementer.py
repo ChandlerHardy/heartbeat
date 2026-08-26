@@ -821,3 +821,66 @@ def test_the_advisory_magi_invocation_no_longer_suppresses_rebuttal(tmp_path):
     assert len(advisory) == 1
     assert advisory[0][2] == "/magi:magi-review !42 --advisory --draft-findings"
     assert "--no-rebuttal" not in " ".join(advisory[0])
+
+
+# --- f-020 / f-023: the advisory run must be able to finish ---------------
+
+def test_the_advisory_magi_run_uses_the_cfg_magi_timeout(tmp_path):
+    """f-020. This was a hard-coded 1800s while a magi 0.2.4 tribunal takes
+    40-60 minutes, so every advisory run timed out by construction -- the
+    exact drift the runner's own budget was raised to avoid."""
+    from worksweep.runner import MAGI_TIMEOUT_SECONDS
+    _, edges = _run_execute(tmp_path)
+    advisory = [(c, kw) for c, kw in edges.calls
+                if c[0] == "claude" and "--advisory" in " ".join(c)]
+    assert len(advisory) == 1
+    assert advisory[0][1]["timeout"] == MAGI_TIMEOUT_SECONDS == 4500
+
+
+def test_a_configured_magi_timeout_reaches_the_advisory_run(tmp_path):
+    _, edges = _run_execute(tmp_path, cfg=_cfg(tmp_path, magi_timeout=6000))
+    advisory = [(c, kw) for c, kw in edges.calls
+                if c[0] == "claude" and "--advisory" in " ".join(c)]
+    assert advisory[0][1]["timeout"] == 6000
+
+
+import re  # noqa: E402
+
+
+def _nested_same_quote_fstrings(src):
+    """Lines holding an f-string whose own delimiter is reused INSIDE a
+    replacement field -- the PEP 701 (3.12+) grammar.
+
+    Scans forward from each `f'`/`f"` tracking brace depth: a matching quote
+    at depth 0 simply ends the string, while one at depth > 0 is the 3.12-only
+    shape. Deliberately narrow -- it looks for exactly what broke, not general
+    f-string parsing.
+    """
+    bad = []
+    for n, line in enumerate(src.splitlines(), 1):
+        for m in re.finditer(r"\bf(['\"])", line):
+            q, depth = m.group(1), 0
+            for ch in line[m.end():]:
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth = max(0, depth - 1)
+                elif ch == q:
+                    if depth > 0:
+                        bad.append((n, line.strip()))
+                    break
+    return bad
+
+
+def test_no_f_string_reuses_its_own_quote(tmp_path):
+    """f-023. `f'{a or \'\'}'` is 3.12+ only; on an older interpreter it is a
+    SyntaxError at IMPORT, which takes the whole module down before any test
+    can run. The local interpreter parses it happily, so this cannot be caught
+    by importing -- only by looking."""
+    import pathlib as _p
+    # the scan catches the shape that actually broke
+    assert _nested_same_quote_fstrings(
+        "note = f'exited: {_tail(f\'{proc.stdout or \'\'}\', 5)}'")
+    # and the module is clean of it
+    src = _p.Path(implementer.__file__).read_text()
+    assert _nested_same_quote_fstrings(src) == []

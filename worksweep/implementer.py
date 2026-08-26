@@ -54,7 +54,6 @@ _GIT_TIMEOUT = 120
 _PUSH_TIMEOUT = 300
 _GLAB_TIMEOUT = 180
 _DESC_TIMEOUT = 60
-_MAGI_TIMEOUT = 1800
 _TAIL_LINES = 15
 
 
@@ -499,6 +498,13 @@ def _execute_pipeline(cfg, iid: int, slot: DevBox, checkout: str,
     MR, run magi, or push. It verifies instead: the pipeline's state file
     names an MR, that MR reads back as (or is forced) Draft, and the box
     serves 200."""
+    # f-021: this worktree is permanent and `_find_pipeline_state` takes the
+    # first directory matching the issue. A run that exits zero without
+    # writing state would otherwise be reported against a PREVIOUS run's MR --
+    # a completed queue item pointing at somebody else's work. Clear this
+    # issue's state first, so anything found afterwards can only be ours.
+    # Mirrors feedback._forget, and touches only THIS issue's directories.
+    _forget_pipeline_state(checkout, iid)
     devnum = re.sub(r"\D", "", slot.name) or slot.name
     prompt = (f"{cfg.pipeline_command} #{iid} --dev {devnum}"
               + _PIPELINE_CONSTRAINTS.format(box=slot.name))
@@ -533,13 +539,20 @@ def _execute_pipeline(cfg, iid: int, slot: DevBox, checkout: str,
     _ensure_draft(checkout, mr_iid, run_subprocess, mr_url)
     branch, head = _mr_branch_sha(checkout, mr_iid, run_subprocess)
 
-    note = ""
+    # f-022: the M5 contract is that the claimed box SERVES the branch. A
+    # probe failure used to become a note on a success message, so the runner
+    # completed the item and announced a parked, QA-complete implementation
+    # nobody had verified. Proving it is the whole point of this path.
     try:
         status = http_get(slot.url)
     except Exception as e:
-        status, note = 0, f"dev-site probe failed: {e}"
-    if status != 200 and not note:
-        note = f"dev site {slot.url} returned {status} after pipeline QA"
+        raise RunnerError(f"dev-site probe for {slot.url} failed after "
+                          f"pipeline QA: {type(e).__name__}: {e} — the MR "
+                          f"exists but the box is not serving it")
+    if status != 200:
+        raise RunnerError(f"dev site {slot.url} returned {status} after "
+                          f"pipeline QA (expected 200) — the MR exists but "
+                          f"the box is not serving it")
 
     magi_line = next((ln.strip() for ln in state.splitlines()
                       if "MAGI" in ln.upper() and ("[x]" in ln or "SHIP" in ln)),
@@ -551,7 +564,29 @@ def _execute_pipeline(cfg, iid: int, slot: DevBox, checkout: str,
         verdict=verdict, result_sha=head,
         reassigned_from=(str(slot.mr_iid)
                          if slot.tier == _TIER_HANDED_OFF and slot.mr_iid else ""),
-        magi_note=note or magi_line)
+        magi_note=magi_line)
+
+
+def _forget_pipeline_state(checkout: str, iid: int) -> None:
+    """Remove any pipeline state for `iid` left in this reused worktree.
+
+    Best-effort and silent: a state file we cannot delete is caught by the
+    caller's own "left no state file" check, and failing the run over cleanup
+    would turn a recoverable mess into an outage. State for OTHER issues is
+    untouched -- that is somebody else's run, not ours to clear.
+    """
+    root = os.path.join(checkout, ".claude", "state", "pla-pipelines")
+    try:
+        names = os.listdir(root)
+    except OSError:
+        return
+    for name in names:
+        if not re.match(rf"{iid}(\D|$)", name):
+            continue
+        try:
+            os.remove(os.path.join(root, name, "state.md"))
+        except OSError:
+            pass
 
 
 def _find_pipeline_state(checkout: str, iid: int) -> tuple:
@@ -588,6 +623,15 @@ def _mr_branch_sha(checkout: str, mr_iid: int,
         return "", ""
 
 
+def _magi_timeout(cfg) -> int:
+    """f-020: this was a hard-coded 1800s while a magi 0.2.4 tribunal takes
+    40-60 minutes -- every advisory run timed out by construction. Same source
+    the runner uses, so the two cannot drift again."""
+    from .runner import MAGI_TIMEOUT_SECONDS
+    return int(getattr(cfg, "magi_timeout", MAGI_TIMEOUT_SECONDS)
+               or MAGI_TIMEOUT_SECONDS)
+
+
 def _magi_advisory(checkout: str, cfg, mr_iid: int,
                    run_subprocess: Callable) -> tuple:
     """Advisory tribunal on the Draft MR. `--advisory` is mandatory: Chandler
@@ -602,10 +646,14 @@ def _magi_advisory(checkout: str, cfg, mr_iid: int,
             # the rebuttal round is mechanical now and the flag is gone.
             [cfg.claude_bin, "-p",
              f"/magi:magi-review !{mr_iid} --advisory --draft-findings"],
-            run_subprocess, cwd=checkout, timeout=_MAGI_TIMEOUT)
+            run_subprocess, cwd=checkout, timeout=_magi_timeout(cfg))
         if proc.returncode != 0:
+            # f-023: nested same-type quotes inside an f-string are a 3.12+
+            # feature; the mini runs an older interpreter, where this is a
+            # SyntaxError at import -- taking the whole module with it.
+            out = f"{proc.stdout or ''}{proc.stderr or ''}"
             note = (f"magi-review !{mr_iid} exited {proc.returncode}: "
-                    f"{_tail(f'{proc.stdout or ''}{proc.stderr or ''}', 5)}")
+                    f"{_tail(out, 5)}")
     except Exception as e:
         note = f"magi-review !{mr_iid} could not run: {type(e).__name__}: {e}"
     report = find_report(checkout, mr_iid)
@@ -640,8 +688,8 @@ def _git(run_subprocess: Callable, checkout: str, args: List[str],
     if proc.returncode != 0:
         if allow_fail:
             return ""
-        raise RunnerError(f"git {' '.join(args)} failed: "
-                          f"{_tail(f'{proc.stderr or ''}{proc.stdout or ''}', 5)}")
+        out = f"{proc.stderr or ''}{proc.stdout or ''}"
+        raise RunnerError(f"git {' '.join(args)} failed: {_tail(out, 5)}")
     return proc.stdout or ""
 
 

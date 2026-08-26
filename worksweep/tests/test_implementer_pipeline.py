@@ -181,10 +181,15 @@ def test_pipeline_non_draft_mr_gets_forced_draft(tmp_path):
     assert any("mr update 4099 --draft" in f for f in flat)
 
 
-def test_pipeline_dev_site_failure_is_a_note_not_an_error(tmp_path):
-    edges = _Edges(http_status=502)
-    result, _ = _run(tmp_path, edges=edges)
-    assert "502" in result.magi_note
+def test_pipeline_dev_site_failure_fails_the_run(tmp_path):
+    """SUPERSEDED by f-022 (tribunal, 2026-08-26). This used to assert the
+    502 became a note on a SUCCESS result -- so the runner completed the item
+    and announced a QA-complete implementation nobody had verified. The M5
+    contract is that the box serves the branch, so failing to prove it is a
+    failed run."""
+    with pytest.raises(RunnerError) as e:
+        _run(tmp_path, edges=_Edges(http_status=502))
+    assert "502" in str(e.value)
 
 
 def test_default_config_keeps_legacy_rubric_do_path(tmp_path):
@@ -195,3 +200,79 @@ def test_default_config_keeps_legacy_rubric_do_path(tmp_path):
         with open(p, "w") as f:
             json.dump({"discord_webhook": "x"}, f)
         assert load_config(p).pipeline_command == ""
+
+
+# --- f-021 / f-022: the pipeline path must PROVE, not assume ---------------
+
+def test_a_stale_state_file_is_never_read_as_this_runs_work(tmp_path):
+    """f-021. The worktree is permanent and `_find_pipeline_state` takes the
+    first matching issue directory. A run that exits zero without writing
+    state was therefore reported against a PREVIOUS run's MR -- a completed
+    queue item pointing at somebody else's work."""
+    edges = _Edges(write_state=None)          # this run leaves nothing behind
+    (tmp_path / "pb-www").mkdir(exist_ok=True)
+    stale_dir = (tmp_path / ".worktrees" / "pb-www-implement" / ".claude"
+                 / "state" / "pla-pipelines" / "1775-yesterdays-run")
+    stale_dir.mkdir(parents=True)
+    (stale_dir / "state.md").write_text(
+        "- [x] 7. MR — https://gitlab.com/x/-/merge_requests/4001 (draft)\n")
+
+    with pytest.raises(RunnerError) as e:
+        _run(tmp_path, edges=edges)
+    assert "no state file" in str(e.value)
+
+
+def test_the_stale_state_is_actually_removed_before_the_run(tmp_path):
+    """Not merely ignored: cleared, so nothing downstream can find it."""
+    edges = _Edges()
+    (tmp_path / "pb-www").mkdir(exist_ok=True)
+    root = (tmp_path / ".worktrees" / "pb-www-implement" / ".claude"
+            / "state" / "pla-pipelines")
+    stale = root / "1775-yesterdays-run"
+    stale.mkdir(parents=True)
+    (stale / "state.md").write_text("- [x] 7. MR — !4001\n")
+
+    result, _ = _run(tmp_path, edges=edges)
+    assert result.mr_iid == 4099              # THIS run's MR, not 4001
+    assert not (stale / "state.md").exists()
+
+
+def test_state_for_another_issue_is_left_alone(tmp_path):
+    """Only this issue's state is cleared -- a concurrent or earlier run for a
+    different issue is none of our business."""
+    edges = _Edges()
+    (tmp_path / "pb-www").mkdir(exist_ok=True)
+    root = (tmp_path / ".worktrees" / "pb-www-implement" / ".claude"
+            / "state" / "pla-pipelines")
+    other = root / "1701-other-issue"
+    other.mkdir(parents=True)
+    (other / "state.md").write_text("- [x] 7. MR — !4002\n")
+
+    _run(tmp_path, edges=edges)
+    assert (other / "state.md").exists()
+
+
+def test_a_failed_dev_box_probe_fails_the_run(tmp_path):
+    """f-022. The M5 contract is 'the box serves 200'. A probe exception was
+    demoted to a note on a SUCCESS message, so the runner completed the item
+    and posted a parked, QA-complete implementation nobody had verified."""
+    class _Boom(_Edges):
+        def http(self, url):
+            self.http_calls.append(url)
+            raise OSError("connection refused")
+
+    with pytest.raises(RunnerError) as e:
+        _run(tmp_path, edges=_Boom())
+    assert "connection refused" in str(e.value)
+
+
+def test_a_non_200_dev_box_fails_the_run(tmp_path):
+    with pytest.raises(RunnerError) as e:
+        _run(tmp_path, edges=_Edges(http_status=502))
+    assert "502" in str(e.value)
+
+
+def test_a_healthy_box_still_completes_normally(tmp_path):
+    result, edges = _run(tmp_path, edges=_Edges(http_status=200))
+    assert result.mr_iid == 4099
+    assert edges.http_calls == [_box().url]
