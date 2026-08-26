@@ -634,6 +634,27 @@ def _dry_run_park(item, cfg):
                            result_sha=item.sha, description_updated=False)
 
 
+def _execute_address_feedback(item, cfg):
+    """Real address-feedback edge: subprocess (git + the claude pass) and a
+    read-only glab GET of the MR's threads.
+
+    The replies themselves are posted by the claude run, inside the worktree,
+    under Chandler's own glab credentials -- this edge only ever reads, so
+    everything Python asserts afterwards is independent of what the run says
+    it did.
+    """
+    from . import feedback
+    return feedback.execute(item, cfg, run_subprocess=subprocess.run,
+                            run_glab=_run_glab_api)
+
+
+def _dry_run_address_feedback(item, cfg):
+    """--dry-run must never post a reply under Chandler's name."""
+    from . import feedback
+    return feedback.FeedbackResult(iid=0, result_sha=item.sha,
+                                   already_answered=True)
+
+
 def _execute_keep_current(item, cfg):
     """Real keep-current edge: subprocess + two ssh budgets + an http probe.
     `cfg.dev_boxes` is the raw box-config list — keepcurrent.execute probes
@@ -729,6 +750,9 @@ def main(argv=None) -> int:
             "execute_keep_current": (_dry_run_keep_current if args.dry_run
                                      else _execute_keep_current),
             "execute_park": (_dry_run_park if args.dry_run else _execute_park),
+            "execute_address_feedback": (_dry_run_address_feedback
+                                         if args.dry_run
+                                         else _execute_address_feedback),
         }
         return _runner.run_once(cfg, deps)
 

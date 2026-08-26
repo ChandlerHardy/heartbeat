@@ -337,11 +337,12 @@ def _guarded_pass(cfg, deps: Dict[str, Callable], kind: str,
 
 
 def _run_magi_pass(cfg, deps: Dict[str, Callable], lock_path: str) -> int:
-    """One claim from magi-review, keep-current OR park (lowest number wins
-    across all three — see pick_claim). keep-current and park share this
-    pass/lock deliberately: both are short ops (a git fetch/merge/push, or a
-    branch sync plus one API write), not worth their own lock files, and this
-    pass only ever runs one claim per invocation either way."""
+    """One claim from magi-review, keep-current, park OR address-feedback
+    (lowest number wins across all four — see pick_claim). They share this
+    pass/lock deliberately: each is a short op (a git fetch/merge/push, a
+    branch sync plus one API write, or one bounded claude pass over an MR's
+    threads), not worth its own lock file, and this pass only ever runs one
+    claim per invocation either way."""
     if not acquire_lock(lock_path):
         return 0    # another runner is live — that's fine, not an error
     try:
@@ -354,7 +355,8 @@ def _run_magi_pass(cfg, deps: Dict[str, Callable], lock_path: str) -> int:
             for r in reaped:
                 _post(deps, cfg, f"⚠️ Worksweep runner: reaped stale claim "
                                  f"#{r.number} ({r.item.repo} {r.item.id})")
-        target = pick_claim(records, (_MAGI, _KEEP_CURRENT, _PARK))
+        target = pick_claim(records, (_MAGI, _KEEP_CURRENT, _PARK,
+                                      _ADDRESS_FEEDBACK))
         if target is None:
             return 0
         records = claim(records, target.number, now)
@@ -363,6 +365,8 @@ def _run_magi_pass(cfg, deps: Dict[str, Callable], lock_path: str) -> int:
             return _run_keep_current_claim(cfg, deps, target)
         if target.item.executor == _PARK:
             return _run_park_claim(cfg, deps, target)
+        if target.item.executor == _ADDRESS_FEEDBACK:
+            return _run_address_feedback_claim(cfg, deps, target)
         try:
             result_sha, report_path = deps["execute"](target.item, cfg)
         except RunnerError as e:
@@ -454,6 +458,54 @@ def _run_park_claim(cfg, deps: Dict[str, Callable],
     if updated is not None:
         from . import park as _park       # local: park imports implementer
         _post(deps, cfg, _park.done_message(result))
+    return 0
+
+
+def _run_address_feedback_claim(cfg, deps: Dict[str, Callable],
+                                target: QueueRecord) -> int:
+    """The address-feedback half of the shared pass.
+
+    Called with the claim already saved as `running`. Unlike its siblings this
+    one has THREE outcomes, not two, and the middle one is why it cannot just
+    copy _run_park_claim: `NeedsInputError` subclasses `RunnerError`, so an
+    `except RunnerError` alone would record "I found only judgment calls" as a
+    hard failure with a warning, instead of a question. It is caught FIRST,
+    exactly as the implement pass does it.
+
+    Every exit still ends in BOTH a queue status and a Discord post: this
+    executor posts replies under Chandler's identity, so a silent outcome
+    would leave him not knowing what went out in his name.
+    """
+    number = target.number
+    if "execute_address_feedback" not in deps:
+        _fail_and_post(deps, cfg, number,
+                       "address-feedback executor is not wired into this "
+                       "runner (no execute_address_feedback dep)",
+                       _ADDRESS_FEEDBACK)
+        return 1
+    try:
+        result = deps["execute_address_feedback"](target.item, cfg)
+    except NeedsInputError as e:
+        if _apply_to_fresh(
+                deps, cfg, number,
+                lambda fresh: needs_input(fresh, number, str(e),
+                                          deps["now"]())) is not None:
+            _post(deps, cfg, f"❓ #{number} needs your input: {e}")
+        return 0        # a question is a handled outcome, not a failure
+    except RunnerError as e:
+        _fail_and_post(deps, cfg, number, str(e), _ADDRESS_FEEDBACK)
+        return 1
+    except Exception as e:
+        _fail_and_post(deps, cfg, number, f"{type(e).__name__}: {e}",
+                       _ADDRESS_FEEDBACK)
+        return 1
+    updated = _apply_to_fresh(
+        deps, cfg, number,
+        lambda fresh: complete(fresh, number, result.result_sha, "",
+                               deps["now"]()))
+    if updated is not None:
+        from . import feedback as _feedback   # local: feedback imports runner
+        _post(deps, cfg, _feedback.done_message(result))
     return 0
 
 
