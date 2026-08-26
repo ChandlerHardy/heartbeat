@@ -1351,18 +1351,28 @@ def _valid_numbers(payload) -> Optional[List[int]]:
 
 
 def _audit_message(numbers: Sequence[int],
-                   updated: Sequence[QueueRecord]) -> str:
+                   updated: Sequence[QueueRecord], actor: str = "") -> str:
     """Build the Discord confirmation, clamped under the Discord byte cap.
 
     "Approve all" is the highest-blast-radius action in worksweep, so it must
     ALWAYS leave a channel record. An unclamped message naming 200 items would
     be rejected by Discord and the audit trail would silently vanish for exactly
     the approval that most needed one -- so overflow is summarised instead.
+
+    `actor` is attribution, not authorisation: Chandler sometimes has Claude
+    press the button on his say-so, and the channel should be able to tell the
+    two hands apart afterwards. `"claude"` is the only value that renders --
+    anything else, including nothing at all, keeps the line byte-identical to
+    what a browser tap has always posted. The suffix is chosen BEFORE the
+    message is measured, so the longer one is inside the clamp rather than
+    appended past it. `actor` is keyword-with-default because both existing
+    call sites pass positionally.
     """
     by_num = {r.number: r for r in updated}
     parts = [f"{n} ({by_num[n].item.executor} {by_num[n].item.repo})".strip()
              for n in numbers if n in by_num]
-    prefix, suffix = "✅ Approved: ", " (dashboard)"
+    prefix = "✅ Approved: "
+    suffix = " (dashboard · claude)" if actor == _ACTOR else " (dashboard)"
 
     full = prefix + ", ".join(parts) + suffix
     if len(full.encode("utf-8")) <= DISCORD_MAX_CHARS:
@@ -1379,6 +1389,29 @@ def _audit_message(numbers: Sequence[int],
     # something rather than nothing.
     return _truncate_bytes(f"{prefix}{len(parts)} items{suffix}",
                            DISCORD_MAX_CHARS)
+
+
+# The one actor value that renders. A whitelist rather than a sanitiser
+# because this string lands in a Discord post: anything broader means thinking
+# about mentions, links and length every time someone touches the endpoint.
+_ACTOR = "claude"
+
+
+def _valid_actor(payload) -> str:
+    """The attributed actor from an approve envelope, or "" for everyone else.
+
+    Never raises and never rejects the request: an unrecognised actor is an
+    unattributed approval, not a failed one -- the approval itself was already
+    consented to by whoever held the ✅. The submitted text is never echoed
+    anywhere, so a 5000-character actor or one carrying an @everyone simply
+    renders the ordinary "(dashboard)".
+    """
+    if not isinstance(payload, dict):
+        return ""
+    actor = payload.get("actor")
+    if not isinstance(actor, str) or actor != _ACTOR:
+        return ""
+    return actor
 
 
 def _valid_number(payload) -> Optional[int]:
@@ -1563,7 +1596,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            self._approve(path, numbers)
+            self._approve(path, numbers, _valid_actor(payload))
         except Exception as e:                     # never crash the agent
             print(f"worksweep: dashboard approval failed: {e}", file=sys.stderr)
             self._text(500, "approval failed")
@@ -1681,7 +1714,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         else:
             print(confirm)
 
-    def _approve(self, path: str, numbers: Optional[List[int]]) -> None:
+    def _approve(self, path: str, numbers: Optional[List[int]],
+                 actor: str = "") -> None:
         qpath = self.server.queue_path
         now = self.server.now()
         with _WRITE_LOCK:
@@ -1702,16 +1736,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 # able to roll this back.
                 save_queue(qpath, updated)
         if newly:
-            self._audit(sorted(newly), updated)
+            self._audit(sorted(newly), updated, actor)
         self._send(200, "application/json",
                    json.dumps({"approved": sorted(newly)}).encode("utf-8"))
 
     def _audit(self, numbers: Sequence[int],
-               updated: Sequence[QueueRecord]) -> None:
+               updated: Sequence[QueueRecord], actor: str = "") -> None:
         """Never-silent: the channel stays the single history of what was
         approved. A failed post is logged and swallowed -- the approval already
         reached disk and must not be undone."""
-        confirm = _audit_message(numbers, updated)
+        confirm = _audit_message(numbers, updated, actor)
         post, webhook = self.server.post, self.server.webhook
         if post and webhook:
             try:
