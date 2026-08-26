@@ -433,13 +433,23 @@ def _with_unaddressed(mr, cfg: WorksweepConfig,
             raw, cfg.username)), True
 
 
+PROBE_FAILED_MARKER = "(probe failed)"
+
+
 def _retained_feedback(prior: WorkItem) -> WorkItem:
     """The prior feedback row, carried forward because the probe could not
-    re-derive it. Marked so the digest says why it looks stale."""
+    re-derive it. Marked so the digest says why it looks stale.
+
+    f-006: the STATUS is preserved, not reset. This used to hard-set
+    "proposed", so a transient network error silently spent a human's ✅ --
+    approved work stopped happening and the only signal was the row quietly
+    reappearing as unapproved. A probe blip is worksweep failing to look, not
+    the human changing their mind, and it may not revoke consent.
+    """
     why = prior.why or ""
-    if "(probe failed)" not in why:
-        why = f"{why} (probe failed)".strip()
-    return dataclasses.replace(prior, why=why, status="proposed")
+    if PROBE_FAILED_MARKER not in why:
+        why = f"{why} {PROBE_FAILED_MARKER}".strip()
+    return dataclasses.replace(prior, why=why)
 
 
 def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:

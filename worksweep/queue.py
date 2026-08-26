@@ -52,6 +52,8 @@ _NEEDS_INPUT = "needs-input"
 # An address-feedback ✅ covers the threads it named; three threads is not the
 # consent that was given for two.
 _WHY_SENSITIVE = ("address-feedback",)
+# Bookkeeping worksweep appends to a why-string. Never part of the ask.
+_PROBE_FAILED_MARKER = "(probe failed)"
 # Resolution reasons strong enough to close an already-`error` row rather than
 # retain it. Deliberately narrow: only "the signal is provably gone".
 #
@@ -133,7 +135,19 @@ def _consent_holds(prior: WorkItem, fresh: WorkItem) -> bool:
     """
     if prior.executor not in _WHY_SENSITIVE:
         return True
-    return prior.why == fresh.why
+    return _ask_of(prior.why) == _ask_of(fresh.why)
+
+
+def _ask_of(why: str) -> str:
+    """The why-string with worksweep's own bookkeeping markers stripped.
+
+    f-006: a probe failure appends "(probe failed)" to the carried-forward
+    row. Comparing the raw strings would read that marker as "the ask changed"
+    and reset the ✅ on the very next sweep -- turning a one-sweep blip into a
+    lost approval anyway, one step later. The marker describes OUR failure to
+    look, never a change in what was asked.
+    """
+    return (why or "").replace(_PROBE_FAILED_MARKER, "").strip()
 
 
 def _older_than_days(iso_ts: str, iso_now: str, days: int) -> bool:
