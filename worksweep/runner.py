@@ -25,6 +25,10 @@ _ERROR_SUMMARY_MAX = 500
 _LOCK_DEFAULT = os.path.expanduser("~/.worksweep/runner.lock")
 _IMPLEMENT_LOCK_NAME = "runner-implement.lock"
 _ADDRESS_FEEDBACK_LOCK_NAME = "runner-address-feedback.lock"
+# The `why` on a row worksweep approved for itself. The trailing
+# "(auto)" is the marker the digest and the dashboard both render, so a
+# human can see the row was never ✅'d by hand.
+AUTO_MAGI_WHY = "post-feedback re-review (auto)"
 
 _MAGI = "magi-review"
 _IMPLEMENT = "implement"
@@ -555,12 +559,48 @@ def _run_address_feedback_claim(cfg, deps: Dict[str, Callable],
         return 1
     updated = _apply_to_fresh(
         deps, cfg, number,
-        lambda fresh: complete(fresh, number, result.result_sha, "",
-                               deps["now"]()))
+        lambda fresh: _chain_magi_review(
+            complete(fresh, number, result.result_sha, "", deps["now"]()),
+            target.item, result, deps["now"]()))
     if updated is not None:
         from . import feedback as _feedback   # local: feedback imports runner
         _post(deps, cfg, _clamped(_feedback.done_message(result)))
     return 0
+
+
+def _chain_magi_review(records: List[QueueRecord], item: WorkItem, result,
+                       now: str) -> List[QueueRecord]:
+    """Queue a magi review of the commits this feedback run just pushed.
+
+    Trigger is `addressed`, NOT a non-empty result_sha. Every completion
+    carries a sha -- reply-only runs report the head they read, and the
+    already-answered shortcut reports it before doing anything at all -- so
+    keying on the sha would queue a review of untouched code on every pass.
+    `addressed` counts threads fixed WITH a commit, and the executor's own
+    verification already refused to report those unless origin/<branch>
+    actually moved.
+
+    Pre-approved, which is the one sanctioned bypass of the ✅ gate: the
+    trigger is scoped to commits worksweep itself made, and magi-review is
+    read-only plus draft comments. Being a RUNNABLE executor, it is claimable
+    without a human step, so it cannot strand as an approved zombie.
+
+    Appended to the SAME list the completion just produced, so both reach disk
+    in one write: two saves would leave a window where the feedback row reads
+    `done` and the review it earned does not exist yet.
+    """
+    if not result.addressed or not result.result_sha:
+        return records
+    magi_id = f"magi:{item.repo}!{result.iid}@{result.result_sha}"
+    if any(r.item.id == magi_id for r in records):
+        return records      # same head already queued -- never stack a second
+    number = max((r.number for r in records), default=0) + 1
+    return list(records) + [QueueRecord(
+        number=number, first_seen=now, last_seen=now,
+        item=WorkItem(schema_version=1, id=magi_id, repo=item.repo, kind="mr",
+                      executor=_MAGI, risk="low", why=AUTO_MAGI_WHY,
+                      web_url=item.web_url, sha=result.result_sha,
+                      status="approved", title=item.title))]
 
 
 def _run_implement_pass(cfg, deps: Dict[str, Callable], lock_path: str) -> int:

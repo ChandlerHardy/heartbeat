@@ -227,3 +227,48 @@ def test_a_cleared_signal_does_not_disturb_a_live_claim():
     out = reconcile(prior, [], NOW,
                     resolved={"feedback:pb-www!3997": "signal-cleared"})
     assert out[0].item.status == "running"
+
+
+# --- the auto-approved re-review vs a new push (2026-08-26) ---------------
+
+def _auto_magi(number=13, sha="newsha123", status="approved"):
+    from worksweep.runner import AUTO_MAGI_WHY
+    return QueueRecord(
+        number=number, first_seen=NOW, last_seen=NOW,
+        item=WorkItem(schema_version=1, id=f"magi:pb-www!3997@{sha}",
+                      repo="pb-www", kind="mr", executor="magi-review",
+                      risk="low", why=AUTO_MAGI_WHY,
+                      web_url="https://gl/x/-/merge_requests/3997", sha=sha,
+                      status=status, title="Ranch data tab"))
+
+
+def test_an_auto_approved_review_of_a_dead_head_is_retained_not_dropped():
+    """The id carries the sha, so a new push proposes a DIFFERENT id and this
+    one simply stops being emitted. `approved` keeps it (retain-if-gone)
+    rather than deleting it and recycling its number."""
+    prior = [_auto_magi()]
+    out = reconcile(prior, [], NOW, resets=set())
+    assert len(out) == 1
+    assert out[0].item.status == "approved"
+    assert out[0].number == 13
+
+
+def test_a_fresh_push_gets_its_own_row_beside_the_old_one():
+    fresh = _auto_magi(sha="evennewer").item
+    out = reconcile([_auto_magi()], [fresh], NOW, resets=set())
+    assert {r.item.id for r in out} == {"magi:pb-www!3997@newsha123",
+                                        "magi:pb-www!3997@evennewer"}
+    # the new one takes the next free number, the old keeps its handle
+    assert {r.number for r in out} == {13, 14}
+
+
+def test_an_auto_approved_row_re_proposed_at_a_new_sha_reports_the_reset():
+    """Same id, moved sha -- the ✅ (ours, in this case) is revoked and the
+    ↩️ notice has to fire like any other, so the digest explains itself."""
+    import dataclasses
+    prior = [_auto_magi()]
+    fresh = [dataclasses.replace(prior[0].item, sha="rebased1")]
+    resets = set()
+    out = reconcile(prior, fresh, NOW, resets=resets)
+    assert out[0].item.status == "proposed"
+    assert resets == {13}

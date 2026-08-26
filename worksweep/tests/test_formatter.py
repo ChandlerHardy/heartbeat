@@ -314,3 +314,36 @@ def test_format_reproposed_line_shape():
 def test_format_reproposed_is_empty_for_no_resets():
     from worksweep.formatter import format_reproposed
     assert format_reproposed([]) == ""
+
+
+# --- the auto-approved re-review reads as auto (2026-08-26) ---------------
+
+def _auto_magi(number=13, sha="newsha123"):
+    from worksweep.runner import AUTO_MAGI_WHY
+    return QueueRecord(
+        number=number, first_seen="2026-08-26T00:00:00+00:00",
+        last_seen="2026-08-26T00:00:00+00:00",
+        item=WorkItem(schema_version=1, id=f"magi:pb-www!3997@{sha}",
+                      repo="pb-www", kind="mr", executor="magi-review",
+                      risk="low", why=AUTO_MAGI_WHY,
+                      web_url="https://gl/x/-/merge_requests/3997", sha=sha,
+                      status="approved", title="Ranch data tab"))
+
+
+def test_the_digest_marks_a_self_approved_review_as_auto():
+    """It reached `approved` with no ✅, so the line has to say so -- an
+    unexplained approved row reads as something Chandler forgot doing."""
+    from worksweep.formatter import format_digest
+    out = format_digest_from_records([_auto_magi()])
+    assert "(auto)" in out
+    assert "post-feedback re-review" in out
+
+
+def test_the_auto_review_keeps_its_own_line_and_number():
+    """It must NOT collapse into the keep-current auto-merge line: the
+    curator's validator requires every approved magi number to appear, so a
+    collapsed one would fail the digest outright."""
+    from worksweep.formatter import format_digest
+    out = format_digest_from_records([_auto_magi()])
+    assert "**13.**" in out
+    assert "auto-merging" not in out

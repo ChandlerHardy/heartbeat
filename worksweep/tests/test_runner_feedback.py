@@ -406,3 +406,161 @@ def test_the_feedback_pass_claims_nothing_and_stays_quiet(tmp_path):
     assert posts == []
     assert saves == []
     assert [r.item.status for r in state["records"]] == ["running", "approved"]
+
+
+# --- chaining a re-review onto pushed commits (2026-08-26) -----------------
+#
+# An address-feedback run that FIXED something has pushed code nobody has
+# reviewed. Chandler asked for a magi pass on it automatically: the trigger is
+# scoped to commits our own executor made, and magi is read-only plus draft
+# comments, so this is the one sanctioned bypass of the ✅ gate.
+
+AUTO_WHY = "post-feedback re-review (auto)"
+
+
+def _magi_rows(records):
+    return [r for r in records if r.item.executor == _MAGI]
+
+
+def test_a_run_that_pushed_commits_queues_its_own_re_review(tmp_path):
+    deps, posts, saves, state = _deps(
+        [_rec(7)], execute=lambda i, c: _result(addressed=2,
+                                                result_sha="newsha123"))
+    assert run_once(_cfg(tmp_path), deps, **_locks(tmp_path)) == 0
+
+    chained = _magi_rows(state["records"])
+    assert len(chained) == 1
+    it = chained[0].item
+    assert it.id == "magi:pb-www!3997@newsha123"
+    assert it.kind == "mr"
+    assert it.executor == "magi-review"
+    assert it.status == "approved"           # pre-approved, no ✅ needed
+    assert it.why == AUTO_WHY
+    assert it.sha == "newsha123"
+    assert it.web_url == "https://gl/x/-/merge_requests/3997"
+    assert it.title == _rec(7).item.title
+
+
+def test_the_chained_row_takes_the_next_free_number(tmp_path):
+    deps, _, _, state = _deps(
+        [_rec(7), _rec(12, iid=4001)],
+        execute=lambda i, c: _result(addressed=1, result_sha="newsha123"))
+    run_once(_cfg(tmp_path), deps, **_locks(tmp_path))
+    assert _magi_rows(state["records"])[0].number == 13
+
+
+def test_a_reply_only_run_chains_nothing(tmp_path):
+    """No commit, nothing new to review -- the branch is exactly where the
+    last review left it."""
+    deps, _, _, state = _deps(
+        [_rec(7)], execute=lambda i, c: _result(addressed=0, replied=3,
+                                                result_sha="unchanged"))
+    run_once(_cfg(tmp_path), deps, **_locks(tmp_path))
+    assert _magi_rows(state["records"]) == []
+
+
+def test_an_already_answered_run_chains_nothing(tmp_path):
+    """FALSIFYING for the trigger. `result_sha` is populated on this path too
+    (it is the branch head, read before the run), so a `result_sha`-only test
+    would queue a review of code nobody touched, every single time."""
+    from worksweep.feedback import FeedbackResult
+    deps, _, _, state = _deps(
+        [_rec(7)],
+        execute=lambda i, c: FeedbackResult(iid=3997, result_sha="oldsha",
+                                            already_answered=True))
+    run_once(_cfg(tmp_path), deps, **_locks(tmp_path))
+    assert _magi_rows(state["records"]) == []
+
+
+def test_a_run_with_no_resulting_sha_chains_nothing(tmp_path):
+    deps, _, _, state = _deps(
+        [_rec(7)], execute=lambda i, c: _result(addressed=1, result_sha=""))
+    run_once(_cfg(tmp_path), deps, **_locks(tmp_path))
+    assert _magi_rows(state["records"]) == []
+
+
+def test_a_failed_run_chains_nothing(tmp_path):
+    deps, _, _, state = _deps(
+        [_rec(7)],
+        execute=lambda i, c: (_ for _ in ()).throw(RunnerError("nope")))
+    run_once(_cfg(tmp_path), deps, **_locks(tmp_path))
+    assert _magi_rows(state["records"]) == []
+
+
+def test_an_escalating_run_chains_nothing(tmp_path):
+    deps, _, _, state = _deps(
+        [_rec(7)],
+        execute=lambda i, c: (_ for _ in ()).throw(NeedsInputError("q")))
+    run_once(_cfg(tmp_path), deps, **_locks(tmp_path))
+    assert _magi_rows(state["records"]) == []
+
+
+def test_the_same_sha_is_never_queued_twice(tmp_path):
+    """A re-run against an unchanged head (the reviewer replied again, we
+    fixed nothing new) must not stack a second review of the same commits."""
+    existing = QueueRecord(
+        number=9, first_seen=NOW, last_seen=NOW,
+        item=WorkItem(schema_version=1, id="magi:pb-www!3997@newsha123",
+                      repo="pb-www", kind="mr", executor=_MAGI, risk="low",
+                      why=AUTO_WHY, web_url="https://gl/x/-/merge_requests/3997",
+                      sha="newsha123", status="approved"))
+    deps, _, _, state = _deps(
+        [_rec(7), existing],
+        execute=lambda i, c: _result(addressed=1, result_sha="newsha123"))
+    run_once(_cfg(tmp_path), deps, **_locks(tmp_path))
+    rows = _magi_rows(state["records"])
+    assert len(rows) == 1
+    assert rows[0].number == 9               # the original, untouched
+
+
+def test_the_completion_and_the_chain_land_in_one_write(tmp_path):
+    """Two saves would leave a window where the feedback row is `done` and
+    the review it earned does not exist -- and a crash in between loses it."""
+    deps, _, saves, _ = _deps(
+        [_rec(7)], execute=lambda i, c: _result(addressed=1,
+                                                result_sha="newsha123"))
+    run_once(_cfg(tmp_path), deps, **_locks(tmp_path))
+    assert len(saves) == 2                   # the claim, then the completion
+    final = saves[-1]
+    feedback_rows = [r for r in final if r.item.executor == _ADDRESS_FEEDBACK]
+    assert [r.item.status for r in feedback_rows] == ["done"]
+    assert [r.item.id for r in _magi_rows(final)] == \
+        ["magi:pb-www!3997@newsha123"]
+
+
+def test_the_chained_review_is_not_run_in_the_same_invocation(tmp_path):
+    """One claim per pass stays one claim per pass: the magi pass already ran
+    (and found nothing) before the feedback pass appended this."""
+    magi_ran = []
+    deps, _, _, state = _deps(
+        [_rec(7)], execute=lambda i, c: _result(addressed=1,
+                                                result_sha="newsha123"))
+    deps["execute"] = lambda item, cfg: (magi_ran.append(item), ("s", "/r"))[1]
+    run_once(_cfg(tmp_path), deps, **_locks(tmp_path))
+    assert magi_ran == []
+    assert _magi_rows(state["records"])[0].item.status == "approved"
+
+
+def test_the_next_fire_does_claim_it(tmp_path):
+    """And it really is claimable -- pre-approved means the runner takes it
+    on the following pass with no human step."""
+    deps, _, _, state = _deps(
+        [_rec(7)], execute=lambda i, c: _result(addressed=1,
+                                                result_sha="newsha123"))
+    run_once(_cfg(tmp_path), deps, **_locks(tmp_path))
+    assert pick_claim(state["records"], (_MAGI,)).item.id == \
+        "magi:pb-www!3997@newsha123"
+
+
+def test_the_chained_row_is_blanket_safe_and_not_a_zombie(tmp_path):
+    """It is auto-approved without a ✅, so it has to be an executor the
+    runner will actually claim -- otherwise it strands forever."""
+    from worksweep.models import RUNNABLE_EXECUTORS
+    from worksweep.queue import is_dismissable
+    deps, _, _, state = _deps(
+        [_rec(7)], execute=lambda i, c: _result(addressed=1,
+                                                result_sha="newsha123"))
+    run_once(_cfg(tmp_path), deps, **_locks(tmp_path))
+    it = _magi_rows(state["records"])[0].item
+    assert it.executor in RUNNABLE_EXECUTORS
+    assert is_dismissable(it) is False

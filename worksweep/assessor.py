@@ -301,12 +301,27 @@ def dedupe(items: List[WorkItem]) -> List[WorkItem]:
     return out
 
 
+# A magi row in one of these states already covers its sha, so the sweep must
+# not propose a second one for it. `done` is the original meaning: the review
+# ran. `approved`/`running` were added when the runner started chaining a
+# pre-approved re-review onto its own pushed commits (2026-08-26) -- without
+# them the next sweep re-proposes that exact id and reconcile rewrites the
+# row's `why`, erasing the "(auto)" that says nobody ✅'d it.
+#
+# `proposed` is deliberately NOT here. Those rows are not in reconcile's
+# _RETAIN_IF_GONE, so suppressing their proposal would DELETE them and recycle
+# the number a stale `✅ N` still refers to.
+_MAGI_COVERED_STATUSES = ("done", "approved", "running")
+
+
 def has_magi_done(records, repo: str, iid: int, sha: str) -> bool:
     """Queue-backed replacement for the .magi file glob: a magi run for this
-    (repo, iid) at the CURRENT head sha is recorded as a done record."""
+    (repo, iid) at the CURRENT head sha is already recorded -- finished, or
+    scheduled and safe from being dropped. See _MAGI_COVERED_STATUSES."""
     for r in records:
         it = r.item
-        if it.executor != "magi-review" or it.status != "done" or it.repo != repo:
+        if (it.executor != "magi-review" or it.repo != repo
+                or it.status not in _MAGI_COVERED_STATUSES):
             continue
         if f"!{iid}@" not in it.id and it.id != f"review:{repo}!{iid}":
             continue
