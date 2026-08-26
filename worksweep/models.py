@@ -107,7 +107,8 @@ class Issue:
 # Lives here because models.py is the one module with no worksweep imports, so
 # approvals.py and dashboard.py can both reach it without a cycle.
 # test_runnable_executors_matches_the_runner_claim_gate pins it to the runner.
-RUNNABLE_EXECUTORS = ("magi-review", "keep-current", "implement", "park")
+RUNNABLE_EXECUTORS = ("magi-review", "keep-current", "implement", "park",
+                      "address-feedback")
 
 
 @dataclass(frozen=True)

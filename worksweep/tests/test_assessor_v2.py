@@ -198,3 +198,129 @@ def test_assigned_mr_already_in_another_bucket_no_duplicate():
     mr = _mr(iid=22, author="other")
     tracked = {("pb-www", 22)}
     assert assess_assigned_mr(mr, "chandler.hardy", tracked=tracked) == []
+
+
+# --- address-feedback emission (2026-08-25) --------------------------------
+#
+# Two arms sharing one id (`feedback:{repo}!{iid}`, so reconcile keeps the
+# queue number as an MR moves between them):
+#   unaddressed_count > 0            -> runnable `address-feedback` work
+#   changes_requested, none unaddressed -> plain `triage` information
+#   neither                          -> nothing at all
+
+def _own(**kw):
+    base = dict(author="chandler.hardy", description="dev link: "
+                "https://dev2.chandlerhardy-dev.performancebeef.com/",
+                source_branch="chardy/1588-ranch-data")
+    base.update(kw)
+    return _mr(**base)
+
+
+def _feedback(items):
+    return [i for i in items if i.id.startswith("feedback:")]
+
+
+def _assess(mr):
+    return assess_own_mr(mr, "chandler.hardy", has_magi=lambda r, i, s: True)
+
+
+def test_addressed_threads_emit_nothing():
+    """FALSIFYING (AC #3). Two threads are unresolved but Chandler's reply is
+    the last word in both -- the ball is in the reviewer's court and worksweep
+    has nothing to propose.
+
+    Mutation: restore the old `mr.changes_requested or mr.unresolved_count > 0`
+    gate and this list stops being empty.
+    """
+    mr = _own(unresolved_count=2, unaddressed_count=0, changes_requested=False)
+    assert _feedback(_assess(mr)) == []
+
+
+def test_address_feedback_item_shape():
+    mr = _own(unresolved_count=3, unaddressed_count=3)
+    items = _feedback(_assess(mr))
+    assert len(items) == 1
+    it = items[0]
+    assert it.id == "feedback:pb-www!9"          # id preserved across the rename
+    assert it.kind == "feedback"
+    assert it.executor == "address-feedback"
+    assert it.branch == "chardy/1588-ranch-data"
+    assert it.why == "3 unaddressed threads"
+    assert it.status == "proposed"               # ✅-gated, never auto-approved
+    assert it.web_url == mr.web_url and it.sha == mr.sha and it.title == mr.title
+
+
+def test_address_feedback_why_is_singular_for_one_thread():
+    it = _feedback(_assess(_own(unresolved_count=1, unaddressed_count=1)))[0]
+    assert it.why == "1 unaddressed thread"
+
+
+def test_address_feedback_why_is_prefixed_when_changes_are_requested():
+    it = _feedback(_assess(_own(unresolved_count=2, unaddressed_count=2,
+                                changes_requested=True)))[0]
+    assert it.why == "changes requested, 2 unaddressed threads"
+
+
+def test_changes_requested_without_unaddressed_threads_stays_informational():
+    """AC #16 (Round 3): REQUESTED_CHANGES with every thread already answered
+    is information, not runnable work -- it keeps its row so the MR stays
+    visible, but as a non-runnable `triage` line with no branch."""
+    items = _feedback(_assess(_own(changes_requested=True, unresolved_count=2,
+                                   unaddressed_count=0)))
+    assert len(items) == 1
+    it = items[0]
+    assert it.id == "feedback:pb-www!9"          # same id as the runnable arm
+    assert it.kind == "feedback"
+    assert it.executor == "triage"
+    assert it.why == "changes requested"
+    assert it.branch == ""
+
+
+def test_no_signal_emits_no_feedback_row():
+    assert _feedback(_assess(_own())) == []
+
+
+def test_the_two_arms_are_mutually_exclusive():
+    """One MR never produces two feedback rows -- they share an id, so a
+    double emission would be a duplicate key in the queue."""
+    for kw in (dict(unaddressed_count=2, changes_requested=True),
+               dict(unaddressed_count=2, changes_requested=False),
+               dict(unaddressed_count=0, changes_requested=True),
+               dict(unaddressed_count=0, changes_requested=False)):
+        assert len(_feedback(_assess(_own(unresolved_count=2, **kw)))) <= 1
+
+
+def test_address_feedback_is_not_auto_approved():
+    """AC #6. This executor posts replies under Chandler's GitLab identity and
+    a reply cannot be unsent, so consent is per-MR: the name must never reach
+    the auto-approve default, and a proposed row must survive auto_approve()."""
+    from worksweep.config import WorksweepConfig
+    from worksweep.queue import auto_approve
+    from worksweep.models import QueueRecord
+    default = WorksweepConfig.__dataclass_fields__["auto_approve"].default
+    assert default == ("keep-current",)
+    assert "address-feedback" not in default
+
+    item = _feedback(_assess(_own(unresolved_count=1, unaddressed_count=1)))[0]
+    rec = QueueRecord(number=1, item=item, first_seen="", last_seen="")
+    assert auto_approve([rec], default)[0].item.status == "proposed"
+
+
+def test_dashboard_renders_an_approve_checkbox_for_address_feedback():
+    """AC #5: the approve control comes free from RUNNABLE_EXECUTORS -- this
+    passes with ZERO edits to dashboard.has_checkbox."""
+    from worksweep import dashboard
+    from worksweep.queue import is_dismissable
+    item = _feedback(_assess(_own(unresolved_count=1, unaddressed_count=1)))[0]
+    assert dashboard.has_checkbox(item) is True
+    # and the flip side the rename buys: runnable work is no longer a row you
+    # can wave away, it is a row you approve or leave alone.
+    assert is_dismissable(item) is False
+
+
+def test_the_informational_arm_keeps_its_manual_affordance():
+    from worksweep import dashboard
+    from worksweep.queue import is_dismissable
+    item = _feedback(_assess(_own(changes_requested=True)))[0]
+    assert dashboard.has_checkbox(item) is False
+    assert is_dismissable(item) is True

@@ -130,7 +130,7 @@ def test_own_mr_handed_off_emits_only_handoff_item():
     mr = _mr(approved=True, merge_status="MERGEABLE",
              assignees=("leyang", "chandler.hardy"),
              description="no dev link here", unresolved_count=3,
-             ci_status="failed")
+             unaddressed_count=3, ci_status="failed")
     items = assess_own_mr(mr, "chandler.hardy", has_magi=lambda r, i, s: False)
     assert len(items) == 1
     it = items[0]
@@ -144,7 +144,8 @@ def test_own_mr_handed_off_emits_only_handoff_item():
 
 def test_own_mr_approved_not_mergeable_suppresses_only_magi_item():
     mr = _mr(approved=True, merge_status="DRAFT_STATUS", assignees=("chandler.hardy",),
-             description="no dev link here", unresolved_count=1)
+             description="no dev link here", unresolved_count=1,
+             unaddressed_count=1)
     items = assess_own_mr(mr, "chandler.hardy", has_magi=lambda r, i, s: False)
     ids = {i.id for i in items}
     assert not any(i.executor == "magi-review" for i in items)

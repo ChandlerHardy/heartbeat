@@ -29,7 +29,9 @@ _MAGI = "magi-review"
 _IMPLEMENT = "implement"
 _KEEP_CURRENT = "keep-current"
 _PARK = "park"
-_ALL_EXECUTORS = (_MAGI, _IMPLEMENT, _KEEP_CURRENT, _PARK)
+_ADDRESS_FEEDBACK = "address-feedback"
+_ALL_EXECUTORS = (_MAGI, _IMPLEMENT, _KEEP_CURRENT, _PARK,
+                  _ADDRESS_FEEDBACK)
 # Executors that may have at most ONE claim in flight across the whole queue.
 # magi-review is read-only and cheap; implement writes to GitLab and occupies
 # a dev box, so a second one must wait even though it has its own lock file.

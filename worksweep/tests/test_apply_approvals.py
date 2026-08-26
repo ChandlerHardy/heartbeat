@@ -245,7 +245,7 @@ def _erec(n, executor, status="proposed"):
 def test_runnable_executors_matches_the_runner_claim_gate():
     """The constant and the runner's real claim gate must not drift.
 
-    If someone teaches the runner a fourth executor, this fails and points at
+    If someone teaches the runner another executor, this fails and points at
     RUNNABLE_EXECUTORS -- otherwise `✅ all` would silently keep refusing it.
     """
     from worksweep import runner
@@ -253,7 +253,8 @@ def test_runnable_executors_matches_the_runner_claim_gate():
     assert set(RUNNABLE_EXECUTORS) == set(runner._ALL_EXECUTORS)
     # and the two claim call sites together cover exactly that set
     assert set(RUNNABLE_EXECUTORS) == {runner._MAGI, runner._KEEP_CURRENT,
-                                       runner._IMPLEMENT, runner._PARK}
+                                       runner._IMPLEMENT, runner._PARK,
+                                       runner._ADDRESS_FEEDBACK}
 
 
 def test_blanket_approval_skips_non_runnable_executors():
