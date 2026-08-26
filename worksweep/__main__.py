@@ -645,7 +645,7 @@ def _execute_address_feedback(item, cfg):
     """
     from . import feedback
     return feedback.execute(item, cfg, run_subprocess=subprocess.run,
-                            run_glab=_run_glab_api)
+                            run_glab=_run_glab_api, now=_now)
 
 
 def _dry_run_address_feedback(item, cfg):

@@ -12,7 +12,7 @@ import sys
 import urllib.parse
 from typing import Callable, List
 
-from .models import Issue, MergeRequest, ReviewThread, Todo
+from .models import Issue, MergeRequest, ReviewNote, ReviewThread, Todo
 
 PROJECT_PREFIX = "performancelivestock"
 
@@ -219,6 +219,11 @@ def parse_threads(raw_json) -> tuple:
         resolvable_notes = [n for n in notes if n.get("resolvable")]
         human = [n for n in notes if not n.get("system")]
         last = human[-1] if human else None
+        resolved_by = ""
+        for n in notes:
+            who = ((n.get("resolved_by") or {}) or {}).get("username", "")
+            if who:
+                resolved_by = who
         out.append(ReviewThread(
             id=str(d.get("id") or ""),
             resolvable=bool(resolvable_notes),
@@ -226,6 +231,12 @@ def parse_threads(raw_json) -> tuple:
                      and all(bool(n.get("resolved")) for n in resolvable_notes),
             last_author=((last or {}).get("author") or {}).get("username", ""),
             last_note=(last or {}).get("body") or "",
+            resolved_by=resolved_by,
+            notes=tuple(ReviewNote(
+                author=((n.get("author") or {}) or {}).get("username", ""),
+                system=bool(n.get("system")),
+                body=n.get("body") or "",
+                created_at=str(n.get("created_at") or "")) for n in notes),
         ))
     return tuple(out)
 

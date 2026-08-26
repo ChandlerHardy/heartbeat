@@ -20,6 +20,10 @@ ME = "chandler.hardy"
 BRANCH = "chardy/1588-ranch-data"
 PRE_SHA = "1111111111111111111111111111111111111111"
 POST_SHA = "2222222222222222222222222222222222222222"
+# The run window. A reply only counts as ours if we posted it inside it.
+BEFORE_RUN = "2026-08-25T11:00:00+00:00"
+RUN_START = "2026-08-25T12:00:00+00:00"
+DURING_RUN = "2026-08-25T12:05:00+00:00"
 
 
 # --- fixtures ---------------------------------------------------------------
@@ -42,9 +46,16 @@ def _item(branch=BRANCH, iid=3997, repo="pb-www"):
                     branch=branch)
 
 
-def _note(author, body="b", system=False, resolvable=True, resolved=False):
+def _note(author, body="b", system=False, resolvable=True, resolved=False,
+          created_at=None):
+    """A note. Defaults to BEFORE_RUN for the reviewer and DURING_RUN for
+    Chandler, so an ordinary fixture describes "the run posted this reply"
+    without every test having to say so."""
+    if created_at is None:
+        created_at = DURING_RUN if author == ME else BEFORE_RUN
     return {"body": body, "system": system, "resolvable": resolvable,
-            "resolved": resolved, "author": {"username": author}}
+            "resolved": resolved, "created_at": created_at,
+            "author": {"username": author}}
 
 
 def _thread(tid, last="leyang"):
@@ -89,6 +100,15 @@ class _Glab:
         return sum(1 for c, _ in self.calls if c[1].endswith("page=1"))
 
 
+def _refs(**overrides):
+    """`git ls-remote origin` output. The branch, master, and a tag -- enough
+    that a run pushing anywhere else has somewhere to be caught."""
+    base = {"refs/heads/master": "m0", f"refs/heads/{BRANCH}": PRE_SHA,
+            "refs/tags/v1": "tag0"}
+    base.update(overrides)
+    return "\n".join(f"{sha}\t{ref}" for ref, sha in base.items()) + "\n"
+
+
 class _Proc:
     def __init__(self, returncode=0, stdout="", stderr=""):
         self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
@@ -99,14 +119,30 @@ class _Subprocess:
     whatever report the fake claude run is configured to leave behind."""
 
     def __init__(self, checkout, report=None, claude_rc=0, claude_raises=None,
-                 remote_shas=(PRE_SHA, PRE_SHA)):
+                 remote_shas=(PRE_SHA, PRE_SHA), ls_remote=None):
         self.checkout, self.report = checkout, report
         self.claude_rc, self.claude_raises = claude_rc, claude_raises
         self.remote_shas = list(remote_shas)
+        # `ls_remote` overrides the snapshots outright (for the stray-ref and
+        # unreadable-refs cases); otherwise they are derived from
+        # `remote_shas`, so every fixture that says "the branch moved" keeps
+        # meaning exactly that.
+        self.ls_remote = list(ls_remote) if ls_remote is not None else None
         self.calls, self.claude_kw = [], {}
+
+    def _refs_now(self):
+        if self.ls_remote is not None:
+            return (self.ls_remote.pop(0) if len(self.ls_remote) > 1
+                    else self.ls_remote[0])
+        sha = (self.remote_shas.pop(0) if len(self.remote_shas) > 1
+               else self.remote_shas[0])
+        return _refs(**{f"refs/heads/{BRANCH}": sha})
 
     def __call__(self, cmd, **kw):
         self.calls.append(list(cmd))
+        if "ls-remote" in cmd:
+            out = self._refs_now()
+            return _Proc(0 if out is not None else 1, out or "")
         if cmd[0] == "claude":
             self.claude_kw = dict(kw)
             if self.claude_raises is not None:
@@ -176,8 +212,8 @@ def test_feedback_prompt_never_resolves():
     assert "resolved=" not in src
     # and the tally has no room to count one: three outcomes, no fourth
     assert set(feedback.FeedbackResult.__dataclass_fields__) == {
-        "iid", "addressed", "replied", "escalated", "result_sha",
-        "already_answered"}
+        "iid", "waiting", "addressed", "replied", "escalated", "replies",
+        "result_sha", "already_answered"}
 
 
 def _unaddressed(payload, username=ME):
@@ -234,7 +270,7 @@ def test_feedback_uses_its_own_worktree(tmp_path, worktree):
     glab = _Glab(_payload(_thread("t1")),
                  _payload(_thread("t1", last=ME)))
     feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
-                     run_glab=glab)
+                     run_glab=glab, now=lambda: RUN_START)
     assert sub.ran("checkout", "-B", BRANCH)
     assert all(worktree in c for c in sub.ran("checkout", "-B"))
     assert str(tmp_path / "pb-www") not in [c[2] for c in sub.ran("checkout")]
@@ -247,7 +283,7 @@ def test_feedback_refetches_threads_at_run_time(tmp_path, worktree):
     glab = _Glab(_payload(_thread("t1"), _thread("t2", last=ME)),
                  _payload(_thread("t1", last=ME), _thread("t2", last=ME)))
     feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
-                     run_glab=glab)
+                     run_glab=glab, now=lambda: RUN_START)
     paths = [a[1] for a in [c[0] for c in glab.calls]]
     assert all("merge_requests/3997/discussions" in p for p in paths)
     assert glab.rounds_read == 2         # once before the run, once to verify
@@ -267,7 +303,7 @@ def test_feedback_verification_rejects_an_unpushed_commit_claim(tmp_path,
     glab = _Glab(_payload(_thread("t1")), _payload(_thread("t1", last=ME)))
     with pytest.raises(RunnerError) as e:
         feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
-                         run_glab=glab)
+                         run_glab=glab, now=lambda: RUN_START)
     assert "never moved" in str(e.value)
 
 
@@ -279,7 +315,7 @@ def test_feedback_verification_accepts_a_pushed_commit_claim(tmp_path,
                       remote_shas=(PRE_SHA, POST_SHA))
     glab = _Glab(_payload(_thread("t1")), _payload(_thread("t1", last=ME)))
     result = feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
-                              run_glab=glab)
+                              run_glab=glab, now=lambda: RUN_START)
     assert result.addressed == 1
     assert result.result_sha == POST_SHA
 
@@ -292,7 +328,7 @@ def test_feedback_verification_rejects_a_reply_that_was_never_posted(
     glab = _Glab(_payload(_thread("t1")), _payload(_thread("t1")))
     with pytest.raises(RunnerError) as e:
         feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
-                         run_glab=glab)
+                         run_glab=glab, now=lambda: RUN_START)
     assert "t1" in str(e.value)
     assert "leyang" in str(e.value)
 
@@ -305,7 +341,7 @@ def test_feedback_rejects_a_claim_on_a_thread_it_was_never_given(tmp_path,
                           _thread("t-other", last=ME)))
     with pytest.raises(RunnerError) as e:
         feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
-                         run_glab=glab)
+                         run_glab=glab, now=lambda: RUN_START)
     assert "t-other" in str(e.value)
 
 
@@ -314,7 +350,7 @@ def test_a_missing_report_is_an_error(tmp_path, worktree):
     glab = _Glab(_payload(_thread("t1")))
     with pytest.raises(RunnerError) as e:
         feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
-                         run_glab=glab)
+                         run_glab=glab, now=lambda: RUN_START)
     assert "no report" in str(e.value)
 
 
@@ -323,7 +359,7 @@ def test_an_unparseable_report_is_an_error(tmp_path, worktree):
     glab = _Glab(_payload(_thread("t1")))
     with pytest.raises(RunnerError) as e:
         feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
-                         run_glab=glab)
+                         run_glab=glab, now=lambda: RUN_START)
     assert "report" in str(e.value)
 
 
@@ -336,7 +372,7 @@ def test_a_stale_report_from_a_previous_run_is_never_read(tmp_path, worktree):
     glab = _Glab(_payload(_thread("t1")), _payload(_thread("t1", last=ME)))
     with pytest.raises(RunnerError) as e:
         feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
-                         run_glab=glab)
+                         run_glab=glab, now=lambda: RUN_START)
     assert "no report" in str(e.value)
 
 
@@ -349,7 +385,7 @@ def test_feedback_zero_unaddressed_at_run_time_is_a_normal_result(tmp_path,
     sub = _Subprocess(worktree, report=None)
     glab = _Glab(_payload(_thread("t1", last=ME)))
     result = feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
-                              run_glab=glab)
+                              run_glab=glab, now=lambda: RUN_START)
     assert result.already_answered is True
     assert (result.addressed, result.replied, result.escalated) == (0, 0, ())
     assert sub.ran("claude") == []
@@ -364,7 +400,7 @@ def test_feedback_run_uses_the_cfg_timeout(tmp_path, worktree):
     sub = _Subprocess(worktree, report=_report(replied=["t1"]))
     glab = _Glab(_payload(_thread("t1")), _payload(_thread("t1", last=ME)))
     cfg = _cfg(tmp_path)
-    feedback.execute(_item(), cfg, run_subprocess=sub, run_glab=glab)
+    feedback.execute(_item(), cfg, run_subprocess=sub, run_glab=glab, now=lambda: RUN_START)
     assert sub.claude_kw["timeout"] == cfg.runner_timeout == 1800
     assert sub.claude_kw["cwd"] == worktree
     # inside the reap window, or healthy runs get killed mid-flight
@@ -375,7 +411,7 @@ def test_a_shorter_configured_timeout_is_honoured(tmp_path, worktree):
     sub = _Subprocess(worktree, report=_report(replied=["t1"]))
     glab = _Glab(_payload(_thread("t1")), _payload(_thread("t1", last=ME)))
     feedback.execute(_item(), _cfg(tmp_path, runner_timeout=600),
-                     run_subprocess=sub, run_glab=glab)
+                     run_subprocess=sub, run_glab=glab, now=lambda: RUN_START)
     assert sub.claude_kw["timeout"] == 600
 
 
@@ -386,7 +422,7 @@ def test_a_timed_out_claude_run_is_a_clean_runner_error(tmp_path, worktree):
     glab = _Glab(_payload(_thread("t1")))
     with pytest.raises(RunnerError) as e:
         feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
-                         run_glab=glab)
+                         run_glab=glab, now=lambda: RUN_START)
     assert "timed out" in str(e.value)
 
 
@@ -404,10 +440,11 @@ def test_a_mixed_run_reports_an_honest_tally(tmp_path, worktree):
     after = _payload(_thread("t1", last=ME), _thread("t2", last=ME),
                      _thread("t3", last=ME), _thread("t4"))
     result = feedback.execute(_item(), _cfg(tmp_path),
-                              run_subprocess=sub, run_glab=_Glab(before, after))
+                              run_subprocess=sub, run_glab=_Glab(before, after), now=lambda: RUN_START)
     assert (result.addressed, result.replied) == (2, 1)
     assert len(result.escalated) == 1
-    assert feedback.tally(result) == "2 addressed, 1 replied, 1 escalated"
+    assert feedback.tally(result) == (
+        "4 waiting: 2 addressed, 1 replied, 1 escalated")
     msg = feedback.done_message(result)
     assert msg.startswith("💬 !3997")
     assert "2 addressed, 1 replied, 1 escalated" in msg
@@ -426,23 +463,24 @@ def test_zero_handled_and_something_escalated_asks_instead_of_failing(
                  _payload(_thread("t1"), _thread("t2")))
     with pytest.raises(NeedsInputError) as e:
         feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
-                         run_glab=glab)
+                         run_glab=glab, now=lambda: RUN_START)
     assert "!3997" in str(e.value)
     assert "disagrees with the approach" in str(e.value)
     assert "needs a product call" in str(e.value)
 
 
-def test_a_run_that_handled_and_escalated_nothing_is_a_failure(tmp_path,
-                                                               worktree):
-    """Silence is never an outcome: two threads went in, the report accounts
-    for neither."""
+def test_a_run_that_accounts_for_nothing_escalates_everything(tmp_path,
+                                                              worktree):
+    """Silence is never an outcome: two threads went in and the report
+    mentions neither, so both come back as questions rather than vanishing
+    into a `done` item nobody re-reads."""
     sub = _Subprocess(worktree, report=_report())
     glab = _Glab(_payload(_thread("t1"), _thread("t2")),
                  _payload(_thread("t1"), _thread("t2")))
-    with pytest.raises(RunnerError) as e:
+    with pytest.raises(NeedsInputError) as e:
         feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
-                         run_glab=glab)
-    assert "accounted for none" in str(e.value)
+                         run_glab=glab, now=lambda: RUN_START)
+    assert str(e.value).count("unaccounted by the run") == 2
 
 
 def test_a_failed_claude_run_is_a_runner_error(tmp_path, worktree):
@@ -450,7 +488,7 @@ def test_a_failed_claude_run_is_a_runner_error(tmp_path, worktree):
     glab = _Glab(_payload(_thread("t1")))
     with pytest.raises(RunnerError) as e:
         feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
-                         run_glab=glab)
+                         run_glab=glab, now=lambda: RUN_START)
     assert "the address-feedback run failed" in str(e.value)
 
 
@@ -466,7 +504,7 @@ def test_the_executor_refuses_an_item_with_no_branch(tmp_path, worktree):
     with pytest.raises(RunnerError) as e:
         feedback.execute(_item(branch=""), _cfg(tmp_path),
                          run_subprocess=_Subprocess(worktree),
-                         run_glab=_Glab())
+                         run_glab=_Glab(), now=lambda: RUN_START)
     assert "no source branch" in str(e.value)
 
 
@@ -476,7 +514,7 @@ def test_the_worktree_is_made_pristine_before_the_branch_is_touched(
     sub = _Subprocess(worktree, report=_report(replied=["t1"]))
     glab = _Glab(_payload(_thread("t1")), _payload(_thread("t1", last=ME)))
     feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
-                     run_glab=glab)
+                     run_glab=glab, now=lambda: RUN_START)
     first_status = next(i for i, c in enumerate(sub.calls)
                         if "status" in c and "--porcelain" in c)
     first_checkout = next(i for i, c in enumerate(sub.calls)
@@ -501,9 +539,10 @@ def test_a_thread_listed_twice_is_counted_once(tmp_path, worktree):
     before = _payload(_thread("t1"), _thread("t2"))
     after = _payload(_thread("t1", last=ME), _thread("t2", last=ME))
     result = feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
-                              run_glab=_Glab(before, after))
+                              run_glab=_Glab(before, after), now=lambda: RUN_START)
     assert (result.addressed, result.replied, len(result.escalated)) == (1, 1, 0)
-    assert feedback.tally(result) == "1 addressed, 1 replied, 0 escalated"
+    assert feedback.tally(result) == (
+        "2 waiting: 1 addressed, 1 replied, 0 escalated")
 
 
 # --- pagination at run time (fix-mode round 2, blocker 6) ------------------
@@ -518,7 +557,7 @@ def test_the_run_time_refetch_pages_too(tmp_path, worktree):
     sub = _Subprocess(worktree, report=_report(replied=["t1"]))
     glab = _Glab(before, after)
     result = feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
-                              run_glab=glab)
+                              run_glab=glab, now=lambda: RUN_START)
     assert result.already_answered is False
     assert result.replied == 1
     pages = [c[0][1].rsplit("page=", 1)[1] for c in glab.calls]
@@ -590,7 +629,7 @@ def test_the_claude_run_is_tool_scoped(tmp_path, worktree):
     sub = _Subprocess(worktree, report=_report(replied=["t1"]))
     glab = _Glab(_payload(_thread("t1")), _payload(_thread("t1", last=ME)))
     feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
-                     run_glab=glab)
+                     run_glab=glab, now=lambda: RUN_START)
     argv = [c for c in sub.calls if c[0] == "claude"][0]
     assert "--allowedTools" in argv
     allowed = argv[argv.index("--allowedTools") + 1].split(",")
@@ -616,7 +655,7 @@ def test_the_prompt_caps_how_many_threads_one_run_is_given(tmp_path, worktree):
     after = [_thread("t0", last=ME)] + threads[1:]
     glab = _Glab(_payload(*threads), _payload(*after))
     result = feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
-                              run_glab=glab)
+                              run_glab=glab, now=lambda: RUN_START)
     prompt = [c for c in sub.calls if c[0] == "claude"][0][2]
     # two fence markers per thread, plus the one in the rule that explains
     # what the markers mean
@@ -634,5 +673,186 @@ def test_a_thread_over_the_cap_cannot_be_claimed(tmp_path, worktree):
                  _payload(*[_thread(f"t{i}", last=ME) for i in range(25)]))
     with pytest.raises(RunnerError) as e:
         feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
-                         run_glab=glab)
+                         run_glab=glab, now=lambda: RUN_START)
     assert "t24" in str(e.value)
+
+
+# --- verification by effect (fix-mode round 2, blockers 2 + 5, warning 10) --
+#
+# The old checks asked "does the world look like the report says?". They could
+# be satisfied by a run that pushed to a dozen other branches, closed threads
+# it was told never to close, or simply benefited from a reviewer replying
+# mid-run. These ask what THIS RUN actually changed.
+
+def _tnote(author, body="b", system=False, resolvable=True, resolved=False,
+           created_at=BEFORE_RUN, resolved_by=None):
+    n = {"body": body, "system": system, "resolvable": resolvable,
+         "resolved": resolved, "created_at": created_at,
+         "author": {"username": author}}
+    if resolved_by is not None:
+        n["resolved_by"] = {"username": resolved_by}
+    return n
+
+
+def _answered(tid, at=DURING_RUN, body="addressed in deadbee", **kw):
+    """A thread the run replied to during the run window."""
+    return {"id": tid, "notes": [_tnote("leyang", f"question on {tid}"),
+                                 _tnote(ME, body, created_at=at, **kw)]}
+
+
+def _waiting(tid):
+    return {"id": tid, "notes": [_tnote("leyang", f"question on {tid}")]}
+
+
+def _run(tmp_path, worktree, sub, before, after, cfg=None):
+    return feedback.execute(_item(), cfg or _cfg(tmp_path),
+                            run_subprocess=sub,
+                            run_glab=_Glab(_payload(*before),
+                                           _payload(*after)),
+                            now=lambda: RUN_START)
+
+
+def test_only_the_mrs_own_branch_may_move(tmp_path, worktree):
+    """BLOCKER 2a: the run holds real push credentials. Proving the branch
+    advanced says nothing about what else it touched."""
+    sub = _Subprocess(worktree, report=_report(addressed=[{"thread": "t1",
+                                                    "sha": "deadbee"}]),
+               ls_remote=[_refs(),
+                          _refs(**{f"refs/heads/{BRANCH}": POST_SHA,
+                                   "refs/heads/master": "m1",
+                                   "refs/tags/v1": "tag1"})])
+    with pytest.raises(RunnerError) as e:
+        _run(tmp_path, worktree, sub, [_waiting("t1")], [_answered("t1")])
+    assert "refs/heads/master" in str(e.value)
+    assert "refs/tags/v1" in str(e.value)
+    assert BRANCH not in str(e.value).split("moved")[-1]
+
+
+def test_a_deleted_ref_counts_as_movement(tmp_path, worktree):
+    sub = _Subprocess(worktree, report=_report(replied=["t1"]),
+               ls_remote=[_refs(),
+                          "\n".join([f"{PRE_SHA}\trefs/heads/{BRANCH}"])])
+    with pytest.raises(RunnerError) as e:
+        _run(tmp_path, worktree, sub, [_waiting("t1")], [_answered("t1")])
+    assert "refs/heads/master" in str(e.value)
+
+
+def test_the_branch_moving_alone_is_fine(tmp_path, worktree):
+    sub = _Subprocess(worktree, report=_report(addressed=[{"thread": "t1",
+                                                    "sha": "deadbee"}]),
+               ls_remote=[_refs(),
+                          _refs(**{f"refs/heads/{BRANCH}": POST_SHA})])
+    result = _run(tmp_path, worktree, sub, [_waiting("t1")], [_answered("t1")])
+    assert result.addressed == 1
+    assert result.result_sha == POST_SHA
+
+
+def test_a_commit_claim_with_a_still_branch_fails(tmp_path, worktree):
+    sub = _Subprocess(worktree, report=_report(addressed=[{"thread": "t1",
+                                                    "sha": "deadbee"}]))
+    with pytest.raises(RunnerError) as e:
+        _run(tmp_path, worktree, sub, [_waiting("t1")], [_answered("t1")])
+    assert "never moved" in str(e.value)
+
+
+def test_an_unreadable_ref_list_is_loud(tmp_path, worktree):
+    """WARNING 10: a failed probe must never read as 'nothing moved'."""
+    sub = _Subprocess(worktree, report=_report(replied=["t1"]),
+               ls_remote=[None, None])
+    with pytest.raises(RunnerError) as e:
+        _run(tmp_path, worktree, sub, [_waiting("t1")], [_answered("t1")])
+    assert "could not read" in str(e.value)
+
+
+def test_a_thread_this_run_closed_is_a_hard_failure(tmp_path, worktree):
+    """BLOCKER 2b: never-resolve is enforced in code, not just in the prompt.
+    A prompt rule is a request; this is the check."""
+    sub = _Subprocess(worktree, report=_report(replied=["t1"]))
+    closed = {"id": "t1", "notes": [
+        _tnote("leyang", "question on t1", resolved=True),
+        _tnote(ME, "done", created_at=DURING_RUN, resolved=True,
+               resolved_by=ME)]}
+    with pytest.raises(RunnerError) as e:
+        _run(tmp_path, worktree, sub, [_waiting("t1")], [closed])
+    assert "t1" in str(e.value)
+    assert "closed" in str(e.value) or "resolved" in str(e.value)
+
+
+def test_a_thread_the_reviewer_closed_is_fine(tmp_path, worktree):
+    """Only OUR closing is the violation -- the thread's owner may close it
+    the moment they read the reply, and often does."""
+    sub = _Subprocess(worktree, report=_report(replied=["t1"]))
+    closed = {"id": "t1", "notes": [
+        _tnote("leyang", "question on t1", resolved=True),
+        _tnote(ME, "answered", created_at=DURING_RUN, resolved=True,
+               resolved_by="leyang")]}
+    result = _run(tmp_path, worktree, sub, [_waiting("t1")], [closed])
+    assert result.replied == 1
+
+
+def test_a_reply_predating_the_run_does_not_count(tmp_path, worktree):
+    """BLOCKER 2d: the reviewer replying mid-run used to make the thread look
+    answered by us, laundering a whole batch of unearned claims."""
+    sub = _Subprocess(worktree, report=_report(replied=["t1"]))
+    stale = _answered("t1", at=BEFORE_RUN)
+    with pytest.raises(RunnerError) as e:
+        _run(tmp_path, worktree, sub, [_waiting("t1")], [stale])
+    assert "t1" in str(e.value)
+    assert "did not post" in str(e.value)
+
+
+def test_the_done_message_quotes_what_was_said_in_his_name(tmp_path,
+                                                           worktree):
+    """BLOCKER 2c: the replies go out under Chandler's identity. He audits
+    the content; nothing here vets it."""
+    sub = _Subprocess(worktree, report=_report(replied=["t1"]))
+    answered = _answered("t1", body="Good catch — the join is bounded by "
+                                    "the ranch filter above it.")
+    result = _run(tmp_path, worktree, sub, [_waiting("t1")], [answered])
+    assert any("the join is bounded" in r for r in result.replies)
+    msg = feedback.done_message(result)
+    assert "the join is bounded" in msg
+
+
+def test_every_waiting_thread_is_accounted_for(tmp_path, worktree):
+    """BLOCKER 5: a report that just omits a thread used to leave it silently
+    unhandled while the item completed `done`."""
+    sub = _Subprocess(worktree, report=_report(replied=["t1"]))
+    result = _run(tmp_path, worktree, sub,
+                  [_waiting("t1"), _waiting("t2"), _waiting("t3")],
+                  [_answered("t1"), _waiting("t2"), _waiting("t3")])
+    assert result.replied == 1
+    assert len(result.escalated) == 2
+    assert all("unaccounted by the run" in e for e in result.escalated)
+    assert feedback.tally(result) == (
+        "3 waiting: 0 addressed, 1 replied, 2 escalated")
+
+
+def test_an_unknown_thread_ref_is_counted_not_dropped(tmp_path, worktree):
+    sub = _Subprocess(worktree, report=_report(
+        replied=["t1"], escalated=[{"thread": "t-ghost", "reason": "?"}]))
+    result = _run(tmp_path, worktree, sub, [_waiting("t1")],
+                  [_answered("t1")])
+    assert len(result.escalated) == 1
+    assert "unknown thread ref from run" in result.escalated[0]
+
+
+def test_malformed_escalation_entries_are_deduped_not_multiplied(tmp_path,
+                                                                 worktree):
+    """The `tid is None` case never deduped, so a report with a handful of
+    junk entries inflated the escalation count."""
+    sub = _Subprocess(worktree, report=_report(
+        replied=["t1"], escalated=[None, None, {"reason": "no thread key"}]))
+    result = _run(tmp_path, worktree, sub, [_waiting("t1")],
+                  [_answered("t1")])
+    assert len(result.escalated) == 1
+
+
+def test_the_tally_names_its_denominator(tmp_path, worktree):
+    sub = _Subprocess(worktree, report=_report(replied=["t1", "t2"]))
+    result = _run(tmp_path, worktree, sub,
+                  [_waiting("t1"), _waiting("t2")],
+                  [_answered("t1"), _answered("t2")])
+    assert feedback.tally(result) == (
+        "2 waiting: 0 addressed, 2 replied, 0 escalated")
+    assert feedback.done_message(result).startswith("💬 !3997 — 2 waiting:")

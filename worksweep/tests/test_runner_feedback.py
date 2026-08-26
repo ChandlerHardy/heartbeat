@@ -38,8 +38,9 @@ def _rec(number, status="approved", executor=_ADDRESS_FEEDBACK, iid=3997,
 
 
 def _result(**kw):
-    base = dict(iid=3997, addressed=2, replied=1,
+    base = dict(iid=3997, waiting=4, addressed=2, replied=1,
                 escalated=("leyang: “should this be cached?” — product call",),
+                replies=("t1: addressed in deadbee",),
                 result_sha="newsha123")
     base.update(kw)
     return FeedbackResult(**base)
@@ -108,7 +109,8 @@ def test_a_finished_run_completes_done_and_posts_the_tally(tmp_path):
 
     done = [p for p in posts if p.startswith("💬")]
     assert len(done) == 1
-    assert "!3997 — 2 addressed, 1 replied, 1 escalated" in done[0]
+    assert "!3997 — 4 waiting: 2 addressed, 1 replied, 1 escalated" in done[0]
+    assert "said: t1: addressed in deadbee" in done[0]
     assert "needs you: leyang: “should this be cached?” — product call" in done[0]
     assert not [p for p in posts if p.startswith("⚠️")]
 

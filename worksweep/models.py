@@ -55,6 +55,20 @@ class MergeRequest:
 
 
 @dataclass(frozen=True)
+class ReviewNote:
+    """One note in a discussion, flattened.
+
+    `created_at` is what lets the executor tell a reply IT posted from one the
+    reviewer happened to post while it was running -- without it, "the last
+    word is now mine" is satisfied by someone else's timing.
+    """
+    author: str
+    system: bool
+    body: str
+    created_at: str = ""
+
+
+@dataclass(frozen=True)
 class ReviewThread:
     """One discussion thread on an MR, flattened to what the feedback path
     needs. Shared by the sweep probe (which counts the unaddressed ones) and
@@ -71,6 +85,11 @@ class ReviewThread:
     resolved: bool
     last_author: str
     last_note: str
+    # Who closed the thread, "" when nobody has. The `address-feedback`
+    # executor is forbidden to close a thread, and this is how that is checked
+    # in code rather than merely asked for in a prompt.
+    resolved_by: str = ""
+    notes: tuple = ()               # tuple[ReviewNote, ...], in payload order
 
 
 @dataclass(frozen=True)

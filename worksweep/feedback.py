@@ -80,6 +80,10 @@ _REPORT_NAME = ".worksweep-feedback.json"
 # enough to carry the ask, short enough that ten threads still fit.
 _NOTE_MAX = 600
 _SHORT_NOTE_MAX = 90
+# How much of a posted reply is quoted back in the done message.
+_REPLY_QUOTE_MAX = 120
+# Longest list of names any single error message will spell out.
+_MAX_LISTED = 8
 # Threads handed to one run. A flat count rather than byte accounting: it is
 # the number a human can sanity-check, and the overflow is escalated rather
 # than dropped, so nothing goes missing either way.
@@ -122,9 +126,11 @@ def sanitize_body(text: str) -> str:
 @dataclass(frozen=True)
 class FeedbackResult:
     iid: int                       # the authored MR whose threads were answered
+    waiting: int = 0               # threads that were waiting when the run began
     addressed: int = 0             # threads fixed with a commit + a reply
     replied: int = 0               # threads answered with words only
     escalated: tuple = ()          # short lines Chandler has to make a call on
+    replies: tuple = ()            # what was actually said, in his name
     result_sha: str = ""           # origin/<branch> as this run left it
     already_answered: bool = False  # nothing was waiting by the time we ran
 
@@ -248,9 +254,11 @@ def render_prompt(repo: str, iid: int, branch: str,
 
 def execute(item: WorkItem, cfg,
             run_subprocess: Callable = None,
-            run_glab: Callable = None) -> FeedbackResult:
+            run_glab: Callable = None,
+            now: Callable[[], str] = None) -> FeedbackResult:
     """Answer the threads waiting on Chandler in one MR. See the module
     docstring for the three-outcome contract with the runner."""
+    now = now or _utc_now
     if run_subprocess is None or run_glab is None:
         raise RunnerError("address-feedback executor is wired without a "
                           "subprocess/glab edge")
@@ -272,7 +280,7 @@ def execute(item: WorkItem, cfg,
          timeout=_FETCH_TIMEOUT)
     _git(run_subprocess, checkout, ["checkout", "-B", branch,
                                     f"origin/{branch}"])
-    pre_remote = _remote_sha(run_subprocess, checkout, branch)
+    pre_refs = _ls_remote(run_subprocess, checkout)
 
     # The sweep's snapshot is minutes to hours old. Ask GitLab again: the
     # reviewer may have answered themselves, or closed the thread, and running
@@ -280,13 +288,15 @@ def execute(item: WorkItem, cfg,
     before = collectors.unaddressed_threads(
         _fetch_threads(run_glab, item.repo, iid), cfg.username)
     if not before:
-        return FeedbackResult(iid=iid, result_sha=pre_remote,
-                              already_answered=True)
+        return FeedbackResult(
+            iid=iid, result_sha=pre_refs.get(_ref(branch), ""),
+            already_answered=True)
 
     # One run answers at most _MAX_THREADS threads. The overflow is
     # escalated, never dropped: it is still somebody waiting on Chandler,
     # and a silently truncated list is how a comment goes unanswered.
     given, overflow = before[:_MAX_THREADS], before[_MAX_THREADS:]
+    run_start = now()
     _claude(run_subprocess, cfg, checkout,
             render_prompt(item.repo, iid, branch, given))
     report = _read_report(report_path, iid)
@@ -298,31 +308,36 @@ def execute(item: WorkItem, cfg,
     addressed = _ids(report.get("addressed"))
     replied = [t for t in _ids(report.get("replied")) if t not in addressed]
     handled = set(addressed) | set(replied)
-    escalated = _escalations(report.get("escalated"), given, handled)
+    escalated, escalated_ids = _escalations(report.get("escalated"), given,
+                                            handled)
+
+    after = _verify(run_subprocess, run_glab, cfg, item.repo, iid, branch,
+                    checkout, given, addressed, replied, pre_refs, run_start)
+
+    # Nothing may fall off the end. A thread the report simply omitted is
+    # still somebody waiting, so it is escalated rather than quietly counted
+    # as finished -- the tally has to describe every thread that went in.
+    escalated += [_escalation_line(t, "unaccounted by the run")
+                  for t in given
+                  if t.id not in handled and t.id not in escalated_ids]
     escalated += [_escalation_line(t, "over the per-run thread cap")
                   for t in overflow]
-    _verify(run_subprocess, run_glab, cfg, item.repo, iid, branch, checkout,
-            given, addressed, replied, pre_remote)
 
     if not addressed and not replied:
-        if escalated:
-            # Not a failure -- a question. The runner routes this to
-            # `needs-input` with a ❓ instead of `error` with a ⚠️.
-            raise NeedsInputError(
-                f"!{iid}: {len(escalated)} thread"
-                f"{'s' if len(escalated) != 1 else ''} need your call — "
-                + "; ".join(escalated))
-        raise RunnerError(
-            f"the address-feedback run on !{iid} accounted for none of its "
-            f"{len(before)} waiting thread"
-            f"{'s' if len(before) != 1 else ''} — nothing was answered and "
-            f"nothing was escalated")
+        # Not a failure -- a question. Every waiting thread is represented in
+        # `escalated` by now (the report's own escalations, plus anything it
+        # left out, plus the over-cap tail), so this can never be silent.
+        raise NeedsInputError(
+            f"!{iid}: {len(escalated)} thread"
+            f"{'s' if len(escalated) != 1 else ''} need your call - "
+            + "; ".join(escalated))
 
-    post_remote = (_remote_sha(run_subprocess, checkout, branch)
-                   if addressed else pre_remote)
-    return FeedbackResult(iid=iid, addressed=len(addressed),
-                          replied=len(replied), escalated=tuple(escalated),
-                          result_sha=post_remote)
+    return FeedbackResult(
+        iid=iid, waiting=len(before), addressed=len(addressed),
+        replied=len(replied), escalated=tuple(escalated),
+        replies=tuple(_replies_posted(after, addressed + replied, cfg.username,
+                                      run_start)),
+        result_sha=_ls_remote(run_subprocess, checkout).get(_ref(branch), ""))
 
 
 def _claude(run_subprocess: Callable, cfg, checkout: str, prompt: str) -> None:
@@ -331,6 +346,10 @@ def _claude(run_subprocess: Callable, cfg, checkout: str, prompt: str) -> None:
     That cap is not free-standing: the runner reaps a non-implement claim at
     45 minutes (runner.STALE_RUNNING_MINUTES), so a longer per-executor budget
     would get healthy runs killed mid-flight and leave half-posted replies.
+
+    The tool scope goes on the ARGV. Whatever permissions Chandler's own
+    interactive sessions are configured with are not a boundary for a process
+    this module spawns unattended with his credentials.
     """
     timeout = int(getattr(cfg, "runner_timeout", 1800) or 1800)
     try:
@@ -347,50 +366,154 @@ def _claude(run_subprocess: Callable, cfg, checkout: str, prompt: str) -> None:
 
 def _verify(run_subprocess: Callable, run_glab: Callable, cfg, repo: str,
             iid: int, branch: str, checkout: str,
-            before: Sequence[ReviewThread], addressed: List[str],
-            replied: List[str], pre_remote: str) -> None:
-    """Trust nothing the run reported until GitLab and git agree with it.
+            given: Sequence[ReviewThread], addressed: List[str],
+            replied: List[str], pre_refs: dict, run_start: str) -> dict:
+    """Trust nothing the run reported until git and GitLab agree with it.
 
-    Three checks, in the order a lie is most likely: a thread it was never
-    given, a reply it never posted, a commit it never pushed. Each one would
-    otherwise reach Discord as a completed item Chandler had no reason to
-    re-check.
+    These check EFFECT, not shape. The earlier versions asked "does the world
+    look the way the report says?", which a run could satisfy while also
+    pushing to a dozen other branches, closing threads it was told to leave
+    alone, or simply getting lucky with a reviewer who replied mid-run.
+
+    Returns the post-run threads by id so the caller can quote the replies.
     """
-    known = {t.id for t in before}
+    known = {t.id for t in given}
     claimed = list(addressed) + list(replied)
     stray = [t for t in claimed if t not in known]
     if stray:
         raise RunnerError(
             f"the address-feedback run on !{iid} claims thread(s) it was "
-            f"never given: {', '.join(stray)}")
+            f"never given: {', '.join(sorted(stray))}")
+
+    # 1. The ONLY ref that may have moved is this MR's branch. The run holds
+    #    real push credentials, so "the branch advanced" says nothing about
+    #    what else it touched -- a force-push to master would pass that check.
+    post_refs = _ls_remote(run_subprocess, checkout)
+    moved = {ref for ref in set(pre_refs) | set(post_refs)
+             if pre_refs.get(ref) != post_refs.get(ref)}
+    stray_refs = sorted(moved - {_ref(branch)})
+    if stray_refs:
+        shown = ", ".join(stray_refs[:_MAX_LISTED])
+        more = (f" (+{len(stray_refs) - _MAX_LISTED} more)"
+                if len(stray_refs) > _MAX_LISTED else "")
+        raise RunnerError(
+            f"the address-feedback run on !{iid} moved refs it has no "
+            f"business touching: {shown}{more}")
 
     after = {t.id: t for t in collectors.parse_threads(
         _fetch_threads(run_glab, repo, iid))}
+
+    # 2. Never-resolve, enforced rather than requested. The prompt is a rule
+    #    the run can ignore; this is the check that it did not.
+    closed = sorted(tid for tid in known
+                    if (after.get(tid) is not None
+                        and after[tid].resolved_by == cfg.username))
+    if closed:
+        raise RunnerError(
+            f"the address-feedback run on !{iid} closed thread(s) that are "
+            f"not its to close: {', '.join(closed)} — whoever opened a thread "
+            f"decides when it is finished")
+
+    # 3. A reply is one WE posted DURING this run. "The last word is now mine"
+    #    was satisfied by the reviewer answering their own question mid-run,
+    #    which laundered every other claim in the same batch.
     for tid in claimed:
         thread = after.get(tid)
         if thread is None:
             raise RunnerError(f"the address-feedback run on !{iid} claims "
                               f"thread {tid}, which the MR no longer has")
-        if thread.last_author != cfg.username:
+        if not _my_notes_since(thread, cfg.username, run_start):
             raise RunnerError(
                 f"the address-feedback run on !{iid} claims it answered "
-                f"thread {tid}, but its last word is still "
-                f"{thread.last_author or 'nobody'}'s")
+                f"thread {tid}, but it did not post a reply there — its last "
+                f"word is {thread.last_author or 'nobody'}'s")
 
-    if addressed:
-        _git(run_subprocess, checkout, ["fetch", "origin", branch],
-             timeout=_FETCH_TIMEOUT)
-        if _remote_sha(run_subprocess, checkout, branch) == pre_remote:
-            raise RunnerError(
-                f"the address-feedback run on !{iid} claims {len(addressed)} "
-                f"commit(s), but origin/{branch} never moved — the reply "
-                f"points at a sha the reviewer cannot see")
+    # 4. A claimed commit has to be visible to the reviewer it was promised to.
+    if addressed and _ref(branch) not in moved:
+        raise RunnerError(
+            f"the address-feedback run on !{iid} claims {len(addressed)} "
+            f"commit(s), but origin/{branch} never moved — the reply points "
+            f"at a sha the reviewer cannot see")
+    return after
 
 
-def _remote_sha(run_subprocess: Callable, checkout: str, branch: str) -> str:
-    return _git(run_subprocess, checkout,
-                ["rev-parse", f"origin/{branch}"], allow_fail=True).strip()
+def _ref(branch: str) -> str:
+    return f"refs/heads/{branch}"
 
+
+def _ls_remote(run_subprocess: Callable, checkout: str) -> dict:
+    """Every ref on origin, as {ref: sha}.
+
+    A failure here is LOUD. Returning {} would read downstream as "nothing
+    moved", which is the single most dangerous thing this function could
+    silently claim -- it would wave through exactly the unpushed-commit and
+    stray-ref cases it exists to catch.
+    """
+    out = _git(run_subprocess, checkout, ["ls-remote", "origin"],
+               timeout=_FETCH_TIMEOUT, allow_fail=True)
+    refs = {}
+    for line in (out or "").splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            refs[parts[1]] = parts[0]
+    if not refs:
+        raise RunnerError("could not read origin's refs (git ls-remote "
+                          "returned nothing) — refusing to guess whether the "
+                          "run pushed anything")
+    return refs
+
+
+def _my_notes_since(thread, username: str, since: str) -> List[str]:
+    """Bodies of `username`'s non-system notes posted at or after `since`.
+
+    An unparseable timestamp counts as NOT during the run: the whole point is
+    to require positive evidence that this run spoke, and a note we cannot
+    date is not evidence.
+    """
+    start = _parse_ts(since)
+    out = []
+    for n in thread.notes:
+        if n.system or n.author != username:
+            continue
+        ts = _parse_ts(n.created_at)
+        if start is not None and ts is not None and ts >= start:
+            out.append(n.body)
+    return out
+
+
+def _parse_ts(value: str):
+    import datetime
+    try:
+        ts = datetime.datetime.fromisoformat((value or "").replace("Z",
+                                                                   "+00:00"))
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=datetime.timezone.utc)
+    return ts
+
+
+def _utc_now() -> str:
+    import datetime
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def _replies_posted(after: dict, claimed: Sequence[str], username: str,
+                    run_start: str) -> List[str]:
+    """What this run actually said, in Chandler's name, one line per thread.
+
+    The content of a reply is not machine-vetted anywhere -- it cannot be.
+    Putting it in the done post is how it gets audited at all: he reads what
+    went out under his identity, on his phone, the moment it goes out.
+    """
+    out = []
+    for tid in claimed:
+        thread = after.get(tid)
+        if thread is None:
+            continue
+        for body in _my_notes_since(thread, username, run_start):
+            out.append(f"{tid}: {_squash(_scrub(body), _REPLY_QUOTE_MAX)}")
+    return out
 
 def _read_report(path: str, iid: int) -> dict:
     try:
@@ -426,32 +549,60 @@ def _ids(raw) -> List[str]:
     return out
 
 
-def _escalations(raw, before: Sequence[ReviewThread],
-                 handled: set = frozenset()) -> List[str]:
+_UNKNOWN_REF = "\u0000unknown"
+
+
+def _escalations(raw, given: Sequence[ReviewThread],
+                 handled: set = frozenset()) -> tuple:
     """One short line per escalation: who is waiting, roughly what they said,
     and the call this run refused to make. Chandler reads these on his phone,
     so they carry the ask, not a thread id he would have to go look up."""
-    by_id = {t.id: t for t in before}
-    out, seen = [], set()
+    by_id = {t.id: t for t in given}
+    out, seen, covered = [], set(), set()
     for entry in (raw or []):
         if isinstance(entry, dict):
             tid, reason = entry.get("thread"), entry.get("reason") or ""
         else:
             tid, reason = entry, ""
-        if tid in handled or (tid and tid in seen):
+        # A missing or non-string id used to skip the dedupe entirely, so a
+        # report with several junk entries inflated the escalation count.
+        key = tid if isinstance(tid, str) and tid else _UNKNOWN_REF
+        if key in handled or key in seen:
             continue
-        seen.add(tid)
-        out.append(_escalation_line(by_id.get(tid), reason, tid))
-    return out
+        seen.add(key)
+        thread = by_id.get(key)
+        if thread is None:
+            # Counted, not dropped: the run believed something needed a human,
+            # and losing that because the id is unrecognisable is the silent
+            # failure this whole pass exists to prevent.
+            reason = (f"{reason} (unknown thread ref from run)" if reason
+                      else "unknown thread ref from run")
+        else:
+            covered.add(key)
+        out.append(_escalation_line(thread, reason,
+                                    key if key is not _UNKNOWN_REF else ""))
+    return out, covered
 
 
 def _escalation_line(thread, reason: str, tid: str = "") -> str:
-    who = thread.last_author if thread else (tid or "a thread")
-    quote = _squash((thread.last_note if thread else ""), _SHORT_NOTE_MAX)
+    who = _scrub(thread.last_author if thread else (tid or "a thread"))
+    quote = _squash(_scrub(thread.last_note if thread else ""),
+                    _SHORT_NOTE_MAX)
     line = f"{who}: \u201c{quote}\u201d" if quote else f"{who}"
     if reason:
-        line += f" \u2014 {_squash(reason, _SHORT_NOTE_MAX)}"
+        line += f" \u2014 {_squash(_scrub(reason), _SHORT_NOTE_MAX)}"
     return line
+
+
+def _scrub(text: str) -> str:
+    """Untrusted text on its way to Discord.
+
+    Reuses the formatter's own detector so a thread body cannot do anything a
+    reviewer-written MR title could not already do: no markdown link, no live
+    URL, no backtick fence-break -- plus this module's control-character strip.
+    """
+    from .formatter import _sanitize_title
+    return _sanitize_title(sanitize_body(text or ""))
 
 
 def _squash(text: str, limit: int) -> str:
@@ -471,12 +622,22 @@ def tally(result: FeedbackResult) -> str:
     base = (f"{result.addressed} addressed, {result.replied} replied, "
             f"{len(result.escalated)} escalated")
     if result.already_answered:
+        # No denominator on purpose: nothing was waiting, so "0 waiting" would
+        # be noise. This exact sentence is the one the runner posts.
         return base + " — threads already answered"
-    return base
+    return f"{result.waiting} waiting: {base}"
 
 
 def done_message(result: FeedbackResult) -> str:
-    msg = f"💬 !{result.iid} — {tally(result)}"
+    """The tally, what was said in his name, and what still needs him.
+
+    The replies are quoted because nothing machine-vets their CONTENT -- that
+    is not a thing this executor can do. Chandler auditing the actual words,
+    on his phone, the moment they go out, IS the review step.
+    """
+    msg = f"\U0001f4ac !{result.iid} \u2014 {tally(result)}"
+    for line in result.replies:
+        msg += f"\nsaid: {line}"
     for line in result.escalated:
         msg += f"\nneeds you: {line}"
     return msg
