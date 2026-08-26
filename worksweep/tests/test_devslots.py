@@ -3,10 +3,10 @@
 `probe` runs one ssh per configured box (edge injected) and parses branch +
 sha. `classify` maps each box's branch onto the tier GitLab-side state
 implies (free / handed_off / live) using only the OPEN MRs the GraphQL sweep
-already fetched. `pick` and `summary_line` are pure helpers over the
+already fetched. `summary_line` is a pure helper over the
 resulting tier dict.
 """
-from worksweep.devslots import DevBox, classify, pick, probe, summary_line
+from worksweep.devslots import DevBox, classify, probe, summary_line
 from worksweep.models import MergeRequest
 
 
@@ -141,33 +141,6 @@ def test_classify_closed_mr_not_in_sweep_leaves_branch_free():
     boxes = [_box("dev2", branch="feat/900-merged-already")]
     other = _mr(source_branch="some-other-branch")
     assert classify(boxes, [other], "chandler.hardy") == {"dev2": "free"}
-
-
-# --- pick ------------------------------------------------------------
-
-def test_pick_prefers_free_over_handed_off():
-    tiers = {"dev4": "handed_off", "dev1": "free", "dev0": "live"}
-    assert pick(tiers, ["dev0", "dev1", "dev4"]) == "dev1"
-
-
-def test_pick_falls_back_to_handed_off_when_no_free():
-    tiers = {"dev4": "handed_off", "dev0": "live"}
-    assert pick(tiers, ["dev0", "dev4"]) == "dev4"
-
-
-def test_pick_none_when_all_live():
-    tiers = {"dev0": "live", "dev2": "live"}
-    assert pick(tiers, ["dev0", "dev2"]) is None
-
-
-def test_pick_deterministic_order_first_free_wins():
-    tiers = {"dev1": "free", "dev2": "free"}
-    assert pick(tiers, ["dev2", "dev1"]) == "dev2"
-    assert pick(tiers, ["dev1", "dev2"]) == "dev1"
-
-
-def test_pick_empty_tiers_returns_none():
-    assert pick({}, []) is None
 
 
 # --- summary_line ------------------------------------------------------

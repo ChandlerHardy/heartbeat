@@ -1187,3 +1187,93 @@ def test_a_real_reviewer_after_a_bot_still_reaches_the_run(tmp_path, worktree):
     assert result.replied == 1
     prompt = [c for c in sub.calls if c[0] == "claude"][0][2]
     assert "no, this is still wrong" in prompt
+
+
+# --- f-034: GitLab's real timestamp format --------------------------------
+#
+# GitLab sends `2026-08-26T12:05:00.123Z`. Every fixture in this file used
+# `+00:00`, so the Z-suffix path that production actually exercises had no
+# coverage at all -- and `_parse_ts` returning None means "not posted during
+# the run", which fails every honest reply claim.
+
+@pytest.mark.parametrize("stamp", [
+    "2026-08-25T12:05:00.123Z", "2026-08-25T12:05:00Z",
+    "2026-08-25T12:05:00.123456Z", "2026-08-25T12:05:00.123+00:00",
+    "2026-08-25T12:05:00+00:00",
+])
+def test_gitlabs_timestamp_formats_all_parse_as_during_the_run(stamp):
+    parsed = feedback._parse_ts(stamp)
+    assert parsed is not None, stamp
+    assert parsed >= feedback._parse_ts(RUN_START), stamp
+
+
+@pytest.mark.parametrize("stamp", ["", None, "not-a-date", "2026-13-45T99:99Z"])
+def test_junk_timestamps_are_not_during_the_run(stamp):
+    """None means "no evidence this run spoke" -- the safe direction, since a
+    reply we cannot date is not proof we posted it."""
+    assert feedback._parse_ts(stamp) is None
+
+
+def test_a_reply_stamped_the_gitlab_way_is_accepted(tmp_path, worktree):
+    """End to end on the real format, not just the parser."""
+    sub = _Subprocess(worktree, report=_report(replied=["t1"]))
+    answered = {"id": "t1", "notes": [
+        _tnote("leyang", "question on t1", created_at="2026-08-25T11:00:00Z"),
+        _tnote(ME, "addressed in deadbee",
+               created_at="2026-08-25T12:05:00.123Z")]}
+    glab = _Glab(_payload(_waiting("t1")), _payload(answered))
+    result = feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                              run_glab=glab, now=lambda: RUN_START)
+    assert result.replied == 1
+
+
+def test_a_z_stamped_reply_from_before_the_run_is_still_rejected(tmp_path,
+                                                                 worktree):
+    """The format fix must not weaken the window check it feeds."""
+    sub = _Subprocess(worktree, report=_report(replied=["t1"]))
+    stale = {"id": "t1", "notes": [
+        _tnote("leyang", "question on t1", created_at="2026-08-25T10:00:00Z"),
+        _tnote(ME, "old reply", created_at="2026-08-25T11:00:00.500Z")]}
+    glab = _Glab(_payload(_waiting("t1")), _payload(stale))
+    with pytest.raises(RunnerError) as e:
+        feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                         run_glab=glab, now=lambda: RUN_START)
+    assert "did not post a reply" in str(e.value)
+
+
+# --- f-018: never-resolve, discriminated -----------------------------------
+
+def test_closing_a_thread_we_escalated_is_still_a_hard_failure(tmp_path,
+                                                               worktree):
+    """The existing check covered a thread the run CLAIMED. The dangerous
+    shape is the opposite: a thread it declined to answer, quietly closed so
+    it stops appearing. Escalating and resolving is worse than either alone."""
+    sub = _Subprocess(worktree, report=_report(
+        replied=["t1"],
+        escalated=[{"thread": "t2", "reason": "product call"}]))
+    closed = {"id": "t2", "notes": [
+        _tnote("leyang", "question on t2", resolved=True),
+        _tnote("leyang", "still waiting", resolved=True, resolved_by=ME)]}
+    glab = _Glab(_payload(_waiting("t1"), _waiting("t2")),
+                 _payload(_answered("t1"), closed))
+    with pytest.raises(RunnerError) as e:
+        feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                         run_glab=glab, now=lambda: RUN_START)
+    assert "t2" in str(e.value)
+    assert "not its to close" in str(e.value)
+
+
+def test_closing_a_thread_the_report_omitted_is_also_a_hard_failure(tmp_path,
+                                                                    worktree):
+    """A thread it neither answered nor escalated -- just closed. Without this
+    the tidiest way to make a thread go away is the one nothing checks."""
+    sub = _Subprocess(worktree, report=_report(replied=["t1"]))
+    closed = {"id": "t2", "notes": [
+        _tnote("leyang", "question on t2", resolved=True, resolved_by=ME)]}
+    glab = _Glab(_payload(_waiting("t1"), _waiting("t2")),
+                 _payload(_answered("t1"), closed))
+    with pytest.raises(RunnerError) as e:
+        feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                         run_glab=glab, now=lambda: RUN_START)
+    assert "t2" in str(e.value)
+    assert "not its to close" in str(e.value)

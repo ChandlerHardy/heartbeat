@@ -521,6 +521,15 @@ def _my_notes_since(thread, username: str, since: str) -> List[str]:
 
 
 def _parse_ts(value: str):
+    """A GitLab timestamp as an aware datetime, or None when unusable.
+
+    f-034: GitLab sends `2026-08-26T12:05:00.123Z`. The `Z` normalisation is
+    NOT redundant -- `fromisoformat` only learned to accept it in 3.11, and on
+    an older interpreter (the mini's) it raises, which makes every honest reply
+    read as "not posted during the run" and fails the whole batch. It cannot be
+    mutation-tested on a 3.13 developer machine, which is exactly why it is
+    spelled out here rather than left to look like tidy-up bait.
+    """
     import datetime
     try:
         ts = datetime.datetime.fromisoformat((value or "").replace("Z",

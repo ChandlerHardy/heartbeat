@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from typing import Callable, Dict, FrozenSet, List, Optional, Sequence
+from typing import Callable, Dict, FrozenSet, List
 
 from .assessor import is_handed_off
 from .models import MergeRequest
@@ -119,18 +119,6 @@ def mr_by_branch(all_mrs: List[MergeRequest]) -> Dict[str, MergeRequest]:
         if sb and sb not in by_branch:
             by_branch[sb] = mr
     return by_branch
-
-
-def pick(tiers: Dict[str, str], order: Sequence[str]) -> Optional[str]:
-    """First free box in `order`, else first handed-off box in `order`, else
-    None. `order` is the deterministic tie-break (config order)."""
-    for name in order:
-        if tiers.get(name) == _TIER_FREE:
-            return name
-    for name in order:
-        if tiers.get(name) == _TIER_HANDED_OFF:
-            return name
-    return None
 
 
 def summary_line(tiers: Dict[str, str]) -> str:

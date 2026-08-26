@@ -70,6 +70,18 @@ class MergeRequest:
         return has_dev_url(self.description)
 
 
+def magi_item_id(repo: str, iid: int, sha: str) -> str:
+    """The queue id for a magi review of one MR at one head sha.
+
+    f-033: this template was hand-written in three places (the assessor's
+    emission, its bootstrap seeding, and the runner's post-feedback chain).
+    They agree today, and the chain's whole dedupe depends on them continuing
+    to -- a divergence would queue a second review of the same commits rather
+    than recognising the first.
+    """
+    return f"magi:{repo}!{int(iid)}@{sha}"
+
+
 @dataclass(frozen=True)
 class ReviewNote:
     """One note in a discussion, flattened.
@@ -127,10 +139,14 @@ class Issue:
     web_url: str
 
 
-# The executors the runner will actually claim (runner.pick_claim is gated to
-# exactly these: runner.py:353 `(_MAGI, _KEEP_CURRENT)` and runner.py:441
-# `(_IMPLEMENT,)`). `triage`, `mr-hygiene` and `none` items are FYI rows a human
-# acts on by hand -- nothing in worksweep ever executes them.
+# The executors the runner will actually claim. Three passes gate on subsets of
+# this set -- the shared short-op pass (magi-review, keep-current, park), the
+# implement pass, and the address-feedback pass -- and
+# test_runnable_executors_matches_the_runner_claim_gate pins the union to
+# runner._ALL_EXECUTORS so the two cannot drift. (Line numbers deliberately not
+# cited: the previous version of this comment named runner.py:353/441 and a
+# two-executor gate, both long gone.) `triage`, `mr-hygiene` and `none` items
+# are FYI rows a human acts on by hand -- nothing in worksweep executes them.
 #
 # This matters because there is no un-approve path: flipping a non-runnable item
 # to `approved` strands it forever (reconcile preserves `approved`, no runner

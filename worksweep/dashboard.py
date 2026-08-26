@@ -1584,7 +1584,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._text(400, "bad request")
                 return
             try:
-                self._dismiss(number)
+                self._dismiss(number, _valid_actor(payload))
             except Exception as e:                 # never crash the agent
                 print(f"worksweep: dashboard dismiss failed: {e}", file=sys.stderr)
                 self._json(500, {"dismissed": False, "error": "dismiss failed"})
@@ -1645,7 +1645,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         self._json(202, {"started": True})
 
-    def _dismiss(self, number: int) -> None:
+    def _dismiss(self, number: int, actor: str = "") -> None:
         """Retire a non-runnable row: flip it to done/`dismissed`.
 
         Ordering is deliberate. The local flip happens first, under the lock and
@@ -1680,7 +1680,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             save_queue(self.server.queue_path, updated)
 
         self._mark_todo_done(target.item, number)
-        self._audit_dismiss(number, target.item)
+        self._audit_dismiss(number, target.item, actor)
         self._json(200, {"dismissed": True, "number": number})
 
     def _mark_todo_done(self, item, number: int) -> None:
@@ -1701,9 +1701,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             print(f"worksweep: could not mark GitLab todo {todo_id} done: {e}",
                   file=sys.stderr)
 
-    def _audit_dismiss(self, number: int, item) -> None:
+    def _audit_dismiss(self, number: int, item, actor: str = "") -> None:
+        # f-015: same attribution as an approve. Dismissing is the other half
+        # of the same decision -- "I handled this" -- and the channel should be
+        # able to tell Chandler's hand from Claude's on both.
+        suffix = " (dashboard · claude)" if actor == _ACTOR else " (dashboard)"
         confirm = (f"🗑️ dismissed {number} "
-                   f"({item.executor} {item.repo})".rstrip() + " (dashboard)")
+                   f"({item.executor} {item.repo})".rstrip() + suffix)
         post, webhook = self.server.post, self.server.webhook
         if post and webhook:
             try:

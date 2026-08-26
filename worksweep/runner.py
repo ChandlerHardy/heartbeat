@@ -15,7 +15,7 @@ import sys
 from typing import Callable, Dict, List, Optional, Tuple
 
 from .formatter import DISCORD_MAX_CHARS, _truncate_bytes
-from .models import QueueRecord, WorkItem
+from .models import QueueRecord, WorkItem, magi_item_id
 from .queue import null_lock as _null_lock
 
 STALE_RUNNING_MINUTES = 45
@@ -646,7 +646,7 @@ def _chain_magi_review(records: List[QueueRecord], item: WorkItem, result,
     """
     if not result.addressed or not result.result_sha:
         return records
-    magi_id = f"magi:{item.repo}!{result.iid}@{result.result_sha}"
+    magi_id = magi_item_id(item.repo, result.iid, result.result_sha)
     if any(r.item.id == magi_id for r in records):
         return records      # same head already queued -- never stack a second
     number = max((r.number for r in records), default=0) + 1
