@@ -1,7 +1,7 @@
 """M4 Task H review fix (C1): per-executor git worktrees.
 
-magi-review, implement, and keep-current each need a checkout directory for
-one repo. magi-review only ever runs a read-only `git fetch` there (never
+magi-review, implement, keep-current and address-feedback each need a checkout
+directory for one repo. magi-review only ever runs a read-only `git fetch` there (never
 `checkout -B`), so it keeps using the shared clone directly -- unchanged,
 backward compatible. implement (a 90-min `/rubric:do` run) and keep-current
 (merge + push) BOTH switch branches and mutate the working tree; sharing one
@@ -11,12 +11,18 @@ from under the other's live work — that's exactly what happened before this
 fix: a keep-current `checkout -B feat/1701-y` could switch the branch under
 a live 90-minute implement run on `feat/1775-x`.
 
-`worktree_for` gives implement and keep-current EACH their own git worktree,
+address-feedback (2026-08-25) is in the same class as keep-current: it does
+`checkout -B <branch>` and commits, so it gets its own worktree for exactly
+the same reason.
+
+`worktree_for` gives implement, keep-current and address-feedback EACH their
+own git worktree,
 created on first use from the shared clone:
 
     <checkouts_root>/<repo>                          <- magi-review (shared)
     <checkouts_root>/.worktrees/<repo>-implement      <- implement
     <checkouts_root>/.worktrees/<repo>-keep-current   <- keep-current
+    <checkouts_root>/.worktrees/<repo>-address-feedback <- address-feedback
 
 Idempotent: a worktree directory that already exists and answers `git
 rev-parse --git-dir` is reused as-is (no `worktree add` re-run). One that
@@ -34,7 +40,8 @@ from typing import Callable, List
 
 from .runner import RunnerError
 
-_WORKTREE_EXECUTORS = ("implement", "keep-current")
+_WORKTREE_EXECUTORS = ("implement", "keep-current",
+                       "address-feedback")
 _WORKTREE_TIMEOUT = 120
 _TAIL_LINES = 15
 
