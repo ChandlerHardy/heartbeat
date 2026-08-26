@@ -73,14 +73,26 @@ def pick_claim(records: List[QueueRecord],
     box or a second `/rubric:do` while the first is mid-flight. magi-review is
     unaffected by a running implement (and vice versa): the two kinds hold
     separate lock files and may run one each per pass.
+
+    A BRANCH already being worked by any running record is also skipped, no
+    matter which executor holds it. The lock files make each executor
+    single-flight against itself; they say nothing about two DIFFERENT
+    executors targeting the same branch, and since address-feedback got its
+    own lock those two can genuinely overlap. Two runs on one branch means the
+    second one's `checkout -B` lands in a worktree the first is still working
+    in. Items with no branch (magi-review, triage) are unaffected -- an empty
+    branch is the absence of one, not a shared resource.
     """
     running_kinds = {r.item.executor for r in records
                      if r.item.status == "running"}
+    running_branches = {r.item.branch for r in records
+                        if r.item.status == "running" and r.item.branch}
     candidates = [r for r in records
                   if r.item.status == "approved"
                   and r.item.executor in executors
                   and not (r.item.executor in _SINGLE_FLIGHT
-                           and r.item.executor in running_kinds)]
+                           and r.item.executor in running_kinds)
+                  and r.item.branch not in running_branches]
     return min(candidates, key=lambda r: r.number) if candidates else None
 
 

@@ -90,10 +90,25 @@ def test_keep_current_is_not_single_flight_like_implement():
     second keep-current from being picked (the magi pass only ever runs one
     claim per invocation anyway, so this only matters for pick_claim's own
     contract)."""
-    recs = [_rec(1, status="running", executor="keep-current"),
-           _rec(2, status="approved", executor="keep-current")]
+    # Different MRs, so different branches: two keep-current claims on ONE
+    # branch are blocked, but by the branch guard rather than single-flight.
+    recs = [_rec(1, status="running", executor="keep-current",
+                 branch="feat/1701-thing"),
+           _rec(2, status="approved", executor="keep-current",
+                branch="feat/1702-other")]
     from worksweep.runner import _KEEP_CURRENT
     assert pick_claim(recs, (_KEEP_CURRENT,)).number == 2
+
+
+def test_two_claims_on_one_branch_are_blocked_even_for_the_same_executor():
+    """2026-08-26: the exclusion is by branch, so it holds within an executor
+    as well as across executors -- both would `checkout -B` the same branch."""
+    recs = [_rec(1, status="running", executor="keep-current",
+                 branch="feat/1701-thing"),
+           _rec(2, status="approved", executor="keep-current",
+                branch="feat/1701-thing")]
+    from worksweep.runner import _KEEP_CURRENT
+    assert pick_claim(recs, (_KEEP_CURRENT,)) is None
 
 
 # --------------------------------------------------------------------------
