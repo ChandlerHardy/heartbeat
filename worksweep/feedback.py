@@ -95,6 +95,14 @@ _SHORT_NOTE_MAX = 90
 _REPLY_QUOTE_MAX = 120
 # Longest list of names any single error message will spell out.
 _MAX_LISTED = 8
+# The ref namespaces a PUSH is responsible for. Everything else on the remote
+# is GitLab's own bookkeeping, which it rewrites in reaction to a push and not
+# because anybody asked: `refs/merge-requests/<iid>/head` and `/merge`,
+# `refs/pipelines/<id>`, `refs/keep-around/<sha>`, `refs/environments/<name>`.
+# Watching those flagged a run on !4082 that had pushed correctly and answered
+# two threads (2026-08-26), so the guard names what the run OWNS rather than
+# trying to enumerate what the server might invent next.
+_PUSHABLE_NAMESPACES = ("refs/heads/", "refs/tags/")
 # Lines of quoted third-party text one Discord post will carry. The
 # COUNTS always tell the whole truth; only the rendering is capped.
 _MAX_POSTED_LINES = 5
@@ -413,13 +421,16 @@ def _verify(run_subprocess: Callable, run_glab: Callable, cfg, repo: str,
             f"the address-feedback run on !{iid} claims thread(s) it was "
             f"never given: {', '.join(sorted(stray))}")
 
-    # 1. The ONLY ref that may have moved is this MR's branch. The run holds
-    #    real push credentials, so "the branch advanced" says nothing about
-    #    what else it touched -- a force-push to master would pass that check.
+    # 1. Of the refs a push OWNS, the only one that may have moved is this
+    #    MR's branch. The run holds real push credentials, so "the branch
+    #    advanced" says nothing about what else it touched -- a force-push to
+    #    master would sail through that check on its own.
     post_refs = _ls_remote(run_subprocess, checkout)
     moved = {ref for ref in set(pre_refs) | set(post_refs)
              if pre_refs.get(ref) != post_refs.get(ref)}
-    stray_refs = sorted(moved - {_ref(branch)})
+    stray_refs = sorted({ref for ref in moved
+                         if ref.startswith(_PUSHABLE_NAMESPACES)}
+                        - {_ref(branch)})
     if stray_refs:
         shown = ", ".join(stray_refs[:_MAX_LISTED])
         more = (f" (+{len(stray_refs) - _MAX_LISTED} more)"

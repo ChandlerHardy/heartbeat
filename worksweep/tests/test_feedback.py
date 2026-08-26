@@ -1020,3 +1020,107 @@ def test_a_branch_held_by_a_sibling_worktree_is_recovered(tmp_path, worktree):
                               run_glab=glab, now=lambda: RUN_START)
     assert seen["released"] is True
     assert result.replied == 1
+
+
+# --- whose refs are they anyway (2026-08-26 live failure #2) ---------------
+#
+# The run on !4082 pushed correctly, replied to two threads, and was then
+# failed by its own ref guard: GitLab had moved refs/merge-requests/4082/head
+# and /merge and created refs/pipelines/2792696452 in response to the push.
+# Those are the SERVER reacting, not the run acting.
+
+def _server_refs(**overrides):
+    """A ref list including the bookkeeping GitLab maintains itself."""
+    base = {"refs/heads/master": "m0", f"refs/heads/{BRANCH}": PRE_SHA,
+            "refs/tags/v1": "tag0",
+            "refs/merge-requests/4082/head": "mrh0",
+            "refs/merge-requests/4082/merge": "mrm0"}
+    base.update(overrides)
+    return "\n".join(f"{sha}\t{ref}" for ref, sha in base.items()) + "\n"
+
+
+def test_gitlabs_own_bookkeeping_is_not_the_runs_doing(tmp_path, worktree):
+    """Everything GitLab touches in reaction to a push moves at once. All of
+    it has to be invisible to the guard, or no successful push ever passes."""
+    after = _server_refs(**{
+        f"refs/heads/{BRANCH}": POST_SHA,          # the legitimate push
+        "refs/merge-requests/4082/head": "mrh1",   # server-side, on push
+        "refs/merge-requests/4082/merge": "mrm1",  # server-side, on push
+        "refs/pipelines/2792696452": "pipe1",      # created by the push
+        "refs/keep-around/deadbeef": "ka1",        # created by the server
+        "refs/environments/review-4082": "env1",   # created by the server
+    })
+    sub = _Subprocess(worktree,
+                      report=_report(addressed=[{"thread": "t1",
+                                                 "sha": "deadbee"}]),
+                      ls_remote=[_server_refs(), after])
+    glab = _Glab(_payload(_thread("t1")), _payload(_thread("t1", last=ME)))
+    result = feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                              run_glab=glab, now=lambda: RUN_START)
+    assert result.addressed == 1
+    assert result.result_sha == POST_SHA
+
+
+def test_a_second_head_branch_moving_still_fails(tmp_path, worktree):
+    """The guard still does its actual job: a branch is something the run
+    pushed, and it had no business pushing that one."""
+    after = _server_refs(**{
+        f"refs/heads/{BRANCH}": POST_SHA,
+        "refs/heads/master": "m1",
+        "refs/pipelines/2792696452": "pipe1",
+    })
+    sub = _Subprocess(worktree,
+                      report=_report(addressed=[{"thread": "t1",
+                                                 "sha": "deadbee"}]),
+                      ls_remote=[_server_refs(), after])
+    glab = _Glab(_payload(_thread("t1")), _payload(_thread("t1", last=ME)))
+    with pytest.raises(RunnerError) as e:
+        feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                         run_glab=glab, now=lambda: RUN_START)
+    assert "refs/heads/master" in str(e.value)
+    assert "refs/pipelines" not in str(e.value)
+
+
+def test_a_moved_tag_still_fails(tmp_path, worktree):
+    """Tags are the run's responsibility too -- nothing here should ever move
+    one, and a moved release tag is not something to shrug at."""
+    after = _server_refs(**{f"refs/heads/{BRANCH}": POST_SHA,
+                            "refs/tags/v1": "tag1"})
+    sub = _Subprocess(worktree, report=_report(replied=["t1"]),
+                      ls_remote=[_server_refs(), after])
+    glab = _Glab(_payload(_thread("t1")), _payload(_thread("t1", last=ME)))
+    with pytest.raises(RunnerError) as e:
+        feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                         run_glab=glab, now=lambda: RUN_START)
+    assert "refs/tags/v1" in str(e.value)
+
+
+def test_a_deleted_head_branch_still_fails(tmp_path, worktree):
+    after = "\n".join([f"{POST_SHA}\trefs/heads/{BRANCH}",
+                       "tag0\trefs/tags/v1",
+                       "mrh0\trefs/merge-requests/4082/head",
+                       "mrm0\trefs/merge-requests/4082/merge"]) + "\n"
+    sub = _Subprocess(worktree, report=_report(replied=["t1"]),
+                      ls_remote=[_server_refs(), after])
+    glab = _Glab(_payload(_thread("t1")), _payload(_thread("t1", last=ME)))
+    with pytest.raises(RunnerError) as e:
+        feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                         run_glab=glab, now=lambda: RUN_START)
+    assert "refs/heads/master" in str(e.value)
+
+
+def test_the_commit_check_still_reads_the_branch_through_the_noise(tmp_path,
+                                                                   worktree):
+    """A commit claim where ONLY the server refs moved is still a lie: the
+    branch itself never advanced, so the reviewer cannot see the sha."""
+    after = _server_refs(**{"refs/merge-requests/4082/head": "mrh1",
+                            "refs/pipelines/2792696452": "pipe1"})
+    sub = _Subprocess(worktree,
+                      report=_report(addressed=[{"thread": "t1",
+                                                 "sha": "deadbee"}]),
+                      ls_remote=[_server_refs(), after])
+    glab = _Glab(_payload(_thread("t1")), _payload(_thread("t1", last=ME)))
+    with pytest.raises(RunnerError) as e:
+        feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                         run_glab=glab, now=lambda: RUN_START)
+    assert "never moved" in str(e.value)
