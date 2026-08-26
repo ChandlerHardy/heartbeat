@@ -598,7 +598,10 @@ def _magi_advisory(checkout: str, cfg, mr_iid: int,
     note = ""
     try:
         proc = _run(
-            [cfg.claude_bin, "-p", f"/magi:magi-review !{mr_iid} --advisory --draft-findings --no-rebuttal"],
+            # `--no-rebuttal` removed with magi 0.2.4 (see runner.execute):
+            # the rebuttal round is mechanical now and the flag is gone.
+            [cfg.claude_bin, "-p",
+             f"/magi:magi-review !{mr_iid} --advisory --draft-findings"],
             run_subprocess, cwd=checkout, timeout=_MAGI_TIMEOUT)
         if proc.returncode != 0:
             note = (f"magi-review !{mr_iid} exited {proc.returncode}: "

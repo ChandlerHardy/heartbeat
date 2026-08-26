@@ -26,6 +26,12 @@ class WorksweepConfig:
     # runner reaps an implement claim at implement_timeout + 15 min, so this
     # value also sets the stuck-claim window.
     implement_timeout: int = 5400
+    # 2026-08-26 (magi 0.2.4): unattended tribunals now run the rebuttal round
+    # mechanically instead of skipping it, so a healthy review takes 40-60 min
+    # where it used to take under 30. magi-review therefore gets its own budget
+    # rather than borrowing `runner_timeout` -- which is also address-feedback's,
+    # and that one is contractually inside the 45-minute reap window.
+    magi_timeout: int = 4500
     # M3.5 Task C: gate for the LLM digest-curation pass. Reuses claude_bin
     # (no separate curator_bin) -- both are just "claude" runs in a
     # subprocess, one against a checkout, one against the repo root.
@@ -72,6 +78,12 @@ def load_config(path: str | None = None) -> WorksweepConfig:
     except (TypeError, ValueError):
         raise RuntimeError(
             f"config runner.timeout_seconds must be an integer, got {timeout_raw!r}")
+    magi_raw = rn.get("magi_timeout", 4500)
+    try:
+        magi_timeout = int(magi_raw)
+    except (TypeError, ValueError):
+        raise RuntimeError(
+            f"config runner.magi_timeout must be an integer, got {magi_raw!r}")
     implement_raw = rn.get("implement_timeout", 5400)
     try:
         implement_timeout = int(implement_raw)
@@ -115,6 +127,7 @@ def load_config(path: str | None = None) -> WorksweepConfig:
         claude_bin=rn.get("claude_bin", "claude"),
         runner_timeout=runner_timeout,
         implement_timeout=implement_timeout,
+        magi_timeout=magi_timeout,
         curate=curate_raw,
         dev_boxes=tuple(dev_boxes_raw),
         stale_threshold=stale_threshold,

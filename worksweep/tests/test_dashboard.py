@@ -1,4 +1,4 @@
-import ast, http.client, json, os, re, sys, threading
+import ast, dataclasses, http.client, json, os, re, sys, threading
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 import pytest  # noqa: E402
 from worksweep import dashboard  # noqa: E402
@@ -2303,3 +2303,31 @@ def test_valid_actor_is_a_whitelist_of_one():
                     {"numbers": [1], "actor": True},
                     {"numbers": [1], "actor": "x" * 5000}, [1], None):
         assert dashboard._valid_actor(payload) == "", payload
+
+
+# --- the auto-approved re-review on the page (2026-08-26) -----------------
+
+def test_the_dashboard_shows_why_an_approved_review_needed_no_tick(serve_queue):
+    """An `approved` row nobody remembers ticking is alarming. The row has to
+    carry its own explanation, the same way the digest line does."""
+    from worksweep.runner import AUTO_MAGI_WHY
+    rec = _rec(13, status="approved")
+    rec = QueueRecord(number=13, first_seen=NOW, last_seen=NOW,
+                      item=dataclasses.replace(
+                          rec.item, id="magi:pb-www!3997@newsha123",
+                          why=AUTO_MAGI_WHY, status="approved"))
+    s, _ = serve_queue([rec])
+    status, _, body = s.request("GET", "/")
+    assert status == 200
+    html = body.decode("utf-8")
+    assert "post-feedback re-review (auto)" in html
+
+
+def test_an_auto_approved_row_offers_no_approve_checkbox(serve_queue):
+    """It is already approved -- a checkbox would invite a no-op tick, and
+    `is_actionable` is what keeps the page honest about that."""
+    from worksweep.runner import AUTO_MAGI_WHY
+    item = dataclasses.replace(_rec(13).item, id="magi:pb-www!3997@newsha123",
+                               why=AUTO_MAGI_WHY, status="approved")
+    assert dashboard.is_actionable(item) is False
+    assert dashboard.has_checkbox(item) is False

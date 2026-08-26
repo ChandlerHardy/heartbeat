@@ -21,10 +21,22 @@ STALE_RUNNING_MINUTES = 45
 # M4 Task G: an implement claim legitimately runs for `implement_timeout`
 # (90 min default), so it gets its own, longer reap window: timeout + 15 min.
 IMPLEMENT_REAP_GRACE_SECONDS = 900
+# 2026-08-26 (magi 0.2.4): the rebuttal round is no longer skipped for
+# unattended runs -- it is performed mechanically, adding up to ~36 min. A full
+# tribunal now legitimately takes 40-60 minutes, which does not fit the generic
+# 45-minute window, and reaping a healthy one both loses the work and
+# re-proposes it to burn another hour. Same treatment implement already gets:
+# its own budget, and a reap window that is that budget plus a grace margin.
+MAGI_TIMEOUT_SECONDS = 4500
+MAGI_REAP_GRACE_SECONDS = 900
 _ERROR_SUMMARY_MAX = 500
 _LOCK_DEFAULT = os.path.expanduser("~/.worksweep/runner.lock")
 _IMPLEMENT_LOCK_NAME = "runner-implement.lock"
 _ADDRESS_FEEDBACK_LOCK_NAME = "runner-address-feedback.lock"
+# The `why` on a row worksweep approved for itself. The trailing
+# "(auto)" is the marker the digest and the dashboard both render, so a
+# human can see the row was never ✅'d by hand.
+AUTO_MAGI_WHY = "post-feedback re-review (auto)"
 
 _MAGI = "magi-review"
 _IMPLEMENT = "implement"
@@ -135,20 +147,37 @@ def fail(records: List[QueueRecord], number: int, error_summary: str,
 
 
 def reap_stale(records: List[QueueRecord], now: str,
-               implement_timeout: int = 5400
+               implement_timeout: int = 5400,
+               magi_timeout: int = MAGI_TIMEOUT_SECONDS
                ) -> Tuple[List[QueueRecord], List[QueueRecord]]:
     """Flip `running` claims that outlived their executor's window to error.
 
-    Two windows, because the two executors have very different runtimes: 45
-    min for magi-review, `implement_timeout + 15 min` for implement. Using the
-    magi window for both would reap healthy implement runs mid-flight (and
-    then a second implement could claim the same dev box).
+    Three windows, because the executors have very different runtimes:
+
+      implement    `implement_timeout` + 15 min  (a 90-min /rubric:do run)
+      magi-review  `magi_timeout` + 15 min       (a 40-60 min full tribunal)
+      everything else            45 min          (short ops, one claude pass)
+
+    Each long-running executor gets a window WIDER than its own budget, so the
+    reap only ever catches a claim that is genuinely stuck rather than one
+    that is merely slow. Reaping a healthy run loses the work AND re-proposes
+    it, which for magi means burning another hour of tokens on the next fire.
+
+    The 45-minute default is deliberately kept for the rest: address-feedback
+    runs on `cfg.runner_timeout` specifically so it finishes inside that
+    window, and widening it would leave a stuck feedback claim sitting on its
+    branch for an extra half hour.
     """
     implement_limit = implement_timeout + IMPLEMENT_REAP_GRACE_SECONDS
+    magi_limit = magi_timeout + MAGI_REAP_GRACE_SECONDS
     updated, reaped = [], []
     for r in records:
-        limit = (implement_limit if r.item.executor == _IMPLEMENT
-                 else STALE_RUNNING_MINUTES * 60)
+        if r.item.executor == _IMPLEMENT:
+            limit = implement_limit
+        elif r.item.executor == _MAGI:
+            limit = magi_limit
+        else:
+            limit = STALE_RUNNING_MINUTES * 60
         if r.item.status == "running" and _stale(r.item.claimed_at, now, limit):
             nr = _replace(r, now, status="error",
                           error_summary="stale claim reaped")
@@ -261,6 +290,7 @@ def execute(item: WorkItem, cfg,
     if not os.path.isdir(checkout):
         raise RunnerError(f"no checkout for {item.repo} at {checkout}")
     iid = _iid_of(item)
+    timeout = _magi_timeout(cfg)
     try:
         fetch = run_subprocess(["git", "-C", checkout, "fetch", "origin"],
                                capture_output=True, text=True, timeout=120)
@@ -270,12 +300,16 @@ def execute(item: WorkItem, cfg,
         raise RunnerError(f"git fetch failed: {(fetch.stderr or '').strip()[-300:]}")
     try:
         proc = run_subprocess(
-            [cfg.claude_bin, "-p", f"/magi:magi-review !{iid} --draft-findings --no-rebuttal"],  # unattended: stage Warnings as pending drafts, never publish
+            # unattended: stage Warnings as pending drafts, never publish.
+            # `--no-rebuttal` is gone as of magi 0.2.4 -- the rebuttal round is
+            # performed mechanically now, and passing a flag it no longer
+            # defines is an unknown-argument error, not a no-op.
+            [cfg.claude_bin, "-p", f"/magi:magi-review !{iid} --draft-findings"],
             cwd=checkout, capture_output=True, text=True,
             stdin=subprocess.DEVNULL,  # claude -p blocks/exits 1 waiting on a non-TTY stdin
-            timeout=cfg.runner_timeout)
+            timeout=timeout)
     except subprocess.TimeoutExpired:
-        raise RunnerError(f"magi-review !{iid} exceeded {cfg.runner_timeout}s")
+        raise RunnerError(f"magi-review !{iid} exceeded {timeout}s")
     if proc.returncode != 0:
         tail = "\n".join((proc.stderr or proc.stdout or "").splitlines()[-15:])
         raise RunnerError(f"magi-review !{iid} exited {proc.returncode}: {tail}")
@@ -376,7 +410,8 @@ def _run_magi_pass(cfg, deps: Dict[str, Callable], lock_path: str) -> int:
         now = deps["now"]()
         records = deps["load"]()
         records, reaped = reap_stale(
-            records, now, implement_timeout=_implement_timeout(cfg))
+            records, now, implement_timeout=_implement_timeout(cfg),
+            magi_timeout=_magi_timeout(cfg))
         if reaped:
             deps["save"](records)
             for r in reaped:
@@ -555,12 +590,48 @@ def _run_address_feedback_claim(cfg, deps: Dict[str, Callable],
         return 1
     updated = _apply_to_fresh(
         deps, cfg, number,
-        lambda fresh: complete(fresh, number, result.result_sha, "",
-                               deps["now"]()))
+        lambda fresh: _chain_magi_review(
+            complete(fresh, number, result.result_sha, "", deps["now"]()),
+            target.item, result, deps["now"]()))
     if updated is not None:
         from . import feedback as _feedback   # local: feedback imports runner
         _post(deps, cfg, _clamped(_feedback.done_message(result)))
     return 0
+
+
+def _chain_magi_review(records: List[QueueRecord], item: WorkItem, result,
+                       now: str) -> List[QueueRecord]:
+    """Queue a magi review of the commits this feedback run just pushed.
+
+    Trigger is `addressed`, NOT a non-empty result_sha. Every completion
+    carries a sha -- reply-only runs report the head they read, and the
+    already-answered shortcut reports it before doing anything at all -- so
+    keying on the sha would queue a review of untouched code on every pass.
+    `addressed` counts threads fixed WITH a commit, and the executor's own
+    verification already refused to report those unless origin/<branch>
+    actually moved.
+
+    Pre-approved, which is the one sanctioned bypass of the ✅ gate: the
+    trigger is scoped to commits worksweep itself made, and magi-review is
+    read-only plus draft comments. Being a RUNNABLE executor, it is claimable
+    without a human step, so it cannot strand as an approved zombie.
+
+    Appended to the SAME list the completion just produced, so both reach disk
+    in one write: two saves would leave a window where the feedback row reads
+    `done` and the review it earned does not exist yet.
+    """
+    if not result.addressed or not result.result_sha:
+        return records
+    magi_id = f"magi:{item.repo}!{result.iid}@{result.result_sha}"
+    if any(r.item.id == magi_id for r in records):
+        return records      # same head already queued -- never stack a second
+    number = max((r.number for r in records), default=0) + 1
+    return list(records) + [QueueRecord(
+        number=number, first_seen=now, last_seen=now,
+        item=WorkItem(schema_version=1, id=magi_id, repo=item.repo, kind="mr",
+                      executor=_MAGI, risk="low", why=AUTO_MAGI_WHY,
+                      web_url=item.web_url, sha=result.result_sha,
+                      status="approved", title=item.title))]
 
 
 def _run_implement_pass(cfg, deps: Dict[str, Callable], lock_path: str) -> int:
@@ -647,6 +718,11 @@ def _run_implement_pass(cfg, deps: Dict[str, Callable], lock_path: str) -> int:
 
 def _implement_timeout(cfg) -> int:
     return int(getattr(cfg, "implement_timeout", 5400) or 5400)
+
+
+def _magi_timeout(cfg) -> int:
+    return int(getattr(cfg, "magi_timeout", MAGI_TIMEOUT_SECONDS)
+               or MAGI_TIMEOUT_SECONDS)
 
 
 def _implement_claim_message(iid: int, slot, branch: str) -> str:

@@ -507,3 +507,92 @@ def test_changes_requested_is_never_a_cleared_signal():
         discussions=lambda repo, iid: _threads("me"), queue=prior))
     row = {r.item.id: r for r in _saved(posts)}["feedback:pb-www!3997"]
     assert row.item.status != "done"
+
+
+# --- the chained re-review vs the next sweep (2026-08-26) ------------------
+#
+# The runner appends `magi:{repo}!{iid}@{sha}` as `approved`. The very next
+# sweep assesses the same MR at the same head, and assess_own_mr proposes a
+# magi item for exactly that sha -- so the two have to recognise each other.
+
+AUTO_WHY = "post-feedback re-review (auto)"
+
+
+def _chained_magi(number=13, iid=3997, sha=None, status="approved"):
+    from worksweep.models import QueueRecord, WorkItem
+    sha = sha or f"s{iid}"
+    return QueueRecord(
+        number=number, first_seen="2026-08-25T00:00:00+00:00",
+        last_seen="2026-08-25T00:00:00+00:00",
+        item=WorkItem(schema_version=1, id=f"magi:pb-www!{iid}@{sha}",
+                      repo="pb-www", kind="mr", executor="magi-review",
+                      risk="low", why=AUTO_WHY,
+                      web_url=f"https://gl/x/-/merge_requests/{iid}", sha=sha,
+                      status=status, title="Ranch data tab"))
+
+
+def _magi_rows(store):
+    return [r for r in _saved(store) if r.item.executor == "magi-review"]
+
+
+def test_the_next_sweep_does_not_queue_a_second_review_of_the_same_head():
+    """FALSIFYING. Without this the sweep proposes its own magi row for the
+    same sha every single pass."""
+    posts = []
+    run_sweep(_cfg(), _probe_deps(
+        posts, _gql(authored_nodes=[_authored()]),
+        discussions=lambda repo, iid: _threads("me"),
+        queue=[_chained_magi()]))
+    rows = _magi_rows(posts)
+    assert len(rows) == 1
+    assert rows[0].item.id == "magi:pb-www!3997@s3997"
+
+
+def test_the_auto_marker_survives_the_next_sweep():
+    """The row must still say how it got approved -- a sweep that rewrites
+    the why to "no magi-review yet" erases the only provenance there is."""
+    posts = []
+    run_sweep(_cfg(), _probe_deps(
+        posts, _gql(authored_nodes=[_authored()]),
+        discussions=lambda repo, iid: _threads("me"),
+        queue=[_chained_magi()]))
+    row = _magi_rows(posts)[0]
+    assert row.item.why == AUTO_WHY
+    assert row.item.status == "approved"       # and it is still claimable
+    assert row.number == 13                    # keeping its handle
+
+
+def test_a_running_review_also_suppresses_a_duplicate_proposal():
+    posts = []
+    run_sweep(_cfg(), _probe_deps(
+        posts, _gql(authored_nodes=[_authored()]),
+        discussions=lambda repo, iid: _threads("me"),
+        queue=[_chained_magi(status="running")]))
+    assert len(_magi_rows(posts)) == 1
+
+
+def test_a_new_head_still_earns_a_fresh_proposal():
+    """The guard is per-sha. A push after the review was queued is genuinely
+    unreviewed code and must propose its own row."""
+    posts = []
+    run_sweep(_cfg(), _probe_deps(
+        posts, _gql(authored_nodes=[_authored()]),
+        discussions=lambda repo, iid: _threads("me"),
+        queue=[_chained_magi(sha="olderhead")]))
+    ids = {r.item.id for r in _magi_rows(posts)}
+    assert "magi:pb-www!3997@s3997" in ids
+
+
+def test_a_proposed_magi_row_is_still_re_proposed_every_sweep():
+    """Only rows the queue RETAINS when they drop out (approved/running) may
+    suppress their own proposal. A `proposed` one would be dropped outright
+    and its number recycled."""
+    posts = []
+    run_sweep(_cfg(), _probe_deps(
+        posts, _gql(authored_nodes=[_authored()]),
+        discussions=lambda repo, iid: _threads("me"),
+        queue=[_chained_magi(status="proposed")]))
+    rows = _magi_rows(posts)
+    assert len(rows) == 1
+    assert rows[0].item.status == "proposed"
+    assert rows[0].number == 13

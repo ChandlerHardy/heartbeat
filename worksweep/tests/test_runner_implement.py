@@ -131,8 +131,11 @@ def test_implement_reap_uses_the_longer_window():
         return (datetime.datetime.fromisoformat(NOW)
                 - datetime.timedelta(minutes=minutes)).isoformat()
 
+    # #2 is keep-current rather than magi-review: since 2026-08-26 magi has a
+    # long window of its own, so it no longer contrasts with implement's.
     recs = [_rec(1, status="running", executor="implement", claimed_at=ago(60)),
-            _rec(2, status="running", executor="magi-review", claimed_at=ago(60)),
+            _rec(2, status="running", executor="keep-current",
+                 claimed_at=ago(60)),
             _rec(3, status="running", executor="implement", claimed_at=ago(106))]
     updated, reaped = reap_stale(recs, NOW, implement_timeout=5400)
     assert sorted(r.number for r in reaped) == [2, 3]

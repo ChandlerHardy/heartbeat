@@ -12,11 +12,13 @@ from worksweep.runner import RunnerError, execute, extract_verdict, find_report,
 NOW = "2026-08-07T12:00:00+00:00"
 
 
-def _cfg(tmp_path):
-    return WorksweepConfig(
+def _cfg(tmp_path, **kw):
+    base = dict(
         repos=("pb-www",), username="me",
         discord_webhook="https://discord.com/api/webhooks/x/y",
         checkouts_root=str(tmp_path), claude_bin="claude", runner_timeout=1800)
+    base.update(kw)
+    return WorksweepConfig(**base)
 
 
 def _approved(number=1):
@@ -55,7 +57,7 @@ def test_execute_invokes_fetch_then_claude(tmp_path):
     assert sha == "s1" and report.endswith("tribunal-report-mr-4020-2026-08-07.md")
     assert calls[0][0][:3] == ("git", "-C", str(tmp_path / "pb-www"))
     assert calls[1][0][0] == "claude"
-    assert "/magi:magi-review !4020 --draft-findings --no-rebuttal" in calls[1][0]
+    assert "/magi:magi-review !4020 --draft-findings" in calls[1][0]
     assert calls[1][1] == str(tmp_path / "pb-www")
 
 
@@ -294,3 +296,81 @@ def test_run_dry_run_never_saves_or_posts(monkeypatch, tmp_path, capsys):
     assert posted == []                                   # nothing reached Discord
     assert load_queue(qpath)[0].item.status == "approved"  # live queue untouched
     assert "dry-run" in capsys.readouterr().out
+
+
+# --- magi 0.2.4: the rebuttal round is mandatory now (2026-08-26) ----------
+#
+# Unattended runs used to skip rebuttal because there was nobody to wait for.
+# 0.2.4 performs it mechanically, so `--no-rebuttal` is gone -- and a full
+# tribunal that legitimately runs 40-60 minutes no longer fits the windows
+# that were sized for a 30-minute one.
+
+def test_the_magi_invocation_no_longer_suppresses_rebuttal(tmp_path):
+    """FALSIFYING: re-adding the flag fails here. Passing a flag magi 0.2.4
+    does not define is not a no-op -- it is an unknown-argument error, so
+    every unattended review would fail."""
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append((tuple(cmd), kw.get("cwd")))
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    (tmp_path / "pb-www").mkdir()
+    (tmp_path / "pb-www" / ".magi").mkdir()
+    (tmp_path / "pb-www" / ".magi" / "tribunal-report-mr-4020-2026-08-07.md"
+     ).write_text("## Verdict\nSHIP\n")
+    execute(_approved().item, _cfg(tmp_path), run_subprocess=fake_run)
+    prompt = calls[1][0][2]
+    assert prompt == "/magi:magi-review !4020 --draft-findings"
+    assert "--no-rebuttal" not in prompt
+
+
+def test_the_magi_run_gets_its_own_timeout_not_the_generic_one(tmp_path):
+    """A full tribunal with rebuttal runs 40-60 min. `cfg.runner_timeout` is
+    30 min AND is shared with address-feedback, whose own contract is that it
+    finishes inside the 45-minute reap window -- so magi cannot just borrow it."""
+    from worksweep.runner import MAGI_TIMEOUT_SECONDS
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append((tuple(cmd), kw))
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    (tmp_path / "pb-www").mkdir()
+    (tmp_path / "pb-www" / ".magi").mkdir()
+    (tmp_path / "pb-www" / ".magi" / "tribunal-report-mr-4020-2026-08-07.md"
+     ).write_text("## Verdict\nSHIP\n")
+    cfg = _cfg(tmp_path)
+    execute(_approved().item, cfg, run_subprocess=fake_run)
+    assert calls[1][1]["timeout"] == MAGI_TIMEOUT_SECONDS == 4500
+    assert calls[1][1]["timeout"] > cfg.runner_timeout
+
+
+def test_a_configured_magi_timeout_is_honoured(tmp_path):
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append((tuple(cmd), kw))
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    (tmp_path / "pb-www").mkdir()
+    (tmp_path / "pb-www" / ".magi").mkdir()
+    (tmp_path / "pb-www" / ".magi" / "tribunal-report-mr-4020-2026-08-07.md"
+     ).write_text("## Verdict\nSHIP\n")
+    execute(_approved().item, _cfg(tmp_path, magi_timeout=6000),
+            run_subprocess=fake_run)
+    assert calls[1][1]["timeout"] == 6000
+
+
+def test_the_timeout_message_names_the_magi_budget(tmp_path):
+    from worksweep.runner import MAGI_TIMEOUT_SECONDS
+
+    def fake_run(cmd, **kw):
+        if cmd[0] == "claude":
+            raise subprocess.TimeoutExpired(cmd, 4500)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    (tmp_path / "pb-www").mkdir()
+    with pytest.raises(RunnerError) as e:
+        execute(_approved().item, _cfg(tmp_path), run_subprocess=fake_run)
+    assert str(MAGI_TIMEOUT_SECONDS) in str(e.value)

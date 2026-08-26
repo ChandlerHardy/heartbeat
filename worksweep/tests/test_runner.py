@@ -39,8 +39,12 @@ def test_reap_stale_running():
            - datetime.timedelta(minutes=46)).isoformat()
     fresh = (datetime.datetime.fromisoformat(NOW)
              - datetime.timedelta(minutes=10)).isoformat()
-    recs = [_rec(1, status="running", claimed_at=old),
-            _rec(2, status="running", claimed_at=fresh)]
+    # keep-current, not magi-review: magi runs on its own (much wider) window
+    # as of 2026-08-26, so it is no longer the executor that demonstrates the
+    # generic 45-minute one.
+    recs = [_rec(1, status="running", executor="keep-current", claimed_at=old),
+            _rec(2, status="running", executor="keep-current",
+                 claimed_at=fresh)]
     updated, reaped = reap_stale(recs, NOW)
     assert [r.number for r in reaped] == [1]
     assert updated[0].item.status == "error"
@@ -122,3 +126,72 @@ def test_acquire_lock_tolerates_vanishing_lock_file(tmp_path):
     with open(p) as f:
         assert int(f.read().strip()) == os.getpid()
     release_lock(p)
+
+
+# --- magi 0.2.4 reap window (2026-08-26) -----------------------------------
+#
+# The generic 45-minute window was sized for a rebuttal-less tribunal. With
+# the rebuttal round mandatory a healthy run can take an hour, and reaping it
+# mid-flight both loses the work and re-proposes it to run again.
+
+def _at(minutes):
+    import datetime
+    base = datetime.datetime.fromisoformat("2026-08-26T12:00:00+00:00")
+    return (base + datetime.timedelta(minutes=minutes)).isoformat()
+
+
+def _running(number, executor, claimed_at):
+    return QueueRecord(
+        number=number, first_seen=_at(0), last_seen=_at(0),
+        item=WorkItem(schema_version=1, id=f"x{number}", repo="pb-www",
+                      kind="mr", executor=executor, risk="low", why="w",
+                      web_url="u", sha="s", status="running",
+                      claimed_at=claimed_at))
+
+
+def test_the_magi_reap_window_is_wider_than_the_magi_timeout():
+    """FALSIFYING for the whole relationship: a reap at or below the run's own
+    budget kills healthy tribunals, and the item is then re-proposed and runs
+    again -- an hour of tokens per cycle, forever."""
+    from worksweep.runner import (MAGI_REAP_GRACE_SECONDS,
+                                  MAGI_TIMEOUT_SECONDS, STALE_RUNNING_MINUTES)
+    assert MAGI_TIMEOUT_SECONDS > STALE_RUNNING_MINUTES * 60
+    assert MAGI_REAP_GRACE_SECONDS > 0
+    assert MAGI_TIMEOUT_SECONDS + MAGI_REAP_GRACE_SECONDS > MAGI_TIMEOUT_SECONDS
+
+
+def test_a_healthy_hour_long_tribunal_is_not_reaped():
+    """50 minutes in: over the old 45-minute window, well inside its own."""
+    from worksweep.runner import reap_stale
+    recs = [_running(1, "magi-review", _at(0))]
+    updated, reaped = reap_stale(recs, _at(50))
+    assert reaped == []
+    assert updated[0].item.status == "running"
+
+
+def test_a_genuinely_stuck_tribunal_is_still_reaped():
+    from worksweep.runner import reap_stale
+    recs = [_running(1, "magi-review", _at(0))]
+    updated, reaped = reap_stale(recs, _at(95))
+    assert [r.number for r in reaped] == [1]
+    assert updated[0].item.status == "error"
+
+
+def test_the_wider_window_is_magis_alone():
+    """address-feedback deliberately runs on cfg.runner_timeout INSIDE the
+    45-minute window -- widening magi must not widen that too, or a stuck
+    feedback claim sits for an extra half hour holding its branch."""
+    from worksweep.runner import reap_stale
+    recs = [_running(1, "magi-review", _at(0)),
+            _running(2, "address-feedback", _at(0)),
+            _running(3, "keep-current", _at(0)),
+            _running(4, "park", _at(0))]
+    _, reaped = reap_stale(recs, _at(50))
+    assert sorted(r.number for r in reaped) == [2, 3, 4]
+
+
+def test_a_configured_magi_timeout_moves_the_reap_window_with_it():
+    from worksweep.runner import reap_stale
+    recs = [_running(1, "magi-review", _at(0))]
+    _, reaped = reap_stale(recs, _at(95), magi_timeout=6000)
+    assert reaped == []
