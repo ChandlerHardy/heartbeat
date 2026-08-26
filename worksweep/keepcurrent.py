@@ -116,6 +116,23 @@ def execute(item: WorkItem, cfg, boxes: Sequence[dict],
     if not branch:
         raise RunnerError(f"no source branch recorded for !{iid} "
                           f"(WorkItem.branch was not set by assess_stale)")
+    try:
+        return _execute_in(item, cfg, boxes, checkout, iid, branch,
+                           run_subprocess, run_ssh_probe, run_ssh, http_get)
+    finally:
+        # This worktree is permanent, so holding the branch after the merge
+        # blocks any LATER executor that wants it in a different worktree.
+        # That is not hypothetical: this executor is what stranded
+        # refactor/1681-... and killed the first address-feedback run
+        # (2026-08-26). Best-effort and last -- tidying up must never become
+        # the reported outcome.
+        checkouts.detach(checkout, run_subprocess)
+
+
+def _execute_in(item: WorkItem, cfg, boxes: Sequence[dict], checkout: str,
+                iid: int, branch: str, run_subprocess: Callable,
+                run_ssh_probe: Callable, run_ssh: Callable,
+                http_get: Callable) -> KeepCurrentResult:
 
     # review fix I4: this worktree is reused run over run -- a prior claim
     # that timed out mid-merge, or crashed mid-compile, can leave it with a
@@ -127,7 +144,8 @@ def execute(item: WorkItem, cfg, boxes: Sequence[dict],
 
     _git(run_subprocess, checkout, ["fetch", "origin", "master", branch],
         timeout=_FETCH_TIMEOUT)
-    _git(run_subprocess, checkout, ["checkout", "-B", branch, f"origin/{branch}"])
+    checkouts.checkout_branch(cfg, checkout, branch, f"origin/{branch}",
+                              run_subprocess)
     pre = _git(run_subprocess, checkout, ["rev-parse", "HEAD"]).strip()
     try:
         ahead = int(_git(run_subprocess, checkout,

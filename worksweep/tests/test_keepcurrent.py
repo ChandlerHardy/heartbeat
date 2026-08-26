@@ -575,3 +575,48 @@ def test_every_subprocess_gets_devnull_stdin(tmp_path):
     for cmd, kw in edges.calls:
         assert kw.get("stdin") is subprocess.DEVNULL, \
             f"{cmd[0]} {cmd[1:3]} was spawned without stdin=DEVNULL"
+
+
+# --- letting go of the branch (2026-08-26 live failure) --------------------
+#
+# keep-current is the executor that CAUSED the live failure: it merged
+# refactor/1681-… days earlier and its worktree still held the branch, so the
+# first address-feedback run could not check it out at all.
+
+def _detaches(edges):
+    return [c for c, _ in edges.calls if "checkout" in c and "--detach" in c]
+
+
+def test_a_finished_merge_lets_go_of_the_branch(tmp_path):
+    _, edges = _run_execute(tmp_path)
+    assert len(_detaches(edges)) == 1
+    assert edges.calls[-1][0] == _detaches(edges)[0]
+
+
+def test_a_failed_merge_lets_go_too(tmp_path):
+    """The abort path is exactly the one that stranded the branch: a conflict
+    outside the auto-resolve classes leaves the worktree on that branch."""
+    edges = _Edges(merge_rc=1, conflict_files="app/Models/Ranch.php\n")
+    with pytest.raises(RunnerError):
+        _run_execute(tmp_path, edges=edges)
+    assert len(_detaches(edges)) == 1
+
+
+def test_a_failing_detach_never_masks_the_merge_result(tmp_path):
+    (tmp_path / "pb-www").mkdir(exist_ok=True)
+    edges = _Edges()
+    edges.checkout = str(_worktree(tmp_path))
+    real_run = edges.run
+
+    def run(cmd, **kw):
+        # only the release form -- `worktree add --detach` also carries the
+        # flag, and that one has to keep working
+        if "checkout" in list(cmd) and "--detach" in list(cmd):
+            edges.calls.append((list(cmd), kw))
+            raise OSError("git: cannot detach")
+        return real_run(cmd, **kw)
+
+    result = execute(_item(), _cfg(tmp_path), _BOXES, run_subprocess=run,
+                     run_ssh_probe=edges.ssh, run_ssh=edges.ssh,
+                     http_get=edges.http)
+    assert result.iid == 4020

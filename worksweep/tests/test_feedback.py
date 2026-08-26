@@ -906,3 +906,117 @@ def test_a_reviewer_cannot_ping_the_channel_through_an_escalation():
         "t1")
     assert "http://" not in line and "https://" not in line
     assert "[" not in line and "]" not in line and "`" not in line
+
+
+# --- letting go of the branch (2026-08-26 live failure) --------------------
+#
+# The worktrees are permanent. A run that leaves its branch checked out here
+# blocks every later executor that wants the same branch in a DIFFERENT
+# worktree -- which is how the first live run died.
+
+def _detaches(sub):
+    return [c for c in sub.calls if "checkout" in c and "--detach" in c]
+
+
+def test_a_finished_run_lets_go_of_the_branch(tmp_path, worktree):
+    sub = _Subprocess(worktree, report=_report(replied=["t1"]))
+    glab = _Glab(_payload(_thread("t1")), _payload(_thread("t1", last=ME)))
+    feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                     run_glab=glab, now=lambda: RUN_START)
+    assert len(_detaches(sub)) == 1
+    assert _detaches(sub)[0][:3] == ["git", "-C", worktree]
+    assert sub.calls[-1] == _detaches(sub)[0]      # last thing it ever does
+
+
+def test_a_failed_run_lets_go_too(tmp_path, worktree):
+    """The failure paths are the ones that matter: an errored run that kept
+    the branch would block the retry it is about to be given."""
+    sub = _Subprocess(worktree, report=_report(replied=["t1"]))
+    glab = _Glab(_payload(_thread("t1")), _payload(_thread("t1")))
+    with pytest.raises(RunnerError):
+        feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                         run_glab=glab, now=lambda: RUN_START)
+    assert len(_detaches(sub)) == 1
+
+
+def test_an_escalating_run_lets_go_too(tmp_path, worktree):
+    sub = _Subprocess(worktree, report=_report(
+        escalated=[{"thread": "t1", "reason": "product call"}]))
+    glab = _Glab(_payload(_thread("t1")), _payload(_thread("t1")))
+    with pytest.raises(NeedsInputError):
+        feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                         run_glab=glab, now=lambda: RUN_START)
+    assert len(_detaches(sub)) == 1
+
+
+def test_the_already_answered_shortcut_lets_go_too(tmp_path, worktree):
+    sub = _Subprocess(worktree)
+    glab = _Glab(_payload(_thread("t1", last=ME)))
+    feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                     run_glab=glab, now=lambda: RUN_START)
+    assert len(_detaches(sub)) == 1
+
+
+def test_a_failing_detach_never_masks_the_runs_own_result(tmp_path, worktree):
+    """Tidying up is not allowed to become the outcome. A run that succeeded
+    reports success even if the worktree refuses to let go."""
+    class _StuckDetach(_Subprocess):
+        def __call__(self, cmd, **kw):
+            if "--detach" in cmd:
+                self.calls.append(list(cmd))
+                raise OSError("git: cannot detach")
+            return super().__call__(cmd, **kw)
+
+    sub = _StuckDetach(worktree, report=_report(replied=["t1"]))
+    glab = _Glab(_payload(_thread("t1")), _payload(_thread("t1", last=ME)))
+    result = feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                              run_glab=glab, now=lambda: RUN_START)
+    assert result.replied == 1
+
+
+def test_a_failing_detach_never_masks_a_real_failure(tmp_path, worktree):
+    class _StuckDetach(_Subprocess):
+        def __call__(self, cmd, **kw):
+            if "--detach" in cmd:
+                self.calls.append(list(cmd))
+                raise OSError("git: cannot detach")
+            return super().__call__(cmd, **kw)
+
+    sub = _StuckDetach(worktree, report=_report(replied=["t1"]))
+    glab = _Glab(_payload(_thread("t1")), _payload(_thread("t1")))
+    with pytest.raises(RunnerError) as e:
+        feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                         run_glab=glab, now=lambda: RUN_START)
+    assert "did not post a reply" in str(e.value)     # not "cannot detach"
+
+
+def test_a_branch_held_by_a_sibling_worktree_is_recovered(tmp_path, worktree):
+    """The live failure, end to end: keep-current's worktree still holds the
+    branch, it is clean, so feedback takes it back instead of erroring."""
+    holder = tmp_path / ".worktrees" / "pb-www-keep-current"
+    holder.mkdir(parents=True)
+    seen = {"released": False}
+
+    class _Held(_Subprocess):
+        def __call__(self, cmd, **kw):
+            c = list(cmd)
+            if "checkout" in c and "--detach" in c and str(holder) in c:
+                seen["released"] = True
+                self.calls.append(c)
+                return _Proc(0)
+            if c[3:4] == ["checkout"] and "-B" in c and not seen["released"]:
+                self.calls.append(c)
+                return _Proc(128, "", f"fatal: '{BRANCH}' is already used by "
+                                      f"worktree at '{holder}'\n")
+            if c[3:5] == ["worktree", "list"]:
+                self.calls.append(c)
+                return _Proc(0, f"worktree {holder}\nHEAD abc\n"
+                                f"branch refs/heads/{BRANCH}\n")
+            return super().__call__(cmd, **kw)
+
+    sub = _Held(worktree, report=_report(replied=["t1"]))
+    glab = _Glab(_payload(_thread("t1")), _payload(_thread("t1", last=ME)))
+    result = feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                              run_glab=glab, now=lambda: RUN_START)
+    assert seen["released"] is True
+    assert result.replied == 1

@@ -757,3 +757,52 @@ def test_issue_iid_still_raises_when_there_is_no_iid_anywhere():
                     web_url="https://gitlab.com/dashboard/todos", sha="", title="t")
     with pytest.raises(RunnerError):
         implementer.issue_iid(item)
+
+
+# --- letting go of the branch (2026-08-26 live failure) --------------------
+#
+# implement holds a branch for 90 minutes and its worktree is permanent, so a
+# finished run that keeps the branch blocks keep-current and address-feedback
+# from ever touching that MR again.
+
+def _detaches(edges):
+    return [c for c, _ in edges.calls if "checkout" in c and "--detach" in c]
+
+
+def test_a_finished_implement_lets_go_of_the_branch(tmp_path):
+    _, edges = _run_execute(tmp_path)
+    assert len(_detaches(edges)) == 1
+    assert edges.calls[-1][0] == _detaches(edges)[0]
+
+
+def test_a_halted_implement_lets_go_too(tmp_path):
+    """A halt parks the item on a human answer -- possibly for days. Holding
+    the branch that whole time is exactly the stranding this fixes."""
+    edges = _Edges(do_out="HALT_SPEC_AMBIGUITY: which tab?")
+    with pytest.raises(NeedsInputError):
+        _run_execute(tmp_path, edges=edges)
+    assert len(_detaches(edges)) == 1
+
+
+def test_a_failed_implement_lets_go_too(tmp_path):
+    edges = _Edges(do_rc=1)
+    with pytest.raises(RunnerError):
+        _run_execute(tmp_path, edges=edges)
+    assert len(_detaches(edges)) == 1
+
+
+def test_a_failing_detach_never_masks_the_implement_result(tmp_path):
+    (tmp_path / "pb-www").mkdir(exist_ok=True)
+    edges = _Edges()
+    edges.checkout = str(_worktree(tmp_path))
+    real_run = edges.run
+
+    def run(cmd, **kw):
+        if "checkout" in list(cmd) and "--detach" in list(cmd):
+            edges.calls.append((list(cmd), kw))
+            raise OSError("git: cannot detach")
+        return real_run(cmd, **kw)
+
+    result = execute(_item(), _cfg(tmp_path), [_box()], run_subprocess=run,
+                     run_ssh=edges.ssh, http_get=edges.http)
+    assert result.mr_iid == 42

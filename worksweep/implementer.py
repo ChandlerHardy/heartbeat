@@ -391,6 +391,21 @@ def execute(item: WorkItem, cfg, boxes: Sequence[DevBox],
     slot = select_slot(boxes)
     if slot is None:
         raise RunnerError("no dev slot available — free one or reclaim")
+    try:
+        return _execute_in(item, cfg, checkout, iid, slot,
+                           run_subprocess, run_ssh, http_get)
+    finally:
+        # This worktree is permanent and this executor holds a branch for 90
+        # minutes -- or indefinitely, when a halt parks the item on a human
+        # answer. Keeping it checked out afterwards blocks keep-current and
+        # address-feedback from ever touching that MR again (2026-08-26).
+        # Best-effort and last: never let tidying up become the outcome.
+        checkouts.detach(checkout, run_subprocess)
+
+
+def _execute_in(item: WorkItem, cfg, checkout: str, iid: int, slot,
+                run_subprocess: Callable, run_ssh: Callable,
+                http_get: Callable) -> ImplementResult:
     if getattr(cfg, "pipeline_command", ""):
         return _execute_pipeline(cfg, iid, slot, checkout,
                                  run_subprocess, http_get)
@@ -402,10 +417,11 @@ def execute(item: WorkItem, cfg, boxes: Sequence[DevBox],
     if remote.strip():
         # Reuse the existing branch (a re-run after a halt/fix) — never reset
         # it onto master, that would discard the human's or a prior run's work.
-        _git(run_subprocess, checkout, ["checkout", branch])
+        checkouts.checkout_branch(cfg, checkout, branch, None, run_subprocess)
         _git(run_subprocess, checkout, ["pull", "--ff-only", "origin", branch])
     else:
-        _git(run_subprocess, checkout, ["checkout", "-B", branch, "origin/master"])
+        checkouts.checkout_branch(cfg, checkout, branch, "origin/master",
+                                  run_subprocess)
 
     # --- the long pole: full Ferdinand ceremony via /rubric:do -------------
     try:

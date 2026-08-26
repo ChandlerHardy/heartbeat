@@ -283,6 +283,20 @@ def execute(item: WorkItem, cfg,
                           f"(WorkItem.branch was not set by the assessor)")
 
     checkout = checkouts.worktree_for(cfg, item.repo, EXECUTOR, run_subprocess)
+    try:
+        return _execute_in(item, cfg, checkout, iid, branch, run_subprocess,
+                           run_glab, now)
+    finally:
+        # These worktrees are permanent, so a run that keeps its branch
+        # checked out blocks the NEXT executor that wants the same branch in a
+        # different worktree -- the failure that took out the first live run.
+        # Best-effort and last: it must never replace this run's own outcome.
+        checkouts.detach(checkout, run_subprocess)
+
+
+def _execute_in(item: WorkItem, cfg, checkout: str, iid: int, branch: str,
+                run_subprocess: Callable, run_glab: Callable,
+                now: Callable[[], str]) -> FeedbackResult:
     # Reused worktree: a claim that timed out mid-run can leave it dirty, and
     # can leave its own report file behind. Both are wiped here, so nothing
     # from a previous run can be mistaken for this one's work.
@@ -292,8 +306,8 @@ def execute(item: WorkItem, cfg,
 
     _git(run_subprocess, checkout, ["fetch", "origin", branch],
          timeout=_FETCH_TIMEOUT)
-    _git(run_subprocess, checkout, ["checkout", "-B", branch,
-                                    f"origin/{branch}"])
+    checkouts.checkout_branch(cfg, checkout, branch, f"origin/{branch}",
+                              run_subprocess)
     pre_refs = _ls_remote(run_subprocess, checkout)
 
     # The sweep's snapshot is minutes to hours old. Ask GitLab again: the
