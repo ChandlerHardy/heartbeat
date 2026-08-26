@@ -390,3 +390,85 @@ def test_collect_discussions_pages_through_glab():
         pages = collect_discussions("pb-www", 3997)
     assert [c.rsplit("&page=", 1)[1] for c in calls] == ["1", "2"]
     assert len(parse_threads(pages)) == 102
+
+
+# --- access-token bots are not reviewers (live finding, !4082) -------------
+#
+# Chandler ran an `@coderabbitai` command on a thread; CodeRabbit auto-replied
+# as `group2846274botbb6bad6ee97bbb14c73a6e3e39ff610d`. That reply became the
+# thread's last non-system note, so the thread read as "waiting on Chandler",
+# the run correctly refused to answer a bot, and the row parked needs-input
+# over pure noise.
+
+BOT = "group2846274botbb6bad6ee97bbb14c73a6e3e39ff610d"
+
+
+def _thread(tid, *authors):
+    """A resolvable, unresolved thread whose notes are `authors` in order."""
+    return {"id": tid, "notes": [_note(a, f"{a} said something")
+                                 for a in authors]}
+
+
+def test_a_bot_reply_after_my_own_does_not_make_a_thread_unaddressed():
+    """The live case, exactly: reviewer asks, Chandler answers and summons
+    CodeRabbit, CodeRabbit replies. Nobody is waiting on him."""
+    raw = json.dumps([_thread("t1", "leyang", "chandler.hardy", BOT)])
+    assert unaddressed_threads(raw, "chandler.hardy") == ()
+
+
+def test_a_bot_reply_after_a_reviewers_still_leaves_it_unaddressed():
+    """Walking back past the bot finds the reviewer, who IS still waiting."""
+    raw = json.dumps([_thread("t1", "chandler.hardy", "leyang", BOT)])
+    assert tuple(t.id for t in unaddressed_threads(raw, "chandler.hardy")) \
+        == ("t1",)
+
+
+def test_a_thread_of_nothing_but_bot_notes_is_nobodys_question():
+    raw = json.dumps([_thread("t1", BOT, BOT)])
+    assert unaddressed_threads(raw, "chandler.hardy") == ()
+
+
+def test_the_last_word_skips_the_bot_so_escalations_quote_a_human():
+    """`last_author`/`last_note` feed the prompt and the Discord escalation
+    line. Quoting a bot's auto-reply back at Chandler is noise."""
+    raw = json.dumps([_thread("t1", "chandler.hardy", "leyang", BOT)])
+    t = parse_threads(raw)[0]
+    assert t.last_author == "leyang"
+    assert t.last_note == "leyang said something"
+
+
+def test_the_bot_notes_are_still_carried_for_verification():
+    """Only the LAST-WORD calculation ignores them -- the note list itself is
+    what proves which replies this run posted, and must stay complete."""
+    raw = json.dumps([_thread("t1", "leyang", BOT)])
+    t = parse_threads(raw)[0]
+    assert [n.author for n in t.notes] == ["leyang", BOT]
+
+
+def test_every_access_token_bot_shape_is_recognised():
+    from worksweep.collectors import _is_bot
+    for name in (BOT, "group2846274bot", "group_284_bot", "project123bot",
+                 "project_9_bot_deadbeef", "GROUP12BOTX"):
+        assert _is_bot(name) is True, name
+
+
+def test_a_mere_bot_substring_is_never_filtered():
+    """Too broad a filter silently drops real review feedback, which is far
+    worse than the noise it removes. Only GitLab's access-token shape counts."""
+    from worksweep.collectors import _is_bot
+    for name in ("leyang_bot", "robot", "botond", "dependabot", "bot",
+                 "chandler.hardy", "abbot", "group_bot", "botgroup284"):
+        assert _is_bot(name) is False, name
+
+
+def test_a_human_named_like_a_bot_still_gets_answered():
+    raw = json.dumps([_thread("t1", "chandler.hardy", "dependabot")])
+    assert tuple(t.id for t in unaddressed_threads(raw, "chandler.hardy")) \
+        == ("t1",)
+
+
+def test_a_system_note_after_a_bot_note_changes_nothing():
+    raw = json.dumps([{"id": "t1", "notes": [
+        _note("leyang"), _note("chandler.hardy"), _note(BOT),
+        _note("gitlab", system=True)]}])
+    assert unaddressed_threads(raw, "chandler.hardy") == ()

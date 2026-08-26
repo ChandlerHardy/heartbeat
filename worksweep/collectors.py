@@ -7,6 +7,7 @@ shiplog/collectors.py.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import urllib.parse
@@ -200,6 +201,22 @@ def _pages(raw) -> list:
     return [raw] if isinstance(raw, (str, bytes)) else list(raw or [])
 
 
+# GitLab names a project/group access token's identity `group<id>bot<hash>`
+# (or `project_<id>_bot...`). Those accounts post as themselves when an
+# integration answers -- CodeRabbit replying to Chandler's own @coderabbitai
+# command is the case that found this -- and their reply is not a person
+# waiting for one back.
+#
+# Anchored to that exact shape, deliberately. A loose "bot" substring would
+# swallow `dependabot`, `leyang_bot` and anyone called `botond`, and silently
+# dropping real review feedback is far worse than the noise it removes.
+_BOT_USERNAME_RE = re.compile(r"^(group|project)_?\d+_?bot", re.I)
+
+
+def _is_bot(username: str) -> bool:
+    return bool(_BOT_USERNAME_RE.match(username or ""))
+
+
 def parse_threads(raw_json) -> tuple:
     """Every discussion on an MR as a ReviewThread, across every page given.
     Malformed payload -> ().
@@ -217,7 +234,15 @@ def parse_threads(raw_json) -> tuple:
             continue
         notes = [n for n in (d.get("notes") or []) if isinstance(n, dict)]
         resolvable_notes = [n for n in notes if n.get("resolvable")]
-        human = [n for n in notes if not n.get("system")]
+        # The "last word" ignores BOTH GitLab's own system notes and
+        # access-token bots: neither is a person waiting on a reply, and
+        # letting either hold it makes a settled thread look open. The full
+        # note list below still carries them -- it is what proves which
+        # replies this run actually posted.
+        human = [n for n in notes
+                 if not n.get("system")
+                 and not _is_bot(((n.get("author") or {}) or {})
+                                 .get("username", ""))]
         last = human[-1] if human else None
         resolved_by = ""
         for n in notes:
@@ -254,8 +279,12 @@ def unaddressed_threads(raw_json, username: str) -> tuple:
       and this is the whole class the old `unresolved_count` signal nagged
       about forever.
 
-    A thread with no human note at all (`last_author == ""`, e.g. nothing but
-    GitLab's own "added 1 commit") is nobody's question and is excluded too.
+    "Last non-system note" also skips access-token bots (see _is_bot): an
+    integration answering on the thread is not a reviewer waiting on Chandler,
+    and treating it as one parked a row on pure noise (!4082).
+
+    A thread with no such note at all (`last_author == ""` -- nothing but
+    system notes, bot chatter, or both) is nobody's question and is excluded.
     """
     return tuple(t for t in parse_threads(raw_json)
                  if t.resolvable and not t.resolved

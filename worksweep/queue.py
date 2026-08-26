@@ -34,6 +34,14 @@ _NEEDS_INPUT = "needs-input"
 _WHY_SENSITIVE = ("address-feedback",)
 # Resolution reasons strong enough to close an already-`error` row rather than
 # retain it. Deliberately narrow: only "the signal is provably gone".
+#
+# `needs-input` needs no entry here and must not gain one: it is NOT in
+# _TERMINAL, so the ordinary resolution branch below already closes it. That
+# matters -- a question parked on threads that have since settled (a reviewer
+# answered, Chandler answered by hand, or the bot filter landed) is asking
+# something nobody can act on, and would otherwise sit on the dashboard
+# forever. Adding `needs-input` to _TERMINAL would silently re-strand it,
+# which is what test_a_parked_question_closes_when_its_signal_clears guards.
 _CLOSES_AN_ERROR = ("signal-cleared",)
 _COMPACT_AFTER_DAYS = 90
 

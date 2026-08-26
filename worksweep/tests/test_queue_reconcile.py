@@ -272,3 +272,75 @@ def test_an_auto_approved_row_re_proposed_at_a_new_sha_reports_the_reset():
     out = reconcile(prior, fresh, NOW, resets=resets)
     assert out[0].item.status == "proposed"
     assert resets == {13}
+
+
+# --- a parked question whose signal went away (live finding, !4082) --------
+#
+# Round 2 taught reconcile to close a stranded `error` row when the MR's
+# signal fully clears. A `needs-input` row strands in exactly the same way,
+# and the bot-noise fix creates that case on purpose: the row was parked on
+# threads that are no longer unaddressed, so the question it is asking has
+# already stopped being a question.
+
+def _parked(number=3, status="needs-input", summary="2 threads need your call"):
+    return QueueRecord(
+        number=number, first_seen=NOW, last_seen=NOW,
+        item=WorkItem(schema_version=1, id="feedback:pb-www!4082",
+                      repo="pb-www", kind="feedback",
+                      executor="address-feedback", risk="low",
+                      why="2 unaddressed threads",
+                      web_url="https://gl/x/-/merge_requests/4082", sha="s1",
+                      status=status, error_summary=summary,
+                      branch="chardy/1588-ranch-data"))
+
+
+def test_a_parked_question_closes_when_its_signal_clears():
+    """Nobody can answer a question about threads that are already settled --
+    it just sits on the dashboard asking forever."""
+    out = reconcile([_parked()], [], NOW,
+                    resolved={"feedback:pb-www!4082": "signal-cleared"})
+    assert out[0].item.status == "done"
+    assert out[0].item.done_reason == "signal-cleared"
+    assert out[0].number == 3
+
+
+def test_a_parked_question_whose_signal_persists_stays_parked():
+    """FALSIFYING the other direction: closing a live question would drop a
+    real ask on the floor. Only a PROVABLY cleared signal closes it."""
+    out = reconcile([_parked()], [], NOW, resolved={})
+    assert out[0].item.status == "needs-input"
+    assert out[0].item.error_summary == "2 threads need your call"
+
+
+def test_a_parked_question_still_being_emitted_stays_parked():
+    """The sweep still proposes this id, so the threads are still waiting.
+    A halted row must never be re-proposed out from under its question."""
+    fresh = [_parked().item]
+    out = reconcile([_parked()], fresh, NOW, resolved={})
+    assert out[0].item.status == "needs-input"
+
+
+def test_another_resolution_reason_leaves_a_parked_question_alone():
+    """Scoped as narrowly as the error case: `handed-off` keeps the existing
+    behaviour, which flips it done through the ordinary path."""
+    out = reconcile([_parked()], [], NOW,
+                    resolved={"feedback:pb-www!4082": "handed-off"})
+    assert out[0].item.status == "done"
+    assert out[0].item.done_reason == "handed-off"
+
+
+def test_a_cleared_signal_still_leaves_a_live_claim_alone():
+    """Unchanged from round 2, re-pinned because the branch now has two
+    statuses to route: the run itself is what clears the signal."""
+    out = reconcile([_parked(status="running")], [], NOW,
+                    resolved={"feedback:pb-www!4082": "signal-cleared"})
+    assert out[0].item.status == "running"
+
+
+def test_a_cleared_signal_closes_an_unspent_approval_too():
+    """An `approved` row whose signal went away is work that no longer needs
+    doing -- it closes through the ordinary resolution path, unchanged."""
+    out = reconcile([_parked(status="approved")], [], NOW,
+                    resolved={"feedback:pb-www!4082": "signal-cleared"})
+    assert out[0].item.status == "done"
+    assert out[0].item.done_reason == "signal-cleared"
