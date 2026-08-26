@@ -1124,3 +1124,66 @@ def test_the_commit_check_still_reads_the_branch_through_the_noise(tmp_path,
         feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
                          run_glab=glab, now=lambda: RUN_START)
     assert "never moved" in str(e.value)
+
+
+# --- bot chatter never reaches the run (live finding, !4082) ---------------
+#
+# The sweep filter alone is not enough: the executor re-reads the threads at
+# run time, so a bot reply landing between sweep and run would still put a
+# thread nobody can answer in front of the model.
+
+BOT_USER = "group2846274botbb6bad6ee97bbb14c73a6e3e39ff610d"
+
+
+def _bot_thread(tid):
+    """Reviewer asks, Chandler answers and summons CodeRabbit, it replies."""
+    return {"id": tid, "notes": [
+        _tnote("leyang", f"question on {tid}"),
+        _tnote(ME, "@coderabbitai review this", created_at=BEFORE_RUN),
+        _tnote(BOT_USER, "Sure! Here is my analysis...",
+               created_at=BEFORE_RUN)]}
+
+
+def test_a_bot_answered_thread_is_treated_as_already_answered(tmp_path,
+                                                              worktree):
+    """The whole live failure in one test: this used to reach the run, get
+    correctly refused as unanswerable, and park the row needs-input."""
+    sub = _Subprocess(worktree)
+    glab = _Glab(_payload(_bot_thread("t1")))
+    result = feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                              run_glab=glab, now=lambda: RUN_START)
+    assert result.already_answered is True
+    assert result.escalated == ()
+    assert sub.ran("claude") == []          # no run at all, nothing to answer
+
+
+def test_a_bot_reply_arriving_mid_flight_is_filtered_at_run_time(tmp_path,
+                                                                 worktree):
+    """The sweep saw a real question; by the time the runner fired, Chandler
+    had answered it by hand and a bot had piled on."""
+    sub = _Subprocess(worktree, report=_report(replied=["t2"]))
+    before = _payload(_bot_thread("t1"), _waiting("t2"))
+    after = _payload(_bot_thread("t1"), _answered("t2"))
+    result = feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                              run_glab=_Glab(before, after),
+                              now=lambda: RUN_START)
+    assert result.waiting == 1              # only t2 was ever waiting
+    assert result.replied == 1
+    assert result.escalated == ()
+    prompt = [c for c in sub.calls if c[0] == "claude"][0][2]
+    assert "t2" in prompt and "t1" not in prompt
+
+
+def test_a_real_reviewer_after_a_bot_still_reaches_the_run(tmp_path, worktree):
+    """The filter must not eat a reviewer who speaks after the bot does."""
+    thread = {"id": "t1", "notes": [
+        _tnote(ME, "answered", created_at=BEFORE_RUN),
+        _tnote(BOT_USER, "analysis", created_at=BEFORE_RUN),
+        _tnote("leyang", "no, this is still wrong")]}
+    sub = _Subprocess(worktree, report=_report(replied=["t1"]))
+    glab = _Glab(_payload(thread), _payload(_answered("t1")))
+    result = feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                              run_glab=glab, now=lambda: RUN_START)
+    assert result.replied == 1
+    prompt = [c for c in sub.calls if c[0] == "claude"][0][2]
+    assert "no, this is still wrong" in prompt
