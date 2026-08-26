@@ -14,6 +14,7 @@ posts exactly one digest (or 🔍 heartbeat, or ⚠️ error) — never silence.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import datetime
 import json
 import os
@@ -57,6 +58,7 @@ from . import assessor, collectors, curator, devslots, implementer, keepcurrent
 from .approvals import apply_approvals
 from .config import WorksweepConfig, load_config
 from .discord_read import fetch_messages
+from .models import WorkItem
 from .formatter import (
     DISCORD_MAX_CHARS, _FOOTER, _HEADER, _truncate_bytes,
     format_messages_from_records, format_reproposed,
@@ -159,7 +161,13 @@ def _post_discord(webhook: str, content: str,
     `sleep` is injected so the tests never actually wait.
     """
     _validate_webhook(webhook)
-    data = json.dumps({"content": content}).encode("utf-8")
+    # `allowed_mentions: {"parse": []}` is global on purpose. Worksweep quotes
+    # text other people wrote -- MR titles, and now review thread bodies -- and
+    # a quoted "@everyone" must render as characters rather than ring every
+    # phone on the server. Setting it at the one place every post funnels
+    # through means no future caller can forget it.
+    data = json.dumps({"content": content,
+                       "allowed_mentions": {"parse": []}}).encode("utf-8")
     req = urllib.request.Request(
         webhook, data=data,
         headers={"Content-Type": "application/json", "User-Agent": "WorksweepBot/1.0"})
@@ -361,6 +369,42 @@ def _run_intake(cfg: WorksweepConfig) -> int:
     return 0
 
 
+def _with_unaddressed(mr, cfg: WorksweepConfig,
+                      discussions: Callable[[str, int], str]) -> tuple:
+    """`(mr rebound with its unaddressed-thread count, probe_ok)`. Never raises.
+
+    Skipped (count stays 0, probe_ok True) for an MR with nothing unresolved --
+    there is nothing for the probe to find -- and for one already handed off,
+    whose threads belong to the maintainer who will merge it.
+
+    A probe failure prints and returns the MR untouched with probe_ok False.
+    That flag matters twice: the caller must not DROP a feedback row it can no
+    longer derive (a freed number gets reused, and the highest is reused
+    first, so a stale `✅ 12` would approve something else entirely), and it
+    must not claim the signal is CLEAR when it simply could not look.
+    """
+    if mr.unresolved_count <= 0 or assessor.is_handed_off(mr, cfg.username):
+        return mr, True
+    try:
+        raw = discussions(mr.repo, mr.iid)
+    except Exception as e:
+        print(f"worksweep: discussions probe for {mr.repo}!{mr.iid} failed: "
+              f"{type(e).__name__}: {e}", file=sys.stderr)
+        return mr, False
+    return dataclasses.replace(
+        mr, unaddressed_count=collectors.parse_unaddressed_count(
+            raw, cfg.username)), True
+
+
+def _retained_feedback(prior: WorkItem) -> WorkItem:
+    """The prior feedback row, carried forward because the probe could not
+    re-derive it. Marked so the digest says why it looks stale."""
+    why = prior.why or ""
+    if "(probe failed)" not in why:
+        why = f"{why} (probe failed)".strip()
+    return dataclasses.replace(prior, why=why, status="proposed")
+
+
 def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
     """One sweep under the message contract: digest, 🔍 heartbeat, or ⚠️ error —
     never silence. All I/O arrives via `deps` so tests stay hermetic."""
@@ -379,10 +423,33 @@ def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
         review_mrs, authored, assigned = collectors.parse_graphql_sweep(
             raw, cfg.username, cfg.repos)
 
+        # Which of the authored MRs' unresolved threads are actually waiting
+        # on Chandler? The GraphQL sweep only knows the COUNT, so the answer
+        # comes from one targeted REST call per authored MR that has any
+        # unresolved thread (typically two or three across the whole queue),
+        # and the MergeRequest is REBOUND with the answer right here -- before
+        # bootstrap_magi_records, the assess loop, the stale loop and
+        # resolutions all read the same `authored` list, so none of them can
+        # disagree about it. Opt-in via deps["discussions"] (absent -> skipped,
+        # matching the Task H diverged-commits pattern) and never fatal: a bad
+        # call degrades that ONE MR to zero unaddressed threads, which costs a
+        # sweep of address-feedback work, not the digest.
+        records0 = deps["load"]()
+        prior_by_id = {r.item.id: r.item for r in records0}
+        discussions_edge = deps.get("discussions")
+        probe_failed = set()
+        if discussions_edge is not None:
+            probed = []
+            for mr in authored:
+                mr, ok = _with_unaddressed(mr, cfg, discussions_edge)
+                probed.append(mr)
+                if not ok:
+                    probe_failed.add(f"feedback:{mr.repo}!{mr.iid}")
+            authored = probed
+
         items = []
         for mr in review_mrs:
             items += assessor.assess_review_request(mr, cfg.username)
-        records0 = deps["load"]()
         records0 = assessor.bootstrap_magi_records(
             records0, authored, deps["now"]())
         for mr in authored:
@@ -438,7 +505,30 @@ def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
             items += assessor.assess_todo(td)
         items = assessor.dedupe(items)
 
+        # A feedback row the probe could not re-derive is carried forward
+        # rather than dropped. Only when the assessor produced nothing for it:
+        # `changes_requested` is known without the probe, so that arm is still
+        # derivable and must not be shadowed by a stale row.
+        emitted = {it.id for it in items}
+        for fid in sorted(probe_failed - emitted):
+            if fid in prior_by_id:
+                items.append(_retained_feedback(prior_by_id[fid]))
+
         resolved = assessor.resolutions(review_mrs, cfg.username, authored)
+        # A feedback id whose signal is PROVABLY gone -- nothing unaddressed,
+        # no changes requested, and the probe actually looked. This is the one
+        # reason strong enough to close an `error` row instead of retaining it
+        # forever (see queue._CLOSES_AN_ERROR), so the bar is evidence, not
+        # absence of evidence: with no probe wired every MR reads
+        # unaddressed_count 0, which is ignorance, and acting on it would close
+        # errored rows across the whole queue on no information at all.
+        if discussions_edge is not None:
+            for mr in authored:
+                fid = f"feedback:{mr.repo}!{mr.iid}"
+                if (fid not in resolved and fid not in probe_failed
+                        and mr.unaddressed_count == 0
+                        and not mr.changes_requested):
+                    resolved[fid] = "signal-cleared"
         # Observe (not change) reconcile's fresh-wins rule so a revoked ✅ can
         # be explained instead of the item just quietly reappearing.
         reproposed: set = set()
@@ -594,6 +684,27 @@ def _dry_run_park(item, cfg):
                            result_sha=item.sha, description_updated=False)
 
 
+def _execute_address_feedback(item, cfg):
+    """Real address-feedback edge: subprocess (git + the claude pass) and a
+    read-only glab GET of the MR's threads.
+
+    The replies themselves are posted by the claude run, inside the worktree,
+    under Chandler's own glab credentials -- this edge only ever reads, so
+    everything Python asserts afterwards is independent of what the run says
+    it did.
+    """
+    from . import feedback
+    return feedback.execute(item, cfg, run_subprocess=subprocess.run,
+                            run_glab=_run_glab_api, now=_now)
+
+
+def _dry_run_address_feedback(item, cfg):
+    """--dry-run must never post a reply under Chandler's name."""
+    from . import feedback
+    return feedback.FeedbackResult(iid=0, result_sha=item.sha,
+                                   already_answered=True)
+
+
 def _execute_keep_current(item, cfg):
     """Real keep-current edge: subprocess + two ssh budgets + an http probe.
     `cfg.dev_boxes` is the raw box-config list — keepcurrent.execute probes
@@ -689,6 +800,9 @@ def main(argv=None) -> int:
             "execute_keep_current": (_dry_run_keep_current if args.dry_run
                                      else _execute_keep_current),
             "execute_park": (_dry_run_park if args.dry_run else _execute_park),
+            "execute_address_feedback": (_dry_run_address_feedback
+                                         if args.dry_run
+                                         else _execute_address_feedback),
         }
         return _runner.run_once(cfg, deps)
 
@@ -720,6 +834,9 @@ def main(argv=None) -> int:
     # MR), so --dry-run still runs it for real -- same reasoning as "ssh"
     # above. run_sweep only ever calls it for authored MRs not handed off.
     deps["diverged_commits"] = collectors.collect_diverged_commits_count
+    # Same reasoning: one read-only GET per authored MR with unresolved
+    # threads, so --dry-run runs it for real too.
+    deps["discussions"] = collectors.collect_discussions
     return run_sweep(cfg, deps)
 
 

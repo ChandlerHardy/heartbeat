@@ -298,7 +298,10 @@ def test_reconcile_reports_nothing_when_the_sha_is_unchanged():
     ("error", "proposed"),        # a retry, not a revoked decision
     ("done", "proposed"),         # a resurrection, not a revoked decision
     ("proposed", "proposed"),     # a no-op
-    ("running", "proposed"),      # reachable, but deliberately out of scope
+    # A live claim now reconciles wholly from the prior record (fix-mode
+    # round 2): re-proposing a `running` row on a new sha left the executor
+    # mid-flight against a row that no longer said it was running.
+    ("running", "running"),
     ("needs-input", "needs-input"),
 ])
 def test_only_an_approved_reset_is_reported(prior_status, expected_status):

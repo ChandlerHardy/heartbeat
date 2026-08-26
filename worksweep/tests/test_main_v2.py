@@ -255,3 +255,255 @@ def test_a_failing_notice_does_not_fail_the_sweep():
     texts = [p for p in posts2 if isinstance(p, str)]
     assert not [t for t in texts if t.startswith("⚠️")]
     assert len(texts) >= 1                      # the digest still went out
+
+
+# --- the discussions probe seam (address-feedback, 2026-08-25) -------------
+#
+# Opt-in exactly like deps["diverged_commits"]: absent -> the sweep never
+# probes and simply proposes no address-feedback work; present -> the authored
+# MergeRequest is rebound with its unaddressed_count BEFORE assess_own_mr sees
+# it. Every other consumer of `authored` (bootstrap_magi_records, the stale
+# loop, resolutions) reads the rebound list, so the two can never disagree.
+
+def _authored(iid=3997, unresolved=2, changes_requested=False):
+    reviewers = ([{"username": "leyang", "mergeRequestInteraction":
+                   {"reviewState": "REQUESTED_CHANGES"}}]
+                 if changes_requested else [])
+    return {"iid": str(iid), "title": "Ranch data tab", "draft": False,
+            "webUrl": f"https://gl/x/-/merge_requests/{iid}",
+            "diffHeadSha": f"s{iid}", "updatedAt": "2026-08-25T00:00:00Z",
+            "description": "Available on "
+                           "https://dev2.chandlerhardy-dev.performancebeef.com/",
+            "sourceBranch": "chardy/1588-ranch-data",
+            "approved": False, "detailedMergeStatus": "",
+            "assignees": {"nodes": []},
+            "project": {"fullPath": "performancelivestock/pb-www"},
+            "author": {"username": "me"},
+            "reviewers": {"nodes": reviewers},
+            "headPipeline": {"status": "success"},
+            "resolvableDiscussionsCount": unresolved,
+            "resolvedDiscussionsCount": 0}
+
+
+def _threads(*authors):
+    return json.dumps([
+        {"id": f"t{i}", "notes": [{"body": "look at this", "system": False,
+                                   "resolvable": True, "resolved": False,
+                                   "author": {"username": a}}]}
+        for i, a in enumerate(authors)])
+
+
+def _probe_deps(store, raw, discussions=None, queue=None):
+    d = _deps(store, raw, queue=queue)
+    if discussions is not None:
+        d["discussions"] = discussions
+    return d
+
+
+def _saved_items(store):
+    saved = [p for p in store if isinstance(p, tuple) and p[0] == "saved"]
+    return {r.item.id: r.item for r in saved[-1][1]} if saved else {}
+
+
+def test_no_discussions_dep_never_probes_and_proposes_no_feedback_work():
+    posts = []
+    rc = run_sweep(_cfg(), _deps(posts, _gql(authored_nodes=[_authored()])))
+    assert rc == 0
+    assert "feedback:pb-www!3997" not in _saved_items(posts)
+
+
+def test_the_probe_rebinds_the_mr_before_the_assessor_sees_it():
+    posts = []
+    rc = run_sweep(_cfg(), _probe_deps(
+        posts, _gql(authored_nodes=[_authored()]),
+        discussions=lambda repo, iid: _threads("leyang", "me")))
+    assert rc == 0
+    item = _saved_items(posts)["feedback:pb-www!3997"]
+    assert item.executor == "address-feedback"
+    assert item.why == "1 unaddressed thread"      # "me" thread doesn't count
+    assert item.branch == "chardy/1588-ranch-data"
+
+
+def test_each_authored_mr_is_probed_exactly_once():
+    calls = []
+    posts = []
+    run_sweep(_cfg(), _probe_deps(
+        posts, _gql(authored_nodes=[_authored(iid=3997), _authored(iid=4001)]),
+        discussions=lambda repo, iid: (calls.append((repo, iid)),
+                                       _threads("leyang"))[1]))
+    assert calls == [("pb-www", 3997), ("pb-www", 4001)]
+
+
+def test_an_mr_with_no_unresolved_threads_is_never_probed():
+    """Decision 1's cost gate: only authored MRs that have unresolved threads
+    at all are worth a REST call."""
+    calls = []
+    posts = []
+    run_sweep(_cfg(), _probe_deps(
+        posts, _gql(authored_nodes=[_authored(iid=3997, unresolved=0)]),
+        discussions=lambda repo, iid: (calls.append(iid), "[]")[1]))
+    assert calls == []
+
+
+def test_a_failing_probe_degrades_that_one_mr_and_never_aborts_the_sweep():
+    """AC #7: one bad glab call must not cost the whole digest. The MR falls
+    back to unaddressed_count 0 -- so a changes-requested MR still shows up,
+    as the informational row."""
+    posts = []
+
+    def flaky(repo, iid):
+        if iid == 3997:
+            raise RuntimeError("glab api timed out after 30s")
+        return _threads("leyang")
+
+    rc = run_sweep(_cfg(), _probe_deps(
+        posts, _gql(authored_nodes=[_authored(iid=3997, changes_requested=True),
+                                    _authored(iid=4001)]),
+        discussions=flaky))
+    assert rc == 0
+    items = _saved_items(posts)
+    assert items["feedback:pb-www!3997"].executor == "triage"
+    assert items["feedback:pb-www!3997"].why == "changes requested"
+    assert items["feedback:pb-www!4001"].executor == "address-feedback"
+
+
+def test_a_handed_off_mr_is_never_probed():
+    calls = []
+    posts = []
+    node = _authored(iid=3997)
+    node["approved"] = True
+    node["detailedMergeStatus"] = "MERGEABLE"
+    node["assignees"] = {"nodes": [{"username": "maintainer"}]}
+    run_sweep(_cfg(), _probe_deps(
+        posts, _gql(authored_nodes=[node]),
+        discussions=lambda repo, iid: (calls.append(iid), _threads("leyang"))[1]))
+    assert calls == []
+    assert "feedback:pb-www!3997" not in _saved_items(posts)
+
+
+def test_run_sweep_wires_the_real_discussions_edge():
+    from unittest.mock import patch
+    from worksweep import __main__ as m
+    from worksweep import collectors
+    seen = {}
+    with patch.object(m, "load_config", _cfg), \
+            patch.object(m, "run_sweep",
+                         lambda cfg, deps: (seen.update(deps=deps), 0)[1]):
+        assert m.main([]) == 0
+    assert seen["deps"]["discussions"] is collectors.collect_discussions
+
+
+# --- probe failure and cleared signals (fix-mode round 2, 11 + 12) ---------
+
+def _queue_rec(number, executor="address-feedback", status="proposed",
+               why="2 unaddressed threads", iid=3997):
+    from worksweep.models import QueueRecord, WorkItem
+    return QueueRecord(
+        number=number, first_seen="2026-08-25T00:00:00+00:00",
+        last_seen="2026-08-25T00:00:00+00:00",
+        item=WorkItem(schema_version=1, id=f"feedback:pb-www!{iid}",
+                      repo="pb-www", kind="feedback", executor=executor,
+                      risk="low", why=why,
+                      web_url=f"https://gl/x/-/merge_requests/{iid}",
+                      sha=f"s{iid}", status=status,
+                      branch="chardy/1588-ranch-data"))
+
+
+def _saved(store):
+    saved = [p for p in store if isinstance(p, tuple) and p[0] == "saved"]
+    return saved[-1][1] if saved else []
+
+
+def test_a_failed_probe_keeps_the_row_it_cannot_re_derive():
+    """A dropped row frees its number for reuse, and the highest number is
+    reused first -- so a stale `✅ 12` on Chandler's phone would approve a
+    completely different item."""
+    def boom(repo, iid):
+        raise RuntimeError("glab api timed out after 30s")
+
+    posts = []
+    prior = [_queue_rec(12)]
+    rc = run_sweep(_cfg(), _probe_deps(posts, _gql(authored_nodes=[_authored()]),
+                                       discussions=boom, queue=prior))
+    assert rc == 0
+    rows = {r.item.id: r for r in _saved(posts)}
+    row = rows["feedback:pb-www!3997"]
+    assert row.number == 12
+    assert row.item.executor == "address-feedback"
+    assert "probe failed" in row.item.why
+
+
+def test_a_failed_probe_does_not_invent_a_row_that_never_existed():
+    posts = []
+    def boom(repo, iid):
+        raise RuntimeError("nope")
+    run_sweep(_cfg(), _probe_deps(posts, _gql(authored_nodes=[_authored()]),
+                                  discussions=boom))
+    assert "feedback:pb-www!3997" not in {r.item.id for r in _saved(posts)}
+
+
+def test_a_failed_probe_never_overrides_a_row_the_assessor_still_emits():
+    """changes_requested is known without the probe, so the informational arm
+    is still derivable -- the retained row must not shadow it."""
+    posts = []
+    prior = [_queue_rec(12)]
+    def boom(repo, iid):
+        raise RuntimeError("nope")
+    run_sweep(_cfg(), _probe_deps(
+        posts, _gql(authored_nodes=[_authored(changes_requested=True)]),
+        discussions=boom, queue=prior))
+    rows = {r.item.id: r for r in _saved(posts)}
+    assert rows["feedback:pb-www!3997"].item.executor == "triage"
+    assert rows["feedback:pb-www!3997"].item.why == "changes requested"
+
+
+def test_a_cleared_signal_closes_a_stranded_error_row():
+    """W12: the run errored, then the reviewer resolved everything. Without
+    this the ⚠️ row sits on the dashboard forever."""
+    posts = []
+    prior = [_queue_rec(12, status="error")]
+    run_sweep(_cfg(), _probe_deps(
+        posts, _gql(authored_nodes=[_authored()]),
+        discussions=lambda repo, iid: _threads("me"), queue=prior))
+    row = {r.item.id: r for r in _saved(posts)}["feedback:pb-www!3997"]
+    assert row.item.status == "done"
+    assert row.item.done_reason == "signal-cleared"
+
+
+def test_a_failed_probe_leaves_an_errored_row_visible_not_closed():
+    """We do not know what the threads say, so we may not call them settled.
+    The row comes back as ordinary retryable work, flagged, rather than being
+    closed as `signal-cleared` on a guess."""
+    posts = []
+    prior = [_queue_rec(12, status="error")]
+    def boom(repo, iid):
+        raise RuntimeError("nope")
+    run_sweep(_cfg(), _probe_deps(posts, _gql(authored_nodes=[_authored()]),
+                                  discussions=boom, queue=prior))
+    row = {r.item.id: r for r in _saved(posts)}["feedback:pb-www!3997"]
+    assert row.item.status == "proposed"
+    assert row.item.done_reason != "signal-cleared"
+    assert "probe failed" in row.item.why
+
+
+def test_an_unwired_probe_never_reports_a_cleared_signal():
+    """FALSIFYING. Without the probe dep every authored MR reads
+    unaddressed_count 0 -- which is ignorance, not a cleared signal. Declaring
+    it cleared would close error rows across the whole queue on no evidence."""
+    posts = []
+    prior = [_queue_rec(12, status="error")]
+    run_sweep(_cfg(), _deps(posts, _gql(authored_nodes=[_authored()]),
+                            queue=prior))
+    row = {r.item.id: r for r in _saved(posts)}["feedback:pb-www!3997"]
+    assert row.item.status == "error"
+    assert row.item.done_reason != "signal-cleared"
+
+
+def test_changes_requested_is_never_a_cleared_signal():
+    posts = []
+    prior = [_queue_rec(12, status="error")]
+    run_sweep(_cfg(), _probe_deps(
+        posts, _gql(authored_nodes=[_authored(changes_requested=True)]),
+        discussions=lambda repo, iid: _threads("me"), queue=prior))
+    row = {r.item.id: r for r in _saved(posts)}["feedback:pb-www!3997"]
+    assert row.item.status != "done"

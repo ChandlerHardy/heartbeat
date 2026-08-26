@@ -124,15 +124,35 @@ def assess_own_mr(mr: MergeRequest, username: str,
             repo=mr.repo, kind="mr", executor="park", risk="low",
             why="description missing dev-server link", web_url=mr.web_url,
             sha=mr.sha, title=mr.title, branch=mr.source_branch))
-    if mr.changes_requested or mr.unresolved_count > 0:
-        n = mr.unresolved_count
-        why = "changes requested" if mr.changes_requested else ""
-        if n:
-            why = (why + ", " if why else "") + f"{n} unresolved thread{'s' if n != 1 else ''}"
+    # Two arms, one id. `unaddressed_count` (the probe's answer to "does a
+    # reviewer have the last word?") decides which:
+    #
+    #   > 0   -> real work: an `address-feedback` run replies to those threads.
+    #   == 0, changes_requested -> information: REQUESTED_CHANGES with every
+    #          thread already answered has nothing concrete to act on, but the
+    #          MR should still be visible, so it keeps a non-runnable row.
+    #   == 0, nothing requested -> silence. This is the case the old
+    #          `unresolved_count` gate got wrong: threads Chandler already
+    #          replied to are waiting on the REVIEWER, and nagging about them
+    #          every sweep was the whole reason for this rename.
+    #
+    # The id is deliberately identical in both arms so reconcile keeps the
+    # queue number as an MR moves between them across sweeps.
+    n = mr.unaddressed_count
+    if n > 0:
+        why = "changes requested, " if mr.changes_requested else ""
+        why += f"{n} unaddressed thread{'s' if n != 1 else ''}"
+        items.append(WorkItem(
+            schema_version=1, id=f"feedback:{mr.repo}!{mr.iid}",
+            repo=mr.repo, kind="feedback", executor="address-feedback",
+            risk="low", why=why, web_url=mr.web_url, sha=mr.sha,
+            title=mr.title, branch=mr.source_branch))
+    elif mr.changes_requested:
         items.append(WorkItem(
             schema_version=1, id=f"feedback:{mr.repo}!{mr.iid}",
             repo=mr.repo, kind="feedback", executor="triage", risk="low",
-            why=why, web_url=mr.web_url, sha=mr.sha, title=mr.title))
+            why="changes requested", web_url=mr.web_url, sha=mr.sha,
+            title=mr.title))
     if mr.ci_status == "failed":
         items.append(WorkItem(
             schema_version=1, id=f"ci:{mr.repo}!{mr.iid}",

@@ -7,6 +7,8 @@ from worksweep.queue import load_queue, save_queue  # noqa: E402
 
 T0 = "2026-06-23T08:00:00Z"
 NOW = "2026-06-30T08:00:00Z"
+# sentinel: "no actor field at all" is a distinct case from actor=None
+_UNSET = object()
 
 
 def _rec(n, status="proposed", executor="magi-review", **kw):
@@ -137,10 +139,13 @@ class _Server:
         finally:
             conn.close()
 
-    def approve(self, numbers, headers=None):
+    def approve(self, numbers, headers=None, actor=_UNSET):
         h = {"X-Worksweep": "approve", "Content-Type": "application/json"}
         h.update(headers or {})
-        return self.request("POST", "/approve", json.dumps({"numbers": numbers}), h)
+        body = {"numbers": numbers}
+        if actor is not _UNSET:
+            body["actor"] = actor
+        return self.request("POST", "/approve", json.dumps(body), h)
 
     def dismiss(self, number, headers=None, body=None):
         h = {"X-Worksweep": "approve", "Content-Type": "application/json"}
@@ -154,12 +159,14 @@ class _Server:
         h.update(headers or {})
         return self.request("POST", "/sweep", "", h)
 
-    def approve_all(self, numbers, headers=None):
+    def approve_all(self, numbers, headers=None, actor=_UNSET):
         """F2: the page sends the proposed+runnable numbers it rendered."""
         h = {"X-Worksweep": "approve", "Content-Type": "application/json"}
         h.update(headers or {})
-        return self.request("POST", "/approve-all",
-                            json.dumps({"numbers": numbers}), h)
+        body = {"numbers": numbers}
+        if actor is not _UNSET:
+            body["actor"] = actor
+        return self.request("POST", "/approve-all", json.dumps(body), h)
 
     def close(self):
         self.httpd.shutdown()
@@ -2202,3 +2209,97 @@ def test_only_visible_rows_count_as_selectable():
     # selected(), blanket() and the bar count all go through boxes()
     assert "returnnums(boxes('input[type=checkbox]')" in js
     assert "returnnums(boxes('input[type=checkbox][data-blanket=\"1\"]'));" in js
+
+
+# --- actor-attributed approvals (Decision 8, 2026-08-25) -------------------
+#
+# Chandler sometimes tells Claude "✅ all, then move on" rather than opening
+# the dashboard himself. The ✅ gate is still a human-consent gate either way,
+# so the channel record has to stay legible about which hand pressed the
+# button -- otherwise the audit trail cannot tell the two apart at all.
+
+def test_approve_actor_attribution():
+    """FALSIFYING (AC #14). Exactly two rendered outcomes exist, and the field
+    is optional, so nothing the browser sends today can change.
+
+    Mutation: apply the suffix unconditionally and the absent-field and
+    non-`claude` assertions go red.
+    """
+    records = [_rec(1), _rec(2)]
+    assert dashboard._audit_message([1, 2], records, actor="claude") == (
+        "✅ Approved: 1 (magi-review pb-www), "
+        "2 (magi-review pb-www) (dashboard · claude)")
+    assert dashboard._audit_message([1, 2], records).endswith(" (dashboard)")
+    assert dashboard._audit_message([1, 2], records,
+                                    actor="mallory").endswith(" (dashboard)")
+
+
+def test_the_actor_suffix_is_accounted_for_by_the_clamp():
+    """The suffix is computed BEFORE the message is measured -- otherwise the
+    longer one pushes an approve-all past the Discord cap and the audit trail
+    vanishes for exactly the highest-blast-radius action."""
+    from worksweep.formatter import DISCORD_MAX_CHARS
+    records = [_rec(n, repo="pb-www-with-a-long-name", executor="magi-review")
+               for n in range(1, 301)]
+    msg = dashboard._audit_message(list(range(1, 301)), records,
+                                   actor="claude")
+    assert len(msg.encode("utf-8")) <= DISCORD_MAX_CHARS
+    assert msg.endswith(" (dashboard · claude)")
+
+
+def test_a_claude_approve_post_is_attributed_in_the_channel(serve_queue):
+    posted = []
+    s, _ = serve_queue([_rec(1), _rec(2)],
+                       post=lambda hook, content: posted.append(content),
+                       webhook="https://discord.com/api/webhooks/1/x")
+    assert s.approve([1, 2], actor="claude")[0] == 200
+    assert len(posted) == 1
+    assert posted[0].endswith(" (dashboard · claude)")
+
+
+def test_approve_all_carries_the_actor_too(serve_queue):
+    posted = []
+    s, _ = serve_queue([_rec(1)],
+                       post=lambda hook, content: posted.append(content),
+                       webhook="https://discord.com/api/webhooks/1/x")
+    assert s.approve_all([1], actor="claude")[0] == 200
+    assert posted[0].endswith(" (dashboard · claude)")
+
+
+def test_the_browser_body_still_renders_the_bare_suffix(serve_queue):
+    """The page's own JS deliberately keeps sending {numbers:[...]} with no
+    actor, so a human tap must be byte-identical to what it posted before."""
+    posted = []
+    s, _ = serve_queue([_rec(1)],
+                       post=lambda hook, content: posted.append(content),
+                       webhook="https://discord.com/api/webhooks/1/x")
+    assert s.approve([1])[0] == 200
+    assert posted[0] == "✅ Approved: 1 (magi-review pb-www) (dashboard)"
+
+
+def test_approve_actor_rejects_hostile_values(serve_queue):
+    """The actor flows into a Discord post, so it is a whitelist of one and
+    the submitted text is NEVER reflected. Every rejected value still
+    approves normally and still returns 200 -- this is an attribution field,
+    not an authorisation one."""
+    for actor in ("x" * 5000, "@everyone https://evil.example/pwn",
+                  "claude ", "Claude", 7, True, None, ["claude"],
+                  {"name": "claude"}, ""):
+        posted = []
+        s, _ = serve_queue([_rec(1)],
+                           post=lambda hook, content: posted.append(content),
+                           webhook="https://discord.com/api/webhooks/1/x")
+        status, _, _ = s.approve([1], actor=actor)
+        assert status == 200, actor
+        assert posted == ["✅ Approved: 1 (magi-review pb-www) (dashboard)"], actor
+        assert "everyone" not in posted[0]
+        assert "xxxx" not in posted[0]
+
+
+def test_valid_actor_is_a_whitelist_of_one():
+    assert dashboard._valid_actor({"numbers": [1], "actor": "claude"}) == "claude"
+    for payload in ({"numbers": [1]}, {"numbers": [1], "actor": "mallory"},
+                    {"numbers": [1], "actor": 7},
+                    {"numbers": [1], "actor": True},
+                    {"numbers": [1], "actor": "x" * 5000}, [1], None):
+        assert dashboard._valid_actor(payload) == "", payload

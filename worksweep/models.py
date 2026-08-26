@@ -40,10 +40,56 @@ class MergeRequest:
     merge_status: str = ""          # upper-cased detailedMergeStatus, e.g. "MERGEABLE"
     assignees: tuple = ()           # tuple[str, ...] usernames
     source_branch: str = ""         # GraphQL `sourceBranch` -- feeds devslots.classify
+    # Threads where a REVIEWER had the last word (collectors.unaddressed_*),
+    # i.e. the subset of `unresolved_count` that is actually waiting on
+    # Chandler. Enriched by a per-MR REST probe AFTER the GraphQL sweep, so it
+    # trails every GraphQL-derived field with a default: an MR nobody probed
+    # (probe not wired, probe failed, or nothing unresolved to probe) reads 0
+    # and simply proposes no `address-feedback` work. Never mutated -- the
+    # sweep rebinds via dataclasses.replace.
+    unaddressed_count: int = 0
 
     @property
     def dev_url_present(self) -> bool:
         return has_dev_url(self.description)
+
+
+@dataclass(frozen=True)
+class ReviewNote:
+    """One note in a discussion, flattened.
+
+    `created_at` is what lets the executor tell a reply IT posted from one the
+    reviewer happened to post while it was running -- without it, "the last
+    word is now mine" is satisfied by someone else's timing.
+    """
+    author: str
+    system: bool
+    body: str
+    created_at: str = ""
+
+
+@dataclass(frozen=True)
+class ReviewThread:
+    """One discussion thread on an MR, flattened to what the feedback path
+    needs. Shared by the sweep probe (which counts the unaddressed ones) and
+    the `address-feedback` executor (which prompts on them and then proves in
+    python that the ones it claims to have answered really carry Chandler's
+    reply as their last word).
+
+    `last_author`/`last_note` come from the last note with `system == false`:
+    GitLab's own "changed this line in version 3" notes are noise, not the
+    last word. A thread with nothing but system notes has `last_author == ""`.
+    """
+    id: str
+    resolvable: bool
+    resolved: bool
+    last_author: str
+    last_note: str
+    # Who closed the thread, "" when nobody has. The `address-feedback`
+    # executor is forbidden to close a thread, and this is how that is checked
+    # in code rather than merely asked for in a prompt.
+    resolved_by: str = ""
+    notes: tuple = ()               # tuple[ReviewNote, ...], in payload order
 
 
 @dataclass(frozen=True)
@@ -80,7 +126,8 @@ class Issue:
 # Lives here because models.py is the one module with no worksweep imports, so
 # approvals.py and dashboard.py can both reach it without a cycle.
 # test_runnable_executors_matches_the_runner_claim_gate pins it to the runner.
-RUNNABLE_EXECUTORS = ("magi-review", "keep-current", "implement", "park")
+RUNNABLE_EXECUTORS = ("magi-review", "keep-current", "implement", "park",
+                      "address-feedback")
 
 
 @dataclass(frozen=True)
@@ -89,9 +136,13 @@ class WorkItem:
     id: str
     repo: str
     kind: str       # "mr" | "review_request" | "feedback" | "ci_red" | "todo" | "issue"
-    executor: str   # "magi-review" | "keep-current" | "implement" | "park"
-                    # (runnable, see RUNNABLE_EXECUTORS) | "triage" |
-                    # "mr-hygiene" | "none" (FYI rows a human handles)
+    executor: str   # "magi-review" | "keep-current" | "implement" | "park" |
+                    # "address-feedback" (runnable, see RUNNABLE_EXECUTORS)
+                    # | "triage" | "mr-hygiene" | "none" (FYI rows a human
+                    # handles). NOTE kind `feedback` spans TWO executors:
+                    # `address-feedback` when a reviewer is waiting on a
+                    # reply, plain `triage` for a changes-requested MR with
+                    # nothing concrete left to answer.
     risk: str       # "low" | "medium" | "high"
     why: str
     web_url: str

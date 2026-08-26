@@ -10,9 +10,9 @@ import json
 import subprocess
 import sys
 import urllib.parse
-from typing import List
+from typing import Callable, List
 
-from .models import Issue, MergeRequest, Todo
+from .models import Issue, MergeRequest, ReviewNote, ReviewThread, Todo
 
 PROJECT_PREFIX = "performancelivestock"
 
@@ -149,6 +149,135 @@ def collect_diverged_commits_count(repo: str, iid: int) -> int:
                            f"was not an object")
     return int(data.get("diverged_commits_count") or 0)
 
+
+# --- discussions probe: which threads are still waiting on Chandler? --------
+#
+# The GraphQL sweep only carries resolvable/resolved COUNTS, so it cannot tell
+# "the reviewer asked something and is waiting" from "I answered and the
+# reviewer hasn't resolved it yet". Those two feel identical in a digest and
+# only one is work. Decision 1 (2026-08-25) makes the second signal a targeted
+# per-MR REST call, run only for authored MRs that have unresolved threads at
+# all -- typically two or three across the whole queue.
+
+
+# GitLab's page size for the discussions endpoint, and the number of pages
+# the probe will walk before giving up. 20 x 100 = 2000 discussions, which is
+# far past any real MR; the cap exists so a server answering full pages
+# forever cannot spin the sweep.
+_PER_PAGE = 100
+_MAX_PAGES = 20
+
+
+def discussions_path(repo: str, iid: int, page: int = 1) -> str:
+    return (f"projects/{_project(repo)}/merge_requests/{int(iid)}"
+            f"/discussions?per_page={_PER_PAGE}&page={int(page)}")
+
+
+def discussions_pages(fetch: Callable[[int], str]) -> tuple:
+    """Walk `fetch(page)` until a short page arrives; the raw page bodies.
+
+    Paging is not optional here. GitLab returns every SYSTEM note ("added 1
+    commit", "changed this line in version 3") as its own discussion, so a
+    busy MR passes 100 discussions on housekeeping alone -- and the reviewer's
+    actual question, being older, sorts onto a later page. Reading only page 1
+    would fail closed AND silent: no unaddressed threads found, no error, the
+    work simply never proposed.
+    """
+    pages = []
+    for page in range(1, _MAX_PAGES + 1):
+        raw = fetch(page)
+        pages.append(raw)
+        if len(_loads_list(raw, "discussions")) < _PER_PAGE:
+            return tuple(pages)
+    print(f"worksweep: discussions paging hit the {_MAX_PAGES}-page cap — "
+          f"reading the first {_MAX_PAGES * _PER_PAGE} discussions only",
+          file=sys.stderr)
+    return tuple(pages)
+
+
+def _pages(raw) -> list:
+    """One page body or several -- callers hand us either."""
+    return [raw] if isinstance(raw, (str, bytes)) else list(raw or [])
+
+
+def parse_threads(raw_json) -> tuple:
+    """Every discussion on an MR as a ReviewThread, across every page given.
+    Malformed payload -> ().
+
+    A thread's resolvable/resolved state lives on its notes, not on the
+    discussion object: it is `resolvable` when ANY note is, and `resolved`
+    only when EVERY resolvable note is (GitLab resolves a whole thread at
+    once, so in practice they agree -- `all` is the conservative reading,
+    since a half-resolved thread is not finished).
+    """
+    out = []
+    for d in [d for page in _pages(raw_json)
+              for d in _loads_list(page, "parse_threads")]:
+        if not isinstance(d, dict):
+            continue
+        notes = [n for n in (d.get("notes") or []) if isinstance(n, dict)]
+        resolvable_notes = [n for n in notes if n.get("resolvable")]
+        human = [n for n in notes if not n.get("system")]
+        last = human[-1] if human else None
+        resolved_by = ""
+        for n in notes:
+            who = ((n.get("resolved_by") or {}) or {}).get("username", "")
+            if who:
+                resolved_by = who
+        out.append(ReviewThread(
+            id=str(d.get("id") or ""),
+            resolvable=bool(resolvable_notes),
+            resolved=bool(resolvable_notes)
+                     and all(bool(n.get("resolved")) for n in resolvable_notes),
+            last_author=((last or {}).get("author") or {}).get("username", ""),
+            last_note=(last or {}).get("body") or "",
+            resolved_by=resolved_by,
+            notes=tuple(ReviewNote(
+                author=((n.get("author") or {}) or {}).get("username", ""),
+                system=bool(n.get("system")),
+                body=n.get("body") or "",
+                created_at=str(n.get("created_at") or "")) for n in notes),
+        ))
+    return tuple(out)
+
+
+def unaddressed_threads(raw_json, username: str) -> tuple:
+    """The threads on this MR that are waiting on `username`.
+
+    Unaddressed iff resolvable, NOT resolved, and the last non-system note is
+    somebody else's. The three exclusions each drop a thread that is genuinely
+    not Chandler's move:
+
+    * not resolvable -- an ordinary comment thread, nothing to answer;
+    * resolved -- the owner already closed it;
+    * my own reply is the last word -- the ball is in the reviewer's court,
+      and this is the whole class the old `unresolved_count` signal nagged
+      about forever.
+
+    A thread with no human note at all (`last_author == ""`, e.g. nothing but
+    GitLab's own "added 1 commit") is nobody's question and is excluded too.
+    """
+    return tuple(t for t in parse_threads(raw_json)
+                 if t.resolvable and not t.resolved
+                 and t.last_author and t.last_author != username)
+
+
+def parse_unaddressed_count(raw_json, username: str) -> int:
+    return len(unaddressed_threads(raw_json, username))
+
+
+def collect_discussions(repo: str, iid: int) -> tuple:
+    """Shell edge: every page of an MR's discussions, returned RAW.
+
+    Raw rather than parsed because the two callers want different slices of
+    the same payload -- the sweep wants a count, the `address-feedback`
+    executor wants the threads themselves -- and both go through the pure
+    parse_* functions above, which are the only things tests need to exercise.
+    Raises via `_run_glab`; the sweep wraps this per-MR so one bad call
+    degrades that one MR to zero rather than losing the whole sweep.
+    """
+    return discussions_pages(
+        lambda page: _run_glab(["api", discussions_path(repo, iid, page)]))
 
 # --- GraphQL sweep (M3): one query mirroring the "Your work / MRs" dashboard ---
 
