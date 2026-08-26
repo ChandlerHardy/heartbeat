@@ -17,6 +17,7 @@ import argparse
 import dataclasses
 import datetime
 import json
+import math
 import os
 import subprocess
 import sys
@@ -128,6 +129,11 @@ def _retry_after_seconds(error) -> Optional[float]:
     Discord sends a number of seconds (sometimes fractional). Anything else --
     an HTTP-date, junk, a missing header -- yields None so the caller falls back
     to its own backoff rather than guessing.
+
+    f-004: `float("nan")` parses without complaint and then poisons every check
+    downstream -- `nan < 0` is False and `min(nan, cap)` is nan, so a nan
+    header sailed through to `sleep(nan)`. `inf` survives the cap but is not a
+    wait anybody sent on purpose. Both are junk, so both fall back.
     """
     try:
         raw = error.headers.get("Retry-After")
@@ -139,7 +145,7 @@ def _retry_after_seconds(error) -> Optional[float]:
         wait = float(str(raw).strip())
     except (TypeError, ValueError):
         return None
-    if wait < 0:
+    if not math.isfinite(wait) or wait < 0:
         return None
     return min(wait, _POST_RETRY_AFTER_CAP_SECONDS)
 
@@ -158,6 +164,20 @@ def _post_discord(webhook: str, content: str,
     A 429 waits Discord's own `Retry-After` when it sends one, and counts as an
     attempt. Any OTHER 4xx raises immediately: a malformed request or a revoked
     webhook never heals by being sent again.
+
+    ACCEPTED RESIDUAL (f-005): a retry can post the digest TWICE. If Discord
+    receives and processes the POST but the acknowledgement never gets back to
+    us -- a read timeout, a reset after send -- the retry sends the same
+    content again. There is no clean fix available: Discord's webhook API takes
+    no client-supplied idempotency key or nonce, so a caller cannot mark a
+    resend as a duplicate, and the underlying error does not reliably say
+    whether the bytes arrived (a refused connection proves they did not; a
+    timeout proves nothing either way).
+
+    The direction is chosen deliberately rather than left open. Worksweep's
+    top-level contract is that silence is never an outcome, and a duplicate
+    digest is cosmetic noise a human reads once and ignores, while a dropped
+    one loses the entire sweep's report. So the ambiguous case retries.
 
     `sleep` is injected so the tests never actually wait.
     """
@@ -195,7 +215,12 @@ def _post_discord(webhook: str, content: str,
         if attempt == _POST_ATTEMPTS:
             break
         if wait is None:
-            wait = _POST_BACKOFF_SECONDS[attempt - 1]
+            # f-001: indexed by attempt, so bumping _POST_ATTEMPTS without
+            # extending the table would raise IndexError from inside the very
+            # handler that exists to survive failures. Fall back to the longest
+            # known wait instead.
+            wait = _POST_BACKOFF_SECONDS[min(attempt - 1,
+                                             len(_POST_BACKOFF_SECONDS) - 1)]
         print(f"worksweep: discord post attempt {attempt} failed "
               f"({last_error}); retrying in {wait}s", file=sys.stderr)
         sleep(wait)

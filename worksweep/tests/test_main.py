@@ -408,7 +408,12 @@ def test_429_retry_after_is_capped(monkeypatch):
     assert sleeps == [15.0]
 
 
-@pytest.mark.parametrize("value", [None, "not-a-number", "-3",
+# f-004: `float("nan")` parses fine and then poisons everything downstream --
+# `min(nan, 15)` is nan, `nan < 0` is False, and the loop reaches
+# `sleep(nan)`. `inf` gets capped to 15 by min() but is still not a number
+# Discord sent on purpose. Both are junk, not waits.
+@pytest.mark.parametrize("value", [None, "not-a-number", "-3", "nan", "NaN",
+                                   "inf", "-inf", "Infinity",
                                    "Wed, 21 Oct 2026 07:28:00 GMT"])
 def test_429_without_a_usable_retry_after_falls_back_to_backoff(monkeypatch, value):
     opener, sleeps = _post([_http_error(429, retry_after=value), None], monkeypatch)
@@ -467,6 +472,9 @@ def test_retry_after_parsing():
     assert wsmain._retry_after_seconds(_http_error(429, 900)) == 15
     assert wsmain._retry_after_seconds(_http_error(429)) is None
     assert wsmain._retry_after_seconds(_http_error(503)) is None
+    # f-004: non-finite values are junk, not waits
+    for junk in ("nan", "NaN", "inf", "-inf", "Infinity"):
+        assert wsmain._retry_after_seconds(_http_error(429, junk)) is None, junk
     assert wsmain._retry_after_seconds(object()) is None
 
 
@@ -484,3 +492,38 @@ def test_every_post_disables_mention_parsing(monkeypatch):
     body = _json.loads(opener.last_request.data.decode("utf-8"))
     assert body["allowed_mentions"] == {"parse": []}
     assert body["content"] == "leyang said @everyone ship it"
+
+
+def test_the_backoff_table_is_indexed_within_bounds():
+    """f-001: `_POST_BACKOFF_SECONDS[attempt - 1]` is safe today only because
+    the last attempt breaks first. Bumping _POST_ATTEMPTS without extending the
+    table would raise IndexError from inside the handler whose whole job is
+    surviving failures."""
+    table = wsmain._POST_BACKOFF_SECONDS
+    for attempt in range(1, wsmain._POST_ATTEMPTS + 5):
+        idx = min(attempt - 1, len(table) - 1)
+        assert 0 <= idx < len(table)
+
+
+def test_a_longer_attempt_run_still_waits_a_real_number(monkeypatch):
+    """The guard proved through the production path, not just arithmetic."""
+    monkeypatch.setattr(wsmain, "_POST_ATTEMPTS", 5)
+    opener, sleeps = _post([_http_error(503)] * 4 + [None], monkeypatch)
+    wsmain._post_discord(WEBHOOK, "hi", sleep=sleeps.append)
+    assert sleeps == [2, 5, 5, 5]
+    assert all(isinstance(w, (int, float)) for w in sleeps)
+
+
+def test_an_ack_lost_retry_resends_the_same_content(monkeypatch):
+    """f-005, ACCEPTED RESIDUAL pinned rather than fixed. Discord offers no
+    idempotency key, and a timeout does not say whether the bytes arrived, so
+    the retry may duplicate a delivered digest. Worksweep prefers a duplicate
+    to silence -- this test exists so that stays a decision, not an accident."""
+    import urllib.error
+    opener, sleeps = _post([urllib.error.URLError("timed out"), None],
+                           monkeypatch)
+    wsmain._post_discord(WEBHOOK, "the digest", sleep=sleeps.append)
+    assert opener.calls == 2
+    import json as _json
+    body = _json.loads(opener.last_request.data.decode("utf-8"))
+    assert body["content"] == "the digest"        # byte-identical resend
