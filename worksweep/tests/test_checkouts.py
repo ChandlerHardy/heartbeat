@@ -136,3 +136,187 @@ def test_every_call_gets_devnull_stdin(tmp_path):
     worktree_for(_cfg(tmp_path), "pb-www", "implement", git.run)
     for cmd, kw in git.calls:
         assert kw.get("stdin") is subprocess.DEVNULL
+
+
+# --------------------------------------------------------------------------
+# branch collisions between persistent worktrees (2026-08-26 live failure)
+#
+# The worktrees are permanent and keep the LAST run's branch checked out
+# forever. So the first live address-feedback run died at:
+#
+#   fatal: 'refactor/1681-…' is already used by worktree at
+#          …/.worktrees/pb-www-keep-current
+#
+# keep-current had merged that branch days earlier and simply never let go.
+# --------------------------------------------------------------------------
+
+BRANCH = "refactor/1681-analytics-feed-data-debt"
+
+
+def _worktree_list(*entries):
+    """`git worktree list --porcelain` output. Each entry is (path, branch);
+    branch None renders a detached worktree."""
+    out = []
+    for path, branch in entries:
+        out.append(f"worktree {path}\nHEAD abc123\n"
+                   + (f"branch refs/heads/{branch}\n" if branch
+                      else "detached\n"))
+    return "\n".join(out) + "\n"
+
+
+class _Collide:
+    """A git that refuses the checkout while `holder` still owns the branch.
+
+    Models the real thing: the fatal is emitted by `checkout`, the ownership
+    is discoverable via `worktree list`, and detaching the holder makes the
+    retry succeed.
+    """
+
+    def __init__(self, holder, dirty=False, holder_branch=BRANCH,
+                 detach_rc=0, retry_rc=0):
+        self.holder, self.dirty = holder, dirty
+        self.holder_branch, self.detach_rc = holder_branch, detach_rc
+        self.retry_rc = retry_rc
+        self.calls, self.released = [], False
+
+    def run(self, cmd, **kw):
+        c = list(cmd)
+        self.calls.append(c)
+        cwd_repo = c[2] if c[:2] == ["git", "-C"] else ""
+        rest = c[3:]
+        if rest[:1] == ["checkout"] and "--detach" in rest:
+            if cwd_repo == self.holder and self.detach_rc == 0:
+                self.released = True
+            return subprocess.CompletedProcess(c, self.detach_rc, stdout="",
+                                               stderr="")
+        if rest[:1] == ["checkout"]:
+            if self.released:
+                return subprocess.CompletedProcess(c, self.retry_rc, stdout="",
+                                                   stderr="fatal: retry\n")
+            return subprocess.CompletedProcess(
+                c, 128, stdout="",
+                stderr=f"fatal: '{BRANCH}' is already used by worktree at "
+                       f"'{self.holder}'\n")
+        if rest[:2] == ["worktree", "list"]:
+            return subprocess.CompletedProcess(
+                c, 0, stdout=_worktree_list((self.holder, self.holder_branch),
+                                            ("/elsewhere/pb-www", None)),
+                stderr="")
+        if rest[:1] == ["status"]:
+            return subprocess.CompletedProcess(
+                c, 0, stdout=" M www/home/x.php\n" if self.dirty else "",
+                stderr="")
+        return subprocess.CompletedProcess(c, 0, stdout="", stderr="")
+
+    def ran(self, *args):
+        return [c for c in self.calls if all(a in c for a in args)]
+
+
+def _sibling(tmp_path, name="pb-www-keep-current"):
+    p = tmp_path / ".worktrees" / name
+    p.mkdir(parents=True, exist_ok=True)
+    return str(p)
+
+
+def test_a_clean_sibling_worktree_hands_the_branch_over(tmp_path):
+    """The whole point: one of OUR worktrees parked on the branch is not a
+    conflict, it is a leftover. Detach it and carry on."""
+    from worksweep.checkouts import checkout_branch
+    holder = _sibling(tmp_path)
+    git = _Collide(holder)
+    checkout_branch(_cfg(tmp_path), str(tmp_path / "mine"), BRANCH,
+                    f"origin/{BRANCH}", git.run)
+    assert git.released is True
+    assert git.ran("-C", holder, "--detach")
+    # and the checkout was actually retried, not merely assumed
+    assert len(git.ran("checkout", "-B", BRANCH)) == 2
+
+
+def test_a_dirty_sibling_worktree_is_left_alone(tmp_path):
+    """Uncommitted work in there is somebody's unfinished business. Stealing
+    the branch would strand it with no way back."""
+    from worksweep.checkouts import checkout_branch
+    holder = _sibling(tmp_path)
+    git = _Collide(holder, dirty=True)
+    with pytest.raises(RunnerError) as e:
+        checkout_branch(_cfg(tmp_path), str(tmp_path / "mine"), BRANCH,
+                        f"origin/{BRANCH}", git.run)
+    assert "already used by worktree" in str(e.value)
+    assert git.released is False
+    assert git.ran("--detach") == []
+
+
+def test_a_worktree_outside_our_root_is_never_touched(tmp_path):
+    """Ferdinand worktrees, a /tmp clone, Chandler's own checkout -- none of
+    those are ours to reach into, however clean they look."""
+    from worksweep.checkouts import checkout_branch
+    git = _Collide("/Users/chandlerhardy/workspaces/pla/pla3/pb-www")
+    with pytest.raises(RunnerError) as e:
+        checkout_branch(_cfg(tmp_path), str(tmp_path / "mine"), BRANCH,
+                        f"origin/{BRANCH}", git.run)
+    assert "already used by worktree" in str(e.value)
+    assert git.released is False
+
+
+def test_a_sibling_path_that_merely_starts_with_our_root_is_not_ours(tmp_path):
+    """`<root>/.worktrees-evil/x` shares a prefix with `<root>/.worktrees/`
+    but is not inside it."""
+    from worksweep.checkouts import checkout_branch
+    holder = tmp_path / ".worktrees-evil" / "pb-www-keep-current"
+    holder.mkdir(parents=True)
+    git = _Collide(str(holder))
+    with pytest.raises(RunnerError):
+        checkout_branch(_cfg(tmp_path), str(tmp_path / "mine"), BRANCH,
+                        f"origin/{BRANCH}", git.run)
+    assert git.released is False
+
+
+def test_a_checkout_that_failed_for_another_reason_still_raises(tmp_path):
+    """No worktree holds the branch -- the fatal is about something else, and
+    inventing a recovery for it would hide a real problem."""
+    from worksweep.checkouts import checkout_branch
+    git = _Collide(_sibling(tmp_path), holder_branch=None)
+    with pytest.raises(RunnerError):
+        checkout_branch(_cfg(tmp_path), str(tmp_path / "mine"), BRANCH,
+                        f"origin/{BRANCH}", git.run)
+    assert git.released is False
+
+
+def test_a_failed_detach_does_not_pretend_to_have_recovered(tmp_path):
+    from worksweep.checkouts import checkout_branch
+    git = _Collide(_sibling(tmp_path), detach_rc=1)
+    with pytest.raises(RunnerError):
+        checkout_branch(_cfg(tmp_path), str(tmp_path / "mine"), BRANCH,
+                        f"origin/{BRANCH}", git.run)
+
+
+def test_the_retry_is_attempted_exactly_once(tmp_path):
+    """If the branch is STILL held after a successful detach, something else
+    is going on -- do not loop."""
+    from worksweep.checkouts import checkout_branch
+    git = _Collide(_sibling(tmp_path), retry_rc=128)
+    with pytest.raises(RunnerError) as e:
+        checkout_branch(_cfg(tmp_path), str(tmp_path / "mine"), BRANCH,
+                        f"origin/{BRANCH}", git.run)
+    assert len(git.ran("checkout", "-B", BRANCH)) == 2
+    assert "retry" in str(e.value)
+
+
+def test_a_clean_checkout_costs_no_extra_calls(tmp_path):
+    """The recovery is a failure path only: the ordinary case must not pay
+    for a `worktree list` on every run."""
+    from worksweep.checkouts import checkout_branch
+    git = _Git()
+    checkout_branch(_cfg(tmp_path), str(tmp_path / "mine"), BRANCH,
+                    f"origin/{BRANCH}", git.run)
+    assert [c[0][3] for c in git.calls] == ["checkout"]
+
+
+def test_checkout_without_a_start_point_switches_rather_than_creates(tmp_path):
+    """implement re-runs onto an EXISTING branch and must never reset it onto
+    a start point -- that would discard the prior run's commits."""
+    from worksweep.checkouts import checkout_branch
+    git = _Git()
+    checkout_branch(_cfg(tmp_path), str(tmp_path / "mine"), BRANCH,
+                    None, git.run)
+    assert git.calls[0][0][3:] == ["checkout", BRANCH]
