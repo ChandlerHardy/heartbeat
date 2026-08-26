@@ -217,9 +217,14 @@ def execute(item: WorkItem, cfg,
             render_prompt(item.repo, iid, branch, before))
     report = _read_report(report_path, iid)
 
+    # A thread belongs to exactly one outcome. A run that lists the same one
+    # twice (fixed it AND was unsure about it) would otherwise report a tally
+    # bigger than the number of threads it was given, and the tally is the
+    # whole report -- so the strongest claim wins and the rest are dropped.
     addressed = _ids(report.get("addressed"))
-    replied = _ids(report.get("replied"))
-    escalated = _escalations(report.get("escalated"), before)
+    replied = [t for t in _ids(report.get("replied")) if t not in addressed]
+    handled = set(addressed) | set(replied)
+    escalated = _escalations(report.get("escalated"), before, handled)
     _verify(run_subprocess, run_glab, cfg, item.repo, iid, branch, checkout,
             before, addressed, replied, pre_remote)
 
@@ -344,17 +349,21 @@ def _ids(raw) -> List[str]:
     return out
 
 
-def _escalations(raw, before: Sequence[ReviewThread]) -> List[str]:
+def _escalations(raw, before: Sequence[ReviewThread],
+                 handled: set = frozenset()) -> List[str]:
     """One short line per escalation: who is waiting, roughly what they said,
     and the call this run refused to make. Chandler reads these on his phone,
     so they carry the ask, not a thread id he would have to go look up."""
     by_id = {t.id: t for t in before}
-    out = []
+    out, seen = [], set()
     for entry in (raw or []):
         if isinstance(entry, dict):
             tid, reason = entry.get("thread"), entry.get("reason") or ""
         else:
             tid, reason = entry, ""
+        if tid in handled or (tid and tid in seen):
+            continue
+        seen.add(tid)
         thread = by_id.get(tid)
         who = thread.last_author if thread else (tid or "a thread")
         quote = _squash((thread.last_note if thread else ""), _SHORT_NOTE_MAX)

@@ -145,8 +145,7 @@ def test_feedback_prompt_never_resolves():
     import inspect
     import re
     prompt = feedback.render_prompt(
-        "pb-www", 3997, BRANCH,
-        feedback_threads := _unaddressed(_payload(_thread("t1"))))
+        "pb-www", 3997, BRANCH, _unaddressed(_payload(_thread("t1"))))
     assert re.search(r"resolv", prompt, re.I) is None
 
     src = inspect.getsource(feedback)
@@ -427,9 +426,10 @@ def test_a_run_that_handled_and_escalated_nothing_is_a_failure(tmp_path,
 def test_a_failed_claude_run_is_a_runner_error(tmp_path, worktree):
     sub = _Subprocess(worktree, claude_rc=1, report=None)
     glab = _Glab(_payload(_thread("t1")))
-    with pytest.raises(RunnerError):
+    with pytest.raises(RunnerError) as e:
         feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
                          run_glab=glab)
+    assert "the address-feedback run failed" in str(e.value)
 
 
 # --- edge guards ------------------------------------------------------------
@@ -455,6 +455,30 @@ def test_the_worktree_is_made_pristine_before_the_branch_is_touched(
     glab = _Glab(_payload(_thread("t1")), _payload(_thread("t1", last=ME)))
     feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
                      run_glab=glab)
-    order = [i for i, c in enumerate(sub.calls)
-             if "status" in c or ("checkout" in c and "-B" in c)]
-    assert sub.calls[order[0]][-1] == "--porcelain"
+    first_status = next(i for i, c in enumerate(sub.calls)
+                        if "status" in c and "--porcelain" in c)
+    first_checkout = next(i for i, c in enumerate(sub.calls)
+                          if "checkout" in c and "-B" in c)
+    assert first_status < first_checkout
+
+
+# --- the tally cannot double-count -----------------------------------------
+
+def test_a_thread_listed_twice_is_counted_once(tmp_path, worktree):
+    """A run that lists t1 under BOTH `addressed` and `replied` (or under
+    `escalated` as well) would otherwise inflate its own tally past the number
+    of threads it was even given -- and the tally is the whole report."""
+    sub = _Subprocess(worktree, remote_shas=(PRE_SHA, POST_SHA),
+                      report=_report(addressed=[{"thread": "t1",
+                                                 "sha": "deadbee"}],
+                                     replied=["t1", "t2"],
+                                     escalated=[{"thread": "t1",
+                                                 "reason": "also unsure"},
+                                                {"thread": "t2",
+                                                 "reason": "still unsure"}]))
+    before = _payload(_thread("t1"), _thread("t2"))
+    after = _payload(_thread("t1", last=ME), _thread("t2", last=ME))
+    result = feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                              run_glab=_Glab(before, after))
+    assert (result.addressed, result.replied, len(result.escalated)) == (1, 1, 0)
+    assert feedback.tally(result) == "1 addressed, 1 replied, 0 escalated"

@@ -41,13 +41,18 @@ def test_resolutions_for_waiting_states():
 
 
 def test_own_mr_feedback_and_ci_items():
+    """Both signals at once. Note the feedback row is the INFORMATIONAL arm
+    here: the threads are unresolved but none is unaddressed, so there is
+    nothing for an executor to answer -- see the address-feedback block below
+    for the runnable arm."""
     mr = _mr(author="chandler.hardy", changes_requested=True,
              unresolved_count=2, ci_status="failed")
     items = assess_own_mr(mr, "chandler.hardy", has_magi=lambda r, i, s: True)
-    ids = {i.id for i in items}
-    assert "feedback:pb-www!9" in ids
-    assert "ci:pb-www!9" in ids
-    assert "magi:pb-www!9@s9" not in ids  # has_magi True suppresses
+    by_id = {i.id: i for i in items}
+    assert "feedback:pb-www!9" in by_id
+    assert by_id["feedback:pb-www!9"].executor == "triage"
+    assert "ci:pb-www!9" in by_id
+    assert "magi:pb-www!9@s9" not in by_id  # has_magi True suppresses
 
 
 def test_own_mr_magi_item_when_no_history():
