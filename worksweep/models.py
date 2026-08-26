@@ -6,8 +6,24 @@ from dataclasses import dataclass
 
 # A dev-server link in an MR description, per Chandler's MR convention
 # ("Available on" / a *-dev*.performancebeef.com URL).
+# `]` is excluded alongside `)` and whitespace so a masked markdown link
+# `[url](url)` yields the URL rather than `url](url` -- has_dev_url only ever
+# needed a boolean, but dev_urls (f-024) has to return something usable.
 _DEV_URL_RE = re.compile(
-    r"https?://[^\s)]*[-.]dev\d*[^\s)]*\.performancebeef\.com", re.I)
+    r"https?://[^\s)\]]*[-.]dev\d*[^\s)\]]*\.performancebeef\.com", re.I)
+
+
+def dev_urls(text: str) -> tuple:
+    """Every dev-server link in `text`, in order. The plural sibling of
+    has_dev_url, added because "is there a link?" and "does it point at the
+    box we just parked on?" are different questions (f-024)."""
+    return tuple(_DEV_URL_RE.findall(text or ""))
+
+
+def same_dev_url(a: str, b: str) -> bool:
+    """Whether two dev links name the same box. Compared without a trailing
+    slash or case, so `.../` and `...` are not treated as a move."""
+    return (a or "").rstrip("/").lower() == (b or "").rstrip("/").lower()
 
 
 def has_dev_url(text: str) -> bool:
