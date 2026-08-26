@@ -31,18 +31,26 @@ def _box(name="dev2", tier="free", url=DEV_URL, branch="other", sha="s0"):
 
 
 class _Glab:
-    """Records every glab invocation; serves a description on the GET."""
+    """Records every glab invocation; serves the MR on the GET.
 
-    def __init__(self, description="", fail_on=None):
+    STATEFUL: a PUT changes what the next GET returns, because park now reads
+    the description back to prove the write landed (f-027). A stub that served
+    a frozen description would make that read-back untestable -- and stubs
+    that hid an omission are exactly what let f-026 survive thirteen tests.
+    """
+
+    def __init__(self, description="", fail_on=None, sha="mrhead1"):
         self.calls, self.description, self.fail_on = [], description, fail_on
+        self.sha = sha
 
     def __call__(self, args, body=None):
         self.calls.append((list(args), body))
         if self.fail_on and self.fail_on in " ".join(args):
             raise RuntimeError("glab exited 1: 403 Forbidden")
         if "-X" in args:                     # the PUT
+            self.description = json.loads(body)["description"]
             return "{}"
-        return json.dumps({"description": self.description})
+        return json.dumps({"description": self.description, "sha": self.sha})
 
     @property
     def puts(self):
@@ -81,8 +89,10 @@ def test_park_syncs_the_branch_and_updates_the_description(monkeypatch):
     assert result.result_sha == "newsha123"
     assert result.description_updated is True
 
-    # exactly one GET then one PUT, and the PUT carries a JSON BODY
-    assert len(glab.calls) == 2
+    # GET (description + head sha), PUT, then the read-back that proves the
+    # PUT landed (f-027). The PUT carries a JSON BODY.
+    assert len(glab.calls) == 3
+    assert len(glab.puts) == 1
     put_args, put_body = glab.puts[0]
     assert "-X" in put_args and put_args[put_args.index("-X") + 1] == "PUT"
     assert "--input" in put_args and put_args[put_args.index("--input") + 1] == "-"
@@ -116,7 +126,9 @@ def test_park_verifies_http_200_before_touching_the_description(monkeypatch):
     with pytest.raises(RunnerError) as e:
         park.execute(_item(), None, [_box()], **_edges(glab=glab))
     assert "502" in str(e.value)
-    assert glab.calls == []                  # description untouched
+    # park READS the MR first now (it needs the head sha to hold the sync to),
+    # but it must still never WRITE: no PUT, description untouched.
+    assert glab.puts == []
 
 
 def test_park_errors_with_a_clear_summary_when_no_slot_is_free():
@@ -150,8 +162,9 @@ def test_park_refuses_when_an_edge_is_missing():
 def test_park_skips_the_put_when_a_dev_url_is_already_present(monkeypatch):
     """Falsifying: without the check, every re-park stacks another header on
     the description."""
-    glab = _Glab(description="intro\n\nAvailable on "
-                             "https://dev5.chandlerhardy-dev.performancebeef.com/\n")
+    # the link must name THIS box: a link to a DIFFERENT box is now retargeted
+    # rather than skipped (f-024), which has its own tests below.
+    glab = _Glab(description=f"intro\n\nAvailable on {DEV_URL}\n")
     monkeypatch.setattr(park.implementer, "sync_to_box",
                         lambda *a, **k: "newsha123")
     result = park.execute(_item(), None, [_box()], **_edges(glab=glab))
@@ -217,17 +230,200 @@ def test_an_unparseable_description_payload_is_a_runner_error(monkeypatch):
 def test_done_message_shape():
     msg = park.done_message(park.ParkResult(
         iid=4078, box_name="dev2", dev_url=DEV_URL, result_sha="s",
-        description_updated=True))
+        description_updated=True, http_status=200))
     assert msg.startswith("🅿️ !4078 parked on dev2 (200) · description updated")
     assert f"<{DEV_URL}>" in msg
 
 
 def test_done_message_says_when_the_description_was_left_alone():
     msg = park.done_message(park.ParkResult(
-        iid=4078, box_name="dev2", dev_url=DEV_URL, description_updated=False))
-    assert "already had a dev link" in msg
+        iid=4078, box_name="dev2", dev_url=DEV_URL, description_updated=False,
+        http_status=200))
+    assert "already had this dev link" in msg
 
 
 def test_mr_path_is_url_encoded():
     assert park._mr_path("pb-www", 4078) == (
         "projects/performancelivestock%2Fpb-www/merge_requests/4078")
+
+
+# --- f-026 / f-027 / f-024: park must prove what it reports ---------------
+#
+# The tribunal found park claiming three things it never checked: that the
+# branch landed (sync args omitted, so the sha gate inside sync_to_box silently
+# skipped), that the description was updated (PUT-didn't-raise), and that the
+# box serves 200 (a format literal). The old stubs swallowed **kw, which is
+# exactly why the omission survived thirteen tests.
+
+
+class _StrictSync:
+    """A sync_to_box stand-in that accepts ONLY the real signature.
+
+    No **kw: a caller that omits expected_sha/claim_branch/claim_sha fails
+    here loudly instead of silently skipping the verification it claims to do.
+    """
+
+    def __init__(self, landed="newsha123"):
+        self.landed, self.calls = landed, []
+
+    def __call__(self, box, branch, run_ssh, http_get, expected_sha,
+                 claim_branch, claim_sha):
+        self.calls.append(dict(box=box, branch=branch,
+                               expected_sha=expected_sha,
+                               claim_branch=claim_branch, claim_sha=claim_sha))
+        return self.landed
+
+
+def _mr_json(description="", sha="mrhead1"):
+    return json.dumps({"description": description, "sha": sha})
+
+
+class _Mr:
+    """glab stub serving a real MR payload, recording PUTs and re-reads."""
+
+    def __init__(self, description="", sha="mrhead1", put_lands=True):
+        self.description, self.sha, self.put_lands = description, sha, put_lands
+        self.calls = []
+
+    def __call__(self, args, body=None):
+        self.calls.append((list(args), body))
+        if "-X" in args:
+            if self.put_lands:
+                self.description = json.loads(body)["description"]
+            return "{}"
+        return _mr_json(self.description, self.sha)
+
+    @property
+    def puts(self):
+        return [c for c in self.calls if "-X" in c[0]]
+
+    @property
+    def gets(self):
+        return [c for c in self.calls if "-X" not in c[0]]
+
+
+def test_park_proves_the_branch_actually_landed(monkeypatch):
+    """f-026. The adjacent comment claimed "returns only on a branch that
+    actually landed" -- but with expected_sha omitted, sync_to_box's sha gate
+    is skipped entirely. Every other caller passes it."""
+    sync = _StrictSync()
+    monkeypatch.setattr(park.implementer, "sync_to_box", sync)
+    glab = _Mr(sha="mrhead1")
+    park.execute(_item(), None, [_box(branch="other", sha="boxsha0")],
+                 **_edges(glab=glab))
+    call = sync.calls[0]
+    assert call["expected_sha"] == "mrhead1"      # the MR's own head
+    assert call["claim_branch"] == "other"        # what the probe just saw
+    assert call["claim_sha"] == "boxsha0"
+
+
+def test_park_reads_the_description_back_after_writing_it(monkeypatch):
+    """f-027. description_updated was True purely because the PUT did not
+    raise -- the same shape-not-effect asymmetry this arc fixed for feedback."""
+    monkeypatch.setattr(park.implementer, "sync_to_box", _StrictSync())
+    glab = _Mr(description="intro")
+    result = park.execute(_item(), None, [_box()], **_edges(glab=glab))
+    assert result.description_updated is True
+    assert len(glab.gets) == 2                   # read, PUT, read back
+    assert DEV_URL in glab.description
+
+
+def test_a_put_that_does_not_stick_is_an_error(monkeypatch):
+    """GitLab accepting the PUT is not the same as the description changing."""
+    monkeypatch.setattr(park.implementer, "sync_to_box", _StrictSync())
+    glab = _Mr(description="intro", put_lands=False)
+    with pytest.raises(RunnerError) as e:
+        park.execute(_item(), None, [_box()], **_edges(glab=glab))
+    assert "did not stick" in str(e.value) or "read back" in str(e.value)
+
+
+def test_the_done_message_reports_the_status_it_measured(monkeypatch):
+    """f-027. `(200)` was a format literal, and http_get was dead in all 13
+    park tests -- nothing proved park even wired the edge."""
+    monkeypatch.setattr(park.implementer, "sync_to_box", _StrictSync())
+    probes = []
+    result = park.execute(_item(), None, [_box()],
+                          **_edges(glab=_Mr(),
+                                   http=lambda url: (probes.append(url), 200)[1]))
+    assert probes == [DEV_URL]
+    assert result.http_status == 200
+    assert "(200)" in park.done_message(result)
+
+
+def test_a_box_that_stops_serving_between_sync_and_report_is_an_error(
+        monkeypatch):
+    monkeypatch.setattr(park.implementer, "sync_to_box", _StrictSync())
+    with pytest.raises(RunnerError) as e:
+        park.execute(_item(), None, [_box()],
+                     **_edges(glab=_Mr(), http=lambda url: 502))
+    assert "502" in str(e.value)
+
+
+# --- f-024: re-parking onto a different box -------------------------------
+
+OTHER_URL = "https://dev5.chandlerhardy-dev.performancebeef.com/"
+
+
+def test_a_link_to_a_different_box_is_retargeted(monkeypatch):
+    """f-024. has_dev_url matches ANY dev host, so parking on dev2 while the
+    description named dev5 skipped the PUT and reported dev2 in Discord --
+    leaving the MR advertising a box that no longer serves the branch."""
+    monkeypatch.setattr(park.implementer, "sync_to_box", _StrictSync())
+    glab = _Mr(description=f"### Available on [{OTHER_URL}]({OTHER_URL})\n\nbody")
+    result = park.execute(_item(), None, [_box()], **_edges(glab=glab))
+    assert result.description_updated is True
+    assert OTHER_URL not in glab.description
+    assert DEV_URL in glab.description
+    assert "body" in glab.description            # the rest is preserved
+    msg = park.done_message(result)
+    assert "dev5" in msg or "moved" in msg or "retargeted" in msg
+
+
+def test_a_link_to_the_same_box_is_still_left_alone(monkeypatch):
+    """The re-park no-op stays a no-op -- otherwise every sweep rewrites the
+    description for nothing."""
+    monkeypatch.setattr(park.implementer, "sync_to_box", _StrictSync())
+    glab = _Mr(description=f"### Available on [{DEV_URL}]({DEV_URL})\n\nbody")
+    result = park.execute(_item(), None, [_box()], **_edges(glab=glab))
+    assert result.description_updated is False
+    assert glab.puts == []
+
+
+def test_a_trailing_slash_is_not_a_different_box(monkeypatch):
+    monkeypatch.setattr(park.implementer, "sync_to_box", _StrictSync())
+    bare = DEV_URL.rstrip("/")
+    glab = _Mr(description=f"Available on {bare}")
+    result = park.execute(_item(), None, [_box()], **_edges(glab=glab))
+    assert result.description_updated is False
+
+
+def test_retarget_header_is_pure_and_decides_all_three_cases():
+    same = f"### Available on [{DEV_URL}]({DEV_URL})"
+    assert park.retarget_header(same, DEV_URL) is None
+    moved = park.retarget_header(f"Available on {OTHER_URL}\n\nbody", DEV_URL)
+    assert moved is not None and DEV_URL in moved and OTHER_URL not in moved
+    assert "body" in moved
+    fresh = park.retarget_header("body", DEV_URL)
+    assert fresh is not None and fresh.startswith("### Available on")
+
+
+def test_the_done_message_renders_the_field_not_a_literal():
+    """f-027. In production park raises before building a result with any
+    other status, so the literal and the field agree on every real run -- the
+    complaint was that nothing PROVED the number was measured. Pinned here
+    where the two can be told apart."""
+    msg = park.done_message(park.ParkResult(
+        iid=4078, box_name="dev2", dev_url=DEV_URL, description_updated=True,
+        http_status=418))
+    assert "(418)" in msg
+    assert "(200)" not in msg
+
+
+def test_park_actually_calls_the_http_edge(monkeypatch):
+    """The edge was dead in all thirteen original park tests, which is how
+    "(200)" survived as a claim nothing checked."""
+    monkeypatch.setattr(park.implementer, "sync_to_box", _StrictSync())
+    probes = []
+    park.execute(_item(), None, [_box()],
+                 **_edges(glab=_Mr(), http=lambda u: (probes.append(u), 200)[1]))
+    assert probes == [DEV_URL]

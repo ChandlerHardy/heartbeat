@@ -662,3 +662,95 @@ def test_a_parked_row_is_not_closed_when_the_probe_could_not_look():
                                   queue=[_parked_feedback()]))
     row = {r.item.id: r for r in _saved(posts)}["feedback:pb-www!3997"]
     assert row.item.done_reason != "signal-cleared"
+
+
+# --- f-006: a network blip must not spend a ✅ (tribunal, 2026-08-26) ------
+#
+# `_retained_feedback` hard-set status="proposed" on the carried-forward row.
+# So a transient probe failure silently discarded a human approval -- and the
+# only signal was the row quietly reappearing as unapproved.
+
+def test_a_probe_blip_does_not_discard_an_approval():
+    """FALSIFYING. The ✅ is the whole consent mechanism; losing one to a
+    network error means work the human sanctioned silently stops happening."""
+    posts = []
+    def boom(repo, iid):
+        raise RuntimeError("glab api timed out after 30s")
+    run_sweep(_cfg(), _probe_deps(posts, _gql(authored_nodes=[_authored()]),
+                                  discussions=boom,
+                                  queue=[_queue_rec(12, status="approved")]))
+    row = {r.item.id: r for r in _saved(posts)}["feedback:pb-www!3997"]
+    assert row.item.status == "approved"
+    assert "probe failed" in row.item.why
+    assert row.number == 12
+
+
+def test_a_probe_blip_does_not_unpark_a_question():
+    posts = []
+    def boom(repo, iid):
+        raise RuntimeError("nope")
+    run_sweep(_cfg(), _probe_deps(posts, _gql(authored_nodes=[_authored()]),
+                                  discussions=boom,
+                                  queue=[_queue_rec(12, status="needs-input")]))
+    row = {r.item.id: r for r in _saved(posts)}["feedback:pb-www!3997"]
+    assert row.item.status == "needs-input"
+
+
+def test_a_probe_blip_leaves_a_proposed_row_proposed():
+    posts = []
+    def boom(repo, iid):
+        raise RuntimeError("nope")
+    run_sweep(_cfg(), _probe_deps(posts, _gql(authored_nodes=[_authored()]),
+                                  discussions=boom,
+                                  queue=[_queue_rec(12, status="proposed")]))
+    row = {r.item.id: r for r in _saved(posts)}["feedback:pb-www!3997"]
+    assert row.item.status == "proposed"
+
+
+def test_the_probe_failed_marker_does_not_expire_the_approval():
+    """The consent rule compares why-strings for address-feedback rows, so the
+    marker itself would otherwise read as "the ask changed" and reset the ✅
+    on the very next sweep -- turning a one-sweep blip into a lost approval
+    anyway, one step later."""
+    posts = []
+    def boom(repo, iid):
+        raise RuntimeError("nope")
+    # the ask itself is unchanged across both sweeps (one thread, still
+    # waiting) -- the ONLY difference is worksweep's own "(probe failed)" note
+    deps = _probe_deps(posts, _gql(authored_nodes=[_authored()]),
+                       discussions=boom,
+                       queue=[_queue_rec(12, status="approved",
+                                         why="1 unaddressed thread")])
+    run_sweep(_cfg(), deps)
+    blipped = _saved(posts)
+
+    # next sweep: the probe recovers and re-derives the same ask
+    posts2 = []
+    run_sweep(_cfg(), _probe_deps(
+        posts2, _gql(authored_nodes=[_authored()]),
+        discussions=lambda repo, iid: _threads("leyang"), queue=blipped))
+    row = {r.item.id: r for r in _saved(posts2)}["feedback:pb-www!3997"]
+    assert row.item.status == "approved"
+    assert "probe failed" not in row.item.why
+
+
+def test_the_retained_row_does_not_assert_a_status_of_its_own():
+    """Belt to reconcile's braces. Reconcile takes the PRIOR record's status on
+    the consent path, so this function's status is normally overridden -- but
+    it must not claim a demotion it does not own, or the next person to change
+    reconcile's precedence re-introduces f-006 without touching this file."""
+    from worksweep.__main__ import _retained_feedback
+    for status in ("approved", "needs-input", "proposed", "running"):
+        prior = _queue_rec(12, status=status,
+                           why="1 unaddressed thread").item
+        assert _retained_feedback(prior).status == status
+
+
+def test_the_probe_failed_marker_is_added_once_not_stacked():
+    """Two blips in a row must not read "(probe failed) (probe failed)"."""
+    from worksweep.__main__ import _retained_feedback
+    prior = _queue_rec(12, status="approved", why="1 unaddressed thread").item
+    once = _retained_feedback(prior)
+    twice = _retained_feedback(once)
+    assert once.why == "1 unaddressed thread (probe failed)"
+    assert twice.why == once.why

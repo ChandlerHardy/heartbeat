@@ -24,7 +24,7 @@ from typing import Callable, Optional, Sequence
 
 from . import implementer
 from .keepcurrent import iid_of
-from .models import WorkItem, has_dev_url
+from .models import WorkItem, dev_urls, has_dev_url, same_dev_url
 from .runner import RunnerError
 
 # The exact header Chandler's MRs carry. Masked link so the URL renders as a
@@ -39,6 +39,8 @@ class ParkResult:
     dev_url: str                    # that box's url (health-checked 200)
     result_sha: str = ""            # branch HEAD as it landed on the box
     description_updated: bool = False   # False = a dev link was already there
+    http_status: int = 0            # what the box ACTUALLY answered (f-027)
+    moved_from: str = ""            # a dev link this park retargeted (f-024)
 
 
 def header_line(dev_url: str) -> str:
@@ -60,15 +62,52 @@ def prepend_header(description: str, dev_url: str) -> Optional[str]:
     return f"{line}\n\n{body}" if body else line
 
 
+def retarget_header(description: str, dev_url: str):
+    """The description this park should write, or None to leave it alone.
+
+    Three cases, and the middle one is f-024. `has_dev_url` matches ANY dev
+    host, so parking on dev2 while the description named dev5 skipped the PUT
+    and reported dev2 in Discord -- leaving the MR advertising a box that no
+    longer serves the branch, which is worse than having no link at all.
+
+    * no dev link          -> prepend the header
+    * a link to THIS box   -> None (a re-park is a no-op; rewriting every
+                              sweep would churn the description for nothing)
+    * a link to ANOTHER box -> retarget every dev link in place, so the
+                              surrounding markdown and the rest of the
+                              description survive
+    """
+    existing = dev_urls(description)
+    if not existing:
+        return prepend_header(description, dev_url)
+    if any(same_dev_url(u, dev_url) for u in existing):
+        return None
+    out = description or ""
+    for old_url in dict.fromkeys(existing):
+        out = out.replace(old_url, dev_url.rstrip("/"))
+    return out
+
+
 def _mr_path(repo: str, iid: int) -> str:
     from .collectors import _project        # local: collectors is a heavier import
     return f"projects/{_project(repo)}/merge_requests/{int(iid)}"
 
 
 def fetch_description(run_glab: Callable, repo: str, iid: int) -> str:
+    return fetch_mr(run_glab, repo, iid)[0]
+
+
+def fetch_mr(run_glab: Callable, repo: str, iid: int) -> tuple:
+    """(description, head_sha) for one MR.
+
+    The sha is what makes park's sync verifiable (f-026): without a
+    Python-owned expected value, `sync_to_box`'s sha gate is skipped and
+    "the branch landed" is an assumption rather than a check.
+    """
     raw = run_glab(["api", _mr_path(repo, iid)])
     try:
-        return (json.loads(raw) or {}).get("description") or ""
+        data = json.loads(raw) or {}
+        return (data.get("description") or "", str(data.get("sha") or ""))
     except (ValueError, AttributeError) as e:
         raise RunnerError(f"could not read !{iid}'s description: {e}")
 
@@ -111,22 +150,59 @@ def execute(item: WorkItem, cfg, boxes: Sequence,
             f"no free dev slot to park !{iid} on — free one or reclaim a box, "
             f"then re-approve (this item re-proposes itself next sweep)")
 
-    # Syncs, checks for drift, and health-checks the box: returns only on a
-    # branch that actually landed AND a 200.
-    result_sha = implementer.sync_to_box(slot, branch, run_ssh, http_get)
+    # Read the MR BEFORE the sync: its head sha is the only Python-owned value
+    # park can hold sync_to_box to. Reading early is safe -- the description is
+    # still only WRITTEN after the box is proven (see the docstring).
+    description, mr_sha = fetch_mr(run_glab, item.repo, iid)
 
-    updated = False
-    description = fetch_description(run_glab, item.repo, iid)
-    new_description = prepend_header(description, slot.url)
+    # Syncs, checks for drift, and health-checks the box. f-026: the sha gate
+    # inside sync_to_box is conditional on expected_sha, so omitting these
+    # arguments skipped the verification this comment claimed. claim_* are what
+    # the probe just saw, so the box moving between probe and sync is refused.
+    result_sha = implementer.sync_to_box(
+        slot, branch, run_ssh, http_get, expected_sha=mr_sha,
+        claim_branch=slot.branch, claim_sha=slot.sha)
+
+    # f-027: the done message used to hardcode "(200)". Measure it instead --
+    # this repeats sync_to_box's own health check, which is one cheap GET for
+    # the difference between reporting a number and inventing one.
+    try:
+        status = int(http_get(slot.url))
+    except Exception as e:
+        raise RunnerError(f"{slot.name} health check ({slot.url}) failed "
+                          f"after sync: {type(e).__name__}: {e}")
+    if status != 200:
+        raise RunnerError(f"{slot.name} returned HTTP {status} after sync "
+                          f"({slot.url}) — not advertising a broken dev link")
+
+    updated, moved_from = False, ""
+    existing = dev_urls(description)
+    new_description = retarget_header(description, slot.url)
     if new_description is not None:
+        if existing:
+            moved_from = existing[0]
         put_description(run_glab, item.repo, iid, new_description)
+        # f-027: GitLab accepting the PUT is not the same as the description
+        # changing. Read it back, exactly as the feedback executor does.
+        after, _ = fetch_mr(run_glab, item.repo, iid)
+        if not any(same_dev_url(u, slot.url) for u in dev_urls(after)):
+            raise RunnerError(
+                f"the dev link for !{iid} did not stick — read back after the "
+                f"PUT, {slot.url} is still not in the description")
         updated = True
     return ParkResult(iid=iid, box_name=slot.name, dev_url=slot.url,
-                      result_sha=result_sha, description_updated=updated)
+                      result_sha=result_sha, description_updated=updated,
+                      http_status=status, moved_from=moved_from)
 
 
 def done_message(result: ParkResult) -> str:
-    tail = ("description updated" if result.description_updated
-            else "description already had a dev link")
-    return (f"🅿️ !{result.iid} parked on {result.box_name} (200) · {tail}\n"
-            f"<{result.dev_url}>")
+    if result.moved_from:
+        # f-024: say so. A silent retarget looks identical to a no-op, and the
+        # reviewer following the old link is the person who finds out.
+        tail = f"dev link moved from {result.moved_from}"
+    elif result.description_updated:
+        tail = "description updated"
+    else:
+        tail = "description already had this dev link"
+    return (f"🅿️ !{result.iid} parked on {result.box_name} "
+            f"({result.http_status}) · {tail}\n<{result.dev_url}>")

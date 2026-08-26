@@ -15,7 +15,8 @@ import sys
 from typing import Callable, Dict, List, Optional, Tuple
 
 from .formatter import DISCORD_MAX_CHARS, _truncate_bytes
-from .models import QueueRecord, WorkItem
+from .models import QueueRecord, WorkItem, magi_item_id
+from .queue import null_lock as _null_lock
 
 STALE_RUNNING_MINUTES = 45
 # M4 Task G: an implement claim legitimately runs for `implement_timeout`
@@ -319,6 +320,17 @@ def execute(item: WorkItem, cfg,
     return item.sha, report
 
 
+def _queue_lock(deps):
+    """The cross-process queue lock, or an inert one when unwired.
+
+    Scope is the point: it wraps a load -> mutate -> save cycle and NEVER an
+    executor run. A pass holding it across a 30-minute claude run would stall
+    the sweep, intake and every dashboard tap -- the same mistake that pulled
+    address-feedback out of the shared runner lock in the first place.
+    """
+    return deps.get("queue_lock", _null_lock)()
+
+
 def _apply_to_fresh(deps, cfg, number: int,
                     apply_fn: Callable[[List[QueueRecord]], List[QueueRecord]]
                     ) -> Optional[List[QueueRecord]]:
@@ -336,13 +348,20 @@ def _apply_to_fresh(deps, cfg, number: int,
     record; returns None so the caller can skip any follow-up post that would
     otherwise claim a result was recorded.
     """
-    fresh = deps["load"]()
-    if not any(r.number == number for r in fresh):
+    with _queue_lock(deps):
+        fresh = deps["load"]()
+        if not any(r.number == number for r in fresh):
+            lost = True
+            updated = None
+        else:
+            lost = False
+            updated = apply_fn(fresh)
+            deps["save"](updated)
+    if lost:
+        # Posted outside the lock: Discord is a network call, and nothing else
+        # should wait on it.
         _post(deps, cfg, f"⚠️ Worksweep runner: #{number} vanished from the "
                          f"queue before its result could be recorded")
-        return None
-    updated = apply_fn(fresh)
-    deps["save"](updated)
     return updated
 
 
@@ -408,20 +427,23 @@ def _run_magi_pass(cfg, deps: Dict[str, Callable], lock_path: str) -> int:
         return 0    # another runner is live — that's fine, not an error
     try:
         now = deps["now"]()
-        records = deps["load"]()
-        records, reaped = reap_stale(
-            records, now, implement_timeout=_implement_timeout(cfg),
-            magi_timeout=_magi_timeout(cfg))
-        if reaped:
-            deps["save"](records)
-            for r in reaped:
-                _post(deps, cfg, f"⚠️ Worksweep runner: reaped stale claim "
-                                 f"#{r.number} ({r.item.repo} {r.item.id})")
-        target = pick_claim(records, (_MAGI, _KEEP_CURRENT, _PARK))
+        with _queue_lock(deps):
+            records = deps["load"]()
+            records, reaped = reap_stale(
+                records, now, implement_timeout=_implement_timeout(cfg),
+                magi_timeout=_magi_timeout(cfg))
+            if reaped:
+                deps["save"](records)
+            target = pick_claim(records, (_MAGI, _KEEP_CURRENT, _PARK))
+            if target is not None:
+                records = claim(records, target.number, now)
+                deps["save"](records)
+        # Discord posts and the executor itself run OUTSIDE the lock.
+        for r in reaped:
+            _post(deps, cfg, f"⚠️ Worksweep runner: reaped stale claim "
+                             f"#{r.number} ({r.item.repo} {r.item.id})")
         if target is None:
             return 0
-        records = claim(records, target.number, now)
-        deps["save"](records)
         if target.item.executor == _KEEP_CURRENT:
             return _run_keep_current_claim(cfg, deps, target)
         if target.item.executor == _PARK:
@@ -540,11 +562,13 @@ def _run_address_feedback_pass(cfg, deps: Dict[str, Callable],
     if not acquire_lock(lock_path):
         return 0    # another address-feedback run is live under this lock
     try:
-        records = deps["load"]()
-        target = pick_claim(records, (_ADDRESS_FEEDBACK,))
+        with _queue_lock(deps):
+            records = deps["load"]()
+            target = pick_claim(records, (_ADDRESS_FEEDBACK,))
+            if target is not None:
+                deps["save"](claim(records, target.number, deps["now"]()))
         if target is None:
             return 0                   # raced with another pass — fine
-        deps["save"](claim(records, target.number, deps["now"]()))
         return _run_address_feedback_claim(cfg, deps, target)
     finally:
         release_lock(lock_path)
@@ -622,7 +646,7 @@ def _chain_magi_review(records: List[QueueRecord], item: WorkItem, result,
     """
     if not result.addressed or not result.result_sha:
         return records
-    magi_id = f"magi:{item.repo}!{result.iid}@{result.result_sha}"
+    magi_id = magi_item_id(item.repo, result.iid, result.result_sha)
     if any(r.item.id == magi_id for r in records):
         return records      # same head already queued -- never stack a second
     number = max((r.number for r in records), default=0) + 1
@@ -684,7 +708,11 @@ def _run_implement_pass(cfg, deps: Dict[str, Callable], lock_path: str) -> int:
         # Claim the box on disk BEFORE the long work: a concurrent sweep's
         # devslots.classify reads dev_box off running/approved records, so an
         # unstamped claim could hand the same box to the next implement item.
-        deps["save"](claim(records, number, now, dev_box=slot.name))
+        with _queue_lock(deps):
+            # Re-load: selecting a dev slot probes every box over ssh, so the
+            # `records` read at the top of this pass is seconds old by now.
+            deps["save"](claim(deps["load"](), number, now,
+                               dev_box=slot.name))
         _post(deps, cfg, _implement_claim_message(iid, slot, branch))
 
         try:

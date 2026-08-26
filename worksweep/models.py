@@ -6,8 +6,24 @@ from dataclasses import dataclass
 
 # A dev-server link in an MR description, per Chandler's MR convention
 # ("Available on" / a *-dev*.performancebeef.com URL).
+# `]` is excluded alongside `)` and whitespace so a masked markdown link
+# `[url](url)` yields the URL rather than `url](url` -- has_dev_url only ever
+# needed a boolean, but dev_urls (f-024) has to return something usable.
 _DEV_URL_RE = re.compile(
-    r"https?://[^\s)]*[-.]dev\d*[^\s)]*\.performancebeef\.com", re.I)
+    r"https?://[^\s)\]]*[-.]dev\d*[^\s)\]]*\.performancebeef\.com", re.I)
+
+
+def dev_urls(text: str) -> tuple:
+    """Every dev-server link in `text`, in order. The plural sibling of
+    has_dev_url, added because "is there a link?" and "does it point at the
+    box we just parked on?" are different questions (f-024)."""
+    return tuple(_DEV_URL_RE.findall(text or ""))
+
+
+def same_dev_url(a: str, b: str) -> bool:
+    """Whether two dev links name the same box. Compared without a trailing
+    slash or case, so `.../` and `...` are not treated as a move."""
+    return (a or "").rstrip("/").lower() == (b or "").rstrip("/").lower()
 
 
 def has_dev_url(text: str) -> bool:
@@ -52,6 +68,18 @@ class MergeRequest:
     @property
     def dev_url_present(self) -> bool:
         return has_dev_url(self.description)
+
+
+def magi_item_id(repo: str, iid: int, sha: str) -> str:
+    """The queue id for a magi review of one MR at one head sha.
+
+    f-033: this template was hand-written in three places (the assessor's
+    emission, its bootstrap seeding, and the runner's post-feedback chain).
+    They agree today, and the chain's whole dedupe depends on them continuing
+    to -- a divergence would queue a second review of the same commits rather
+    than recognising the first.
+    """
+    return f"magi:{repo}!{int(iid)}@{sha}"
 
 
 @dataclass(frozen=True)
@@ -111,10 +139,14 @@ class Issue:
     web_url: str
 
 
-# The executors the runner will actually claim (runner.pick_claim is gated to
-# exactly these: runner.py:353 `(_MAGI, _KEEP_CURRENT)` and runner.py:441
-# `(_IMPLEMENT,)`). `triage`, `mr-hygiene` and `none` items are FYI rows a human
-# acts on by hand -- nothing in worksweep ever executes them.
+# The executors the runner will actually claim. Three passes gate on subsets of
+# this set -- the shared short-op pass (magi-review, keep-current, park), the
+# implement pass, and the address-feedback pass -- and
+# test_runnable_executors_matches_the_runner_claim_gate pins the union to
+# runner._ALL_EXECUTORS so the two cannot drift. (Line numbers deliberately not
+# cited: the previous version of this comment named runner.py:353/441 and a
+# two-executor gate, both long gone.) `triage`, `mr-hygiene` and `none` items
+# are FYI rows a human acts on by hand -- nothing in worksweep executes them.
 #
 # This matters because there is no un-approve path: flipping a non-runnable item
 # to `approved` strands it forever (reconcile preserves `approved`, no runner

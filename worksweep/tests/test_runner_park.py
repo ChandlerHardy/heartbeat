@@ -37,7 +37,8 @@ def _rec(number, status="approved", executor="park", iid=4078,
 
 def _result(**kw):
     base = dict(iid=4078, box_name="dev2", dev_url=DEV_URL,
-                result_sha="newsha123", description_updated=True)
+                result_sha="newsha123", description_updated=True,
+                http_status=200)
     base.update(kw)
     return ParkResult(**base)
 
@@ -110,7 +111,7 @@ def test_park_done_post_says_when_the_description_was_left_alone(tmp_path):
     deps, posts, _, _ = _deps(
         [_rec(7)], execute_park=lambda i, c: _result(description_updated=False))
     assert run_once(_cfg(tmp_path), deps, **_locks(tmp_path)) == 0
-    assert "already had a dev link" in [p for p in posts if p.startswith("🅿️")][0]
+    assert "already had this dev link" in [p for p in posts if p.startswith("🅿️")][0]
 
 
 # --- failure surfaces -------------------------------------------------------

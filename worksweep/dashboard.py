@@ -50,7 +50,7 @@ from .approvals import (_APPROVABLE, approve_all, approve_numbers,
 from .formatter import DISCORD_MAX_CHARS, _truncate_bytes
 from .models import RUNNABLE_EXECUTORS, QueueRecord, WorkItem
 from .queue import (_TERMINAL, dismiss as dismiss_record, is_dismissable,
-                    load_queue, save_queue)
+                    load_queue, save_queue, write_lock)
 
 DEFAULT_PORT = 8787
 _LOOPBACK = "127.0.0.1"
@@ -1584,7 +1584,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._text(400, "bad request")
                 return
             try:
-                self._dismiss(number)
+                self._dismiss(number, _valid_actor(payload))
             except Exception as e:                 # never crash the agent
                 print(f"worksweep: dashboard dismiss failed: {e}", file=sys.stderr)
                 self._json(500, {"dismissed": False, "error": "dismiss failed"})
@@ -1645,7 +1645,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return
         self._json(202, {"started": True})
 
-    def _dismiss(self, number: int) -> None:
+    def _dismiss(self, number: int, actor: str = "") -> None:
         """Retire a non-runnable row: flip it to done/`dismissed`.
 
         Ordering is deliberate. The local flip happens first, under the lock and
@@ -1657,7 +1657,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
           would stall every approval on the page for that long -- the same
           mistake the sweep route avoids.
         """
-        with _WRITE_LOCK:
+        with _WRITE_LOCK, write_lock(self.server.queue_path):
             records = load_queue(self.server.queue_path)
             target = None
             for r in records:
@@ -1680,7 +1680,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             save_queue(self.server.queue_path, updated)
 
         self._mark_todo_done(target.item, number)
-        self._audit_dismiss(number, target.item)
+        self._audit_dismiss(number, target.item, actor)
         self._json(200, {"dismissed": True, "number": number})
 
     def _mark_todo_done(self, item, number: int) -> None:
@@ -1701,9 +1701,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
             print(f"worksweep: could not mark GitLab todo {todo_id} done: {e}",
                   file=sys.stderr)
 
-    def _audit_dismiss(self, number: int, item) -> None:
+    def _audit_dismiss(self, number: int, item, actor: str = "") -> None:
+        # f-015: same attribution as an approve. Dismissing is the other half
+        # of the same decision -- "I handled this" -- and the channel should be
+        # able to tell Chandler's hand from Claude's on both.
+        suffix = " (dashboard · claude)" if actor == _ACTOR else " (dashboard)"
         confirm = (f"🗑️ dismissed {number} "
-                   f"({item.executor} {item.repo})".rstrip() + " (dashboard)")
+                   f"({item.executor} {item.repo})".rstrip() + suffix)
         post, webhook = self.server.post, self.server.webhook
         if post and webhook:
             try:
@@ -1718,13 +1722,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
                  actor: str = "") -> None:
         qpath = self.server.queue_path
         now = self.server.now()
-        with _WRITE_LOCK:
+        with _WRITE_LOCK, write_lock(qpath):
             # Load FRESH from disk, never from the rendered snapshot: the page
             # may be stale and the runner may have claimed items since.
             # Flipping a cached list would resurrect stale statuses over newer
-            # ones on save_queue's whole-file replace. The lock keeps two
-            # concurrent taps in THIS process from interleaving their
-            # read-modify-write; the cross-process race stays accepted.
+            # ones on save_queue's whole-file replace.
+            #
+            # TWO locks, different scopes: `_WRITE_LOCK` keeps two concurrent
+            # taps in THIS process from interleaving, and `write_lock` keeps
+            # the sweep, intake and the runner out of the same read-modify-write
+            # (f-007/f-028/f-029). Neither subsumes the other -- one is a
+            # threading lock, the other an flock other processes can see.
             records = load_queue(qpath)
             if path == "/approve":
                 updated, newly = approve_numbers(records, set(numbers or []), now)

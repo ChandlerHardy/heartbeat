@@ -12,14 +12,34 @@ mirroring collectors._loads_list.
 """
 from __future__ import annotations
 
+import contextlib
 import dataclasses
+import fcntl
 import json
 import os
 import sys
 import tempfile
+import time
 from typing import List, Optional, Tuple
 
 from .models import RUNNABLE_EXECUTORS, QueueRecord, WorkItem
+
+# f-007/f-028/f-029: queue.json is a whole-file replace written by FOUR
+# independent processes -- the sweep, intake, each runner pass, and the live
+# dashboard server. `save_queue`'s unique temp file plus os.replace makes each
+# write atomic, which prevents a CORRUPT file but says nothing about a LOST
+# one: two processes that both load, both mutate and both save leave only the
+# second one's work, and the first one's ✅ or completion is gone with no trace.
+#
+# The lock is a sidecar (`<queue>.write.lock`), never the queue file itself:
+# os.replace swaps the inode, so a lock held on the queue would follow the old
+# file and protect nothing.
+_LOCK_SUFFIX = ".write.lock"
+# Short on purpose. A dashboard tap waits on this, so minutes would read as a
+# hung page; a sweep's own read-modify-write is milliseconds once its network
+# work is done, so anything longer than this means a genuinely wedged holder.
+QUEUE_LOCK_TIMEOUT = 10.0
+_LOCK_POLL_SECONDS = 0.02
 
 _TERMINAL = ("done", "error")
 # `needs-input` (M4 Task G) is terminal-ish: retained when it drops out of a
@@ -32,6 +52,8 @@ _NEEDS_INPUT = "needs-input"
 # An address-feedback ✅ covers the threads it named; three threads is not the
 # consent that was given for two.
 _WHY_SENSITIVE = ("address-feedback",)
+# Bookkeeping worksweep appends to a why-string. Never part of the ask.
+_PROBE_FAILED_MARKER = "(probe failed)"
 # Resolution reasons strong enough to close an already-`error` row rather than
 # retain it. Deliberately narrow: only "the signal is provably gone".
 #
@@ -46,6 +68,62 @@ _CLOSES_AN_ERROR = ("signal-cleared",)
 _COMPACT_AFTER_DAYS = 90
 
 
+class QueueLockError(RuntimeError):
+    """The queue write lock could not be taken. Never swallowed: a writer that
+    cannot lock must report that it did not write, rather than write anyway
+    and silently drop somebody else's update."""
+
+
+@contextlib.contextmanager
+def write_lock(queue_path: str, timeout: float = QUEUE_LOCK_TIMEOUT):
+    """Hold the cross-process write lock for ONE load -> mutate -> save cycle.
+
+    Scope matters as much as existence: this wraps the read-modify-write, never
+    an executor run. A pass that held it across a 30-minute claude run would
+    block the sweep, intake and every dashboard tap for the duration -- the
+    same mistake the address-feedback pass had to be pulled out of the shared
+    runner lock to avoid.
+
+    Blocks up to `timeout`, then raises QueueLockError. Blocking (rather than
+    failing instantly) because contention here is normal -- four timers and a
+    web server share this file -- and giving up instantly would drop writes
+    routinely; loud (rather than waiting forever) because a wedged holder must
+    surface as a reported failure, not a launchd job that hangs until it is
+    reaped.
+    """
+    lock_path = f"{queue_path}{_LOCK_SUFFIX}"
+    parent = os.path.dirname(lock_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    deadline = time.monotonic() + max(0.0, timeout)
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise QueueLockError(
+                        f"could not take the queue write lock at {lock_path} "
+                        f"within {timeout}s -- another worksweep process is "
+                        f"holding it (or left it wedged)")
+                time.sleep(_LOCK_POLL_SECONDS)
+        try:
+            yield lock_path
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+@contextlib.contextmanager
+def null_lock(*args, **kwargs):
+    """The inert stand-in: --dry-run (which never saves) and unit tests that
+    exercise a single in-process writer."""
+    yield None
+
+
 def _consent_holds(prior: WorkItem, fresh: WorkItem) -> bool:
     """Whether `prior`'s status may carry onto `fresh` at an unchanged sha.
 
@@ -57,7 +135,19 @@ def _consent_holds(prior: WorkItem, fresh: WorkItem) -> bool:
     """
     if prior.executor not in _WHY_SENSITIVE:
         return True
-    return prior.why == fresh.why
+    return _ask_of(prior.why) == _ask_of(fresh.why)
+
+
+def _ask_of(why: str) -> str:
+    """The why-string with worksweep's own bookkeeping markers stripped.
+
+    f-006: a probe failure appends "(probe failed)" to the carried-forward
+    row. Comparing the raw strings would read that marker as "the ask changed"
+    and reset the ✅ on the very next sweep -- turning a one-sweep blip into a
+    lost approval anyway, one step later. The marker describes OUR failure to
+    look, never a change in what was asked.
+    """
+    return (why or "").replace(_PROBE_FAILED_MARKER, "").strip()
 
 
 def _older_than_days(iso_ts: str, iso_now: str, days: int) -> bool:

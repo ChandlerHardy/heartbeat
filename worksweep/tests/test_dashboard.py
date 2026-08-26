@@ -2331,3 +2331,47 @@ def test_an_auto_approved_row_offers_no_approve_checkbox(serve_queue):
                                why=AUTO_MAGI_WHY, status="approved")
     assert dashboard.is_actionable(item) is False
     assert dashboard.has_checkbox(item) is False
+
+
+# --- f-015: dismiss is attributed too (tribunal, 2026-08-26) --------------
+
+def test_a_claude_dismiss_is_attributed_in_the_channel(serve_queue):
+    """Approve carried actor attribution; dismiss did not. It is the other
+    half of the same decision -- "I handled this" -- and the audit trail
+    should tell the two hands apart on both."""
+    posted = []
+    rec = QueueRecord(number=1, first_seen=NOW, last_seen=NOW,
+                      item=dataclasses.replace(_rec(1).item,
+                                               executor="triage",
+                                               status="proposed"))
+    s, _ = serve_queue([rec], post=lambda hook, content: posted.append(content),
+                       webhook="https://discord.com/api/webhooks/1/x")
+    body = json.dumps({"number": 1, "actor": "claude"})
+    assert s.dismiss(1, body=body)[0] == 200
+    assert [p for p in posted if p.startswith("🗑️")][0].endswith(
+        " (dashboard · claude)")
+
+
+def test_a_plain_dismiss_still_reads_exactly_as_before(serve_queue):
+    posted = []
+    rec = QueueRecord(number=1, first_seen=NOW, last_seen=NOW,
+                      item=dataclasses.replace(_rec(1).item,
+                                               executor="triage",
+                                               status="proposed"))
+    s, _ = serve_queue([rec], post=lambda hook, content: posted.append(content),
+                       webhook="https://discord.com/api/webhooks/1/x")
+    assert s.dismiss(1)[0] == 200
+    assert [p for p in posted if p.startswith("🗑️")][0].endswith(" (dashboard)")
+
+
+def test_a_hostile_dismiss_actor_is_ignored_like_an_approve_one(serve_queue):
+    posted = []
+    rec = QueueRecord(number=1, first_seen=NOW, last_seen=NOW,
+                      item=dataclasses.replace(_rec(1).item,
+                                               executor="triage",
+                                               status="proposed"))
+    s, _ = serve_queue([rec], post=lambda hook, content: posted.append(content),
+                       webhook="https://discord.com/api/webhooks/1/x")
+    body = json.dumps({"number": 1, "actor": "@everyone " + "x" * 4000})
+    assert s.dismiss(1, body=body)[0] == 200
+    assert [p for p in posted if p.startswith("🗑️")][0].endswith(" (dashboard)")

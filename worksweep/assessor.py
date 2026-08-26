@@ -6,7 +6,8 @@ import re
 from glob import glob
 from typing import Callable, FrozenSet, List, Set, Tuple
 
-from .models import Issue, MergeRequest, QueueRecord, Todo, WorkItem
+from .models import (Issue, MergeRequest, QueueRecord, Todo, WorkItem,
+                     magi_item_id)
 
 MAGI_REPORTS_BASE = os.path.expanduser("~/workspaces/pla")
 
@@ -108,7 +109,7 @@ def assess_own_mr(mr: MergeRequest, username: str,
     # just the magi item, independent of has_magi's queue-history check.
     if not mr.approved and not has_magi(mr.repo, mr.iid, mr.sha):
         items.append(WorkItem(
-            schema_version=1, id=f"magi:{mr.repo}!{mr.iid}@{mr.sha}",
+            schema_version=1, id=magi_item_id(mr.repo, mr.iid, mr.sha),
             repo=mr.repo, kind="mr", executor="magi-review", risk="low",
             why="no magi-review yet", web_url=mr.web_url, sha=mr.sha, title=mr.title))
     # Drafts often don't have a dev link yet (the environment isn't assigned/
@@ -345,7 +346,8 @@ def bootstrap_magi_records(records, authored, now: str,
             continue
         out.append(QueueRecord(
             number=next_num, first_seen=now, last_seen=now,
-            item=WorkItem(schema_version=1, id=f"magi:{mr.repo}!{mr.iid}@{mr.sha}",
+            item=WorkItem(schema_version=1,
+                          id=magi_item_id(mr.repo, mr.iid, mr.sha),
                           repo=mr.repo, kind="mr", executor="magi-review",
                           risk="low", why="seeded from legacy .magi report",
                           web_url=mr.web_url, sha=mr.sha, status="done",
