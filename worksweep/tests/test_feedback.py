@@ -60,16 +60,33 @@ def _payload(*threads):
 
 
 class _Glab:
-    """Serves the discussions payloads in order; the last one repeats."""
+    """Serves discussions ROUNDS in order; the last round repeats.
 
-    def __init__(self, *payloads):
-        self.payloads = list(payloads) or ["[]"]
-        self.calls = []
+    A round is one full paginated read: either a single page body, or a tuple
+    of page bodies served against the `page=N` in the requested path. The
+    executor reads once before the run and once to verify, so a two-round
+    fake describes a before/after pair.
+    """
+
+    def __init__(self, *rounds):
+        self.rounds = [r if isinstance(r, tuple) else (r,)
+                       for r in (rounds or ("[]",))]
+        self.calls, self.round, self._started = [], 0, False
 
     def __call__(self, args, body=None):
         self.calls.append((list(args), body))
-        return (self.payloads.pop(0) if len(self.payloads) > 1
-                else self.payloads[0])
+        path = args[1]
+        page = int(path.rsplit("page=", 1)[1]) if "page=" in path else 1
+        if page == 1:
+            if self._started:
+                self.round = min(self.round + 1, len(self.rounds) - 1)
+            self._started = True
+        pages = self.rounds[self.round]
+        return pages[page - 1] if page <= len(pages) else "[]"
+
+    @property
+    def rounds_read(self):
+        return sum(1 for c, _ in self.calls if c[1].endswith("page=1"))
 
 
 class _Proc:
@@ -228,7 +245,7 @@ def test_feedback_refetches_threads_at_run_time(tmp_path, worktree):
                      run_glab=glab)
     paths = [a[1] for a in [c[0] for c in glab.calls]]
     assert all("merge_requests/3997/discussions" in p for p in paths)
-    assert len(glab.calls) == 2          # once before the run, once to verify
+    assert glab.rounds_read == 2         # once before the run, once to verify
     # t2 was already answered at run time, so it never reached the prompt
     prompt = [c for c in sub.calls if c[0] == "claude"][0][2]
     assert "t1" in prompt and "t2" not in prompt
@@ -482,3 +499,22 @@ def test_a_thread_listed_twice_is_counted_once(tmp_path, worktree):
                               run_glab=_Glab(before, after))
     assert (result.addressed, result.replied, len(result.escalated)) == (1, 1, 0)
     assert feedback.tally(result) == "1 addressed, 1 replied, 0 escalated"
+
+
+# --- pagination at run time (fix-mode round 2, blocker 6) ------------------
+
+def test_the_run_time_refetch_pages_too(tmp_path, worktree):
+    """A busy MR's reviewer question sorts onto page 2 behind a wall of
+    GitLab system notes. Reading page 1 only would find nothing waiting and
+    silently report "threads already answered"."""
+    filler = tuple(_thread(f"sys{i}", last=ME) for i in range(100))
+    before = (_payload(*filler), _payload(_thread("t1")))
+    after = (_payload(*filler), _payload(_thread("t1", last=ME)))
+    sub = _Subprocess(worktree, report=_report(replied=["t1"]))
+    glab = _Glab(before, after)
+    result = feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                              run_glab=glab)
+    assert result.already_answered is False
+    assert result.replied == 1
+    pages = [c[0][1].rsplit("page=", 1)[1] for c in glab.calls]
+    assert pages == ["1", "2", "1", "2"]

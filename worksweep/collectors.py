@@ -10,7 +10,7 @@ import json
 import subprocess
 import sys
 import urllib.parse
-from typing import List
+from typing import Callable, List
 
 from .models import Issue, MergeRequest, ReviewThread, Todo
 
@@ -160,8 +160,49 @@ def collect_diverged_commits_count(repo: str, iid: int) -> int:
 # all -- typically two or three across the whole queue.
 
 
-def parse_threads(raw_json: str) -> tuple:
-    """Every discussion on an MR as a ReviewThread. Malformed payload -> ().
+# GitLab's page size for the discussions endpoint, and the number of pages
+# the probe will walk before giving up. 20 x 100 = 2000 discussions, which is
+# far past any real MR; the cap exists so a server answering full pages
+# forever cannot spin the sweep.
+_PER_PAGE = 100
+_MAX_PAGES = 20
+
+
+def discussions_path(repo: str, iid: int, page: int = 1) -> str:
+    return (f"projects/{_project(repo)}/merge_requests/{int(iid)}"
+            f"/discussions?per_page={_PER_PAGE}&page={int(page)}")
+
+
+def discussions_pages(fetch: Callable[[int], str]) -> tuple:
+    """Walk `fetch(page)` until a short page arrives; the raw page bodies.
+
+    Paging is not optional here. GitLab returns every SYSTEM note ("added 1
+    commit", "changed this line in version 3") as its own discussion, so a
+    busy MR passes 100 discussions on housekeeping alone -- and the reviewer's
+    actual question, being older, sorts onto a later page. Reading only page 1
+    would fail closed AND silent: no unaddressed threads found, no error, the
+    work simply never proposed.
+    """
+    pages = []
+    for page in range(1, _MAX_PAGES + 1):
+        raw = fetch(page)
+        pages.append(raw)
+        if len(_loads_list(raw, "discussions")) < _PER_PAGE:
+            return tuple(pages)
+    print(f"worksweep: discussions paging hit the {_MAX_PAGES}-page cap — "
+          f"reading the first {_MAX_PAGES * _PER_PAGE} discussions only",
+          file=sys.stderr)
+    return tuple(pages)
+
+
+def _pages(raw) -> list:
+    """One page body or several -- callers hand us either."""
+    return [raw] if isinstance(raw, (str, bytes)) else list(raw or [])
+
+
+def parse_threads(raw_json) -> tuple:
+    """Every discussion on an MR as a ReviewThread, across every page given.
+    Malformed payload -> ().
 
     A thread's resolvable/resolved state lives on its notes, not on the
     discussion object: it is `resolvable` when ANY note is, and `resolved`
@@ -170,7 +211,8 @@ def parse_threads(raw_json: str) -> tuple:
     since a half-resolved thread is not finished).
     """
     out = []
-    for d in _loads_list(raw_json, "parse_threads"):
+    for d in [d for page in _pages(raw_json)
+              for d in _loads_list(page, "parse_threads")]:
         if not isinstance(d, dict):
             continue
         notes = [n for n in (d.get("notes") or []) if isinstance(n, dict)]
@@ -188,7 +230,7 @@ def parse_threads(raw_json: str) -> tuple:
     return tuple(out)
 
 
-def unaddressed_threads(raw_json: str, username: str) -> tuple:
+def unaddressed_threads(raw_json, username: str) -> tuple:
     """The threads on this MR that are waiting on `username`.
 
     Unaddressed iff resolvable, NOT resolved, and the last non-system note is
@@ -209,12 +251,12 @@ def unaddressed_threads(raw_json: str, username: str) -> tuple:
                  and t.last_author and t.last_author != username)
 
 
-def parse_unaddressed_count(raw_json: str, username: str) -> int:
+def parse_unaddressed_count(raw_json, username: str) -> int:
     return len(unaddressed_threads(raw_json, username))
 
 
-def collect_discussions(repo: str, iid: int) -> str:
-    """Shell edge: one GET of an MR's discussions, returned RAW.
+def collect_discussions(repo: str, iid: int) -> tuple:
+    """Shell edge: every page of an MR's discussions, returned RAW.
 
     Raw rather than parsed because the two callers want different slices of
     the same payload -- the sweep wants a count, the `address-feedback`
@@ -223,9 +265,8 @@ def collect_discussions(repo: str, iid: int) -> str:
     Raises via `_run_glab`; the sweep wraps this per-MR so one bad call
     degrades that one MR to zero rather than losing the whole sweep.
     """
-    return _run_glab(["api",
-        f"projects/{_project(repo)}/merge_requests/{int(iid)}"
-        f"/discussions?per_page=100"])
+    return discussions_pages(
+        lambda page: _run_glab(["api", discussions_path(repo, iid, page)]))
 
 # --- GraphQL sweep (M3): one query mirroring the "Your work / MRs" dashboard ---
 

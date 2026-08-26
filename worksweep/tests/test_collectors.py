@@ -5,9 +5,9 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from worksweep.collectors import (  # noqa: E402
-    collect_discussions, collect_diverged_commits_count, parse_issues,
-    parse_mrs, parse_threads, parse_todos, parse_unaddressed_count,
-    unaddressed_threads, _project,
+    collect_discussions, collect_diverged_commits_count, discussions_pages,
+    discussions_path, parse_issues, parse_mrs, parse_threads, parse_todos,
+    parse_unaddressed_count, unaddressed_threads, _project,
 )
 
 
@@ -298,11 +298,95 @@ def test_malformed_discussions_payload_degrades_to_zero():
 
 
 def test_collect_discussions_gets_the_right_rest_path():
-    """The shell edge mirrors collect_diverged_commits_count: one GET, and
-    the project path is URL-encoded exactly as _project builds it."""
+    """The shell edge mirrors collect_diverged_commits_count, and the project
+    path is URL-encoded exactly as _project builds it."""
     with patch("worksweep.collectors._run_glab", return_value="[]") as g:
-        assert collect_discussions("pb-www", 3997) == "[]"
+        assert collect_discussions("pb-www", 3997) == ("[]",)
     args = g.call_args[0][0]
     assert args[0] == "api"
     assert args[1] == (f"projects/{_project('pb-www')}/merge_requests/3997"
-                       f"/discussions?per_page=100")
+                       f"/discussions?per_page=100&page=1")
+
+
+# --- pagination (fix-mode round 2, blocker 6) ------------------------------
+#
+# GitLab returns each SYSTEM note as its own discussion, so a busy MR blows
+# past per_page=100 on housekeeping alone. Unpaginated, the probe silently
+# reads page 1 and the reviewer's actual question -- older, so later in the
+# list -- never arrives. Fails closed AND silent, the worst combination.
+
+def _page(n_threads, first=0, author="leyang"):
+    return json.dumps([{"id": f"t{first + i}", "notes": [_note(author)]}
+                       for i in range(n_threads)])
+
+
+def test_parse_threads_accepts_a_sequence_of_pages():
+    pages = (_page(2, first=0), _page(2, first=2))
+    assert [t.id for t in parse_threads(pages)] == ["t0", "t1", "t2", "t3"]
+
+
+def test_parse_threads_still_accepts_a_single_page_string():
+    assert [t.id for t in parse_threads(_page(2))] == ["t0", "t1"]
+
+
+def test_unaddressed_count_spans_every_page():
+    pages = (_page(100, first=0), _page(3, first=100))
+    assert parse_unaddressed_count(pages, "chandler.hardy") == 103
+
+
+def test_the_probe_keeps_paging_until_a_short_page_arrives():
+    seen = []
+
+    def fetch(page):
+        seen.append(page)
+        return _page(100 if page < 3 else 7, first=(page - 1) * 100)
+
+    pages = discussions_pages(fetch)
+    assert seen == [1, 2, 3]
+    assert len(parse_threads(pages)) == 207
+
+
+def test_a_single_short_page_costs_exactly_one_call():
+    seen = []
+    pages = discussions_pages(lambda p: (seen.append(p), _page(4))[1])
+    assert seen == [1]
+    assert len(parse_threads(pages)) == 4
+
+
+def test_an_empty_first_page_costs_exactly_one_call():
+    seen = []
+    pages = discussions_pages(lambda p: (seen.append(p), "[]")[1])
+    assert seen == [1]
+    assert parse_threads(pages) == ()
+
+
+def test_paging_stops_at_the_cap_rather_than_looping_forever():
+    """A server that always answers a full page must not spin the sweep."""
+    seen = []
+
+    def fetch(page):
+        seen.append(page)
+        return _page(100, first=(page - 1) * 100)
+
+    discussions_pages(fetch)
+    assert seen == list(range(1, 21))
+
+
+def test_discussions_path_carries_the_page_and_per_page():
+    assert discussions_path("pb-www", 3997, 1) == (
+        f"projects/{_project('pb-www')}/merge_requests/3997"
+        f"/discussions?per_page=100&page=1")
+    assert discussions_path("pb-www", 3997, 4).endswith("&page=4")
+
+
+def test_collect_discussions_pages_through_glab():
+    calls = []
+
+    def fake(args, timeout=30):
+        calls.append(args[1])
+        return _page(100) if len(calls) == 1 else _page(2)
+
+    with patch("worksweep.collectors._run_glab", side_effect=fake):
+        pages = collect_discussions("pb-www", 3997)
+    assert [c.rsplit("&page=", 1)[1] for c in calls] == ["1", "2"]
+    assert len(parse_threads(pages)) == 102

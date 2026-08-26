@@ -78,14 +78,17 @@ class FeedbackResult:
     already_answered: bool = False  # nothing was waiting by the time we ran
 
 
-def _discussions_path(repo: str, iid: int) -> str:
-    return (f"projects/{collectors._project(repo)}/merge_requests/{int(iid)}"
-            f"/discussions?per_page=100")
+def _fetch_threads(run_glab: Callable, repo: str, iid: int) -> tuple:
+    """Every page of this MR's discussions.
 
-
-def _fetch_threads(run_glab: Callable, repo: str, iid: int) -> str:
+    Paged for the same reason the sweep probe is: GitLab files every system
+    note as its own discussion, so on a busy MR the reviewer's actual question
+    is not on page 1, and an unpaged read would decide nothing is waiting.
+    """
     try:
-        return run_glab(["api", _discussions_path(repo, iid)])
+        return collectors.discussions_pages(
+            lambda page: run_glab(
+                ["api", collectors.discussions_path(repo, iid, page)]))
     except Exception as e:
         raise RunnerError(f"could not read !{iid}'s threads: "
                           f"{type(e).__name__}: {e}")
