@@ -24,7 +24,35 @@ from .models import RUNNABLE_EXECUTORS, DiscordMessage, QueueRecord
 
 # Require an approval marker: the ✅ emoji or the word "approve" (any case).
 # Without it, numbers in the message are ignored.
-_HAS_MARKER_RE = re.compile(r"✅|approve", re.I)
+#
+# `(?<![a-z])` is load-bearing, not decoration: "approve" is a substring of
+# "disapprove", so a bare `✅|approve` read "disapprove all" as a blanket
+# approval of the entire queue -- and there is no un-approve path, so that is
+# unrecoverable by design. The lookbehind rejects dis-/un-/pre-fixed forms
+# while leaving "approved"/"approving" (suffixes) working, which is how people
+# actually write it.
+_HAS_MARKER_RE = re.compile(r"✅|(?<![a-z])approve", re.I)
+# A refusal that happens to contain the marker word. Checked against the text
+# IMMEDIATELY before a marker (up to two intervening words), so "don't approve
+# all" and "do not ever approve all" are refusals rather than approvals.
+#
+# Biased to fail closed on purpose: a missed approval costs one repeated
+# message, while a false one runs work nobody sanctioned and cannot be undone.
+_NEGATOR_RE = re.compile(
+    r"(?:\b(?:not|never|nope|no)\b"
+    r"|\bdo(?:es)?n['’]?t\b"
+    r"|\bcan(?:not|['’]?t)\b"
+    r"|\bwon['’]?t\b"
+    r"|\bstop\b)"
+    r"(?:\s+\w+){0,2}\W*$", re.I)
+
+
+def _approval_marker(text: str):
+    """The first approval marker in `text` that is not a refusal, or None."""
+    for m in _HAS_MARKER_RE.finditer(text or ""):
+        if not _NEGATOR_RE.search(text[:m.start()]):
+            return m
+    return None
 # A token is either a `lo-hi` range or a single number. The single branch
 # captures an optional leading `-` so a negative like `-1` is recognised and
 # dropped (rather than read as a bare `1`).
@@ -40,12 +68,10 @@ _APPROVABLE = ("proposed", "needs-input")
 # everything" must never be read as "ignore all questions" (decision 1). The one
 # member of difference from _APPROVABLE is the entire content of that decision.
 _APPROVE_ALL_STATUSES = ("proposed",)
-# The blanket marker must sit IMMEDIATELY before "all" -- `_HAS_MARKER_RE` is an
-# unanchored `✅|approve`, so a bare "marker present AND `all` present" predicate
-# would turn "✅ sounds good, that's all" into a full-queue approval. Composed
-# from _HAS_MARKER_RE.pattern so the marker stays single-sourced. Deliberate
-# consequence: `✅all` (no space) does not match.
-_APPROVE_ALL_RE = re.compile(rf"(?:{_HAS_MARKER_RE.pattern})\s+all\b", re.I)
+# What must follow the marker for a blanket approval. The marker has to sit
+# IMMEDIATELY before "all", or "✅ sounds good, that's all" would approve the
+# whole queue. Deliberate consequence: `✅all` (no space) does not match.
+_ALL_SUFFIX_RE = re.compile(r"\s+all\b", re.I)
 
 
 def parse_approval(text: str) -> Set[int]:
@@ -55,7 +81,7 @@ def parse_approval(text: str) -> Set[int]:
     ranges whose span exceeds _MAX_RANGE_SPAN (or that descend) are ignored; the
     rest of the tokens still parse.
     """
-    if not text or not _HAS_MARKER_RE.search(text):
+    if not text or _approval_marker(text) is None:
         return set()
     out: Set[int] = set()
     for lo_s, hi_s, sign, single in _TOKEN_RE.findall(text):
@@ -84,12 +110,16 @@ def parse_approve_all(text: str) -> bool:
        casual sign-off like "✅ sounds good, that's all" is NOT a blanket
        approval. (`_HAS_MARKER_RE` is unanchored; a "marker present AND `all`
        present" test would approve the whole queue on that sentence.)
+    1b. Sincerity -- the marker must not be a refusal. "disapprove all" and
+       "don't approve all" contain the marker word and mean its opposite; see
+       `_HAS_MARKER_RE` / `_NEGATOR_RE`.
     2. Precedence -- explicit numbers always win. `✅ 1,3 all good` names
        numbers, so it is a numbered approval and this returns False. This is an
        ORDERING constraint, not a filter: callers must not compute the blanket
        flag independently and union the two result sets.
     """
-    if not text or not _APPROVE_ALL_RE.search(text):
+    marker = _approval_marker(text) if text else None
+    if marker is None or not _ALL_SUFFIX_RE.match(text[marker.end():]):
         return False
     return not parse_approval(text)
 
