@@ -75,3 +75,9 @@ On authored MRs, worksweep currently emits an inert `triage` item ("changes requ
 - *Reply authenticity:* replies post from Chandler's account. Accepted — he approved posting replies outright, and the agent-review culture with Le is established. The "addressed in `<sha>`" format keeps replies auditable.
 - *Race with reviewers:* thread state re-fetched at run time, not trusted from the sweep snapshot.
 - *What this does NOT do:* never resolves threads, never touches other authors' MRs (authored-MR bucket only), never auto-approves, doesn't handle `ci_red` (stays triage).
+
+## Round 2 amendment (Chandler, mid-ceremony 2026-08-25)
+
+8. **Actor-attributed approvals.** The dashboard approve POSTs (`/approve` selected and approve-all) accept an optional `actor` string field. When present and equal to `"claude"`, the Discord audit line renders "(dashboard · claude)"; absent/other → "(dashboard)" exactly as today. Rationale: Chandler will sometimes tell Claude (on his laptop, tailnet) to accept items on his behalf — "✅ all, then move on" without context-switching to the dashboard; the ✅ gate stays a human-consent gate, so the audit trail must stay legible about which hand pressed the button. Claude-side policy (not enforced in code): agents only approve on Chandler's explicit instruction, never on their own initiative. *Rejected:* separate authenticated agent endpoint (overkill on a tailnet-only, CSRF-guarded writer); no attribution (audit ambiguity between human and agent approvals).
+   - AC7: WHEN an approve POST carries `actor: "claude"`, the Discord audit post SHALL contain "(dashboard · claude)"; WHEN the field is absent, the post SHALL contain "(dashboard)" unchanged (falsifying: `test_approve_actor_attribution` fails if the actor suffix is dropped or applied unconditionally).
+   - Scope note: validate/clamp the actor string (short whitelist or length-cap + sanitize) — it flows into a Discord post.
