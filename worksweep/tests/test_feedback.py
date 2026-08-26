@@ -186,8 +186,19 @@ def worktree(tmp_path):
     return str(wt)
 
 
-def _report(addressed=(), replied=(), escalated=()):
-    return {"addressed": list(addressed), "replied": list(replied),
+# The run reports the TEXT it posted, not just the thread id (f-019). Both
+# fixture families' reply bodies start with this, so the 47 existing call
+# sites keep working while the discriminating tests below supply their own.
+_DEFAULT_REPLY = "addressed in"
+
+
+def _report(addressed=(), replied=(), escalated=(), reply=_DEFAULT_REPLY):
+    def entry(e):
+        if isinstance(e, dict):
+            return {**e, "reply": e.get("reply", reply)}
+        return {"thread": e, "reply": reply}
+    return {"addressed": [entry(a) for a in addressed],
+            "replied": [entry(r) for r in replied],
             "escalated": list(escalated)}
 
 
@@ -781,7 +792,8 @@ def test_a_thread_this_run_closed_is_a_hard_failure(tmp_path, worktree):
 def test_a_thread_the_reviewer_closed_is_fine(tmp_path, worktree):
     """Only OUR closing is the violation -- the thread's owner may close it
     the moment they read the reply, and often does."""
-    sub = _Subprocess(worktree, report=_report(replied=["t1"]))
+    sub = _Subprocess(worktree, report=_report(replied=["t1"],
+                                               reply="answered"))
     closed = {"id": "t1", "notes": [
         _tnote("leyang", "question on t1", resolved=True),
         _tnote(ME, "answered", created_at=DURING_RUN, resolved=True,
@@ -805,7 +817,8 @@ def test_the_done_message_quotes_what_was_said_in_his_name(tmp_path,
                                                            worktree):
     """BLOCKER 2c: the replies go out under Chandler's identity. He audits
     the content; nothing here vets it."""
-    sub = _Subprocess(worktree, report=_report(replied=["t1"]))
+    sub = _Subprocess(worktree, report=_report(
+        replied=["t1"], reply="Good catch — the join is bounded"))
     answered = _answered("t1", body="Good catch — the join is bounded by "
                                     "the ranch filter above it.")
     result = _run(tmp_path, worktree, sub, [_waiting("t1")], [answered])
@@ -1277,3 +1290,98 @@ def test_closing_a_thread_the_report_omitted_is_also_a_hard_failure(tmp_path,
                          run_glab=glab, now=lambda: RUN_START)
     assert "t2" in str(e.value)
     assert "not its to close" in str(e.value)
+
+
+# --- f-019: attribute the reply to THIS run -------------------------------
+#
+# The window check asked "is there a note by Chandler at or after run start?".
+# Chandler answering from his phone WHILE the run was going satisfied that for
+# every thread in the batch -- so a wholly false report could complete `done`
+# and chain a re-review off commits nobody made.
+
+def test_a_reply_the_run_did_not_write_does_not_count(tmp_path, worktree):
+    """FALSIFYING. The note is Chandler's, inside the window, and on the right
+    thread -- and it is still not the reply the run says it posted."""
+    sub = _Subprocess(worktree, report=_report(replied=["t1"],
+                                               reply="addressed in deadbee"))
+    concurrent = {"id": "t1", "notes": [
+        _tnote("leyang", "question on t1"),
+        _tnote(ME, "answering this myself, on the train",
+               created_at=DURING_RUN)]}
+    glab = _Glab(_payload(_waiting("t1")), _payload(concurrent))
+    with pytest.raises(RunnerError) as e:
+        feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                         run_glab=glab, now=lambda: RUN_START)
+    assert "t1" in str(e.value)
+    assert "does not match" in str(e.value)
+
+
+def test_the_reply_it_did_write_is_accepted(tmp_path, worktree):
+    sub = _Subprocess(worktree, report=_report(replied=["t1"],
+                                               reply="addressed in deadbee"))
+    glab = _Glab(_payload(_waiting("t1")),
+                 _payload(_answered("t1", body="addressed in deadbee")))
+    result = feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                              run_glab=glab, now=lambda: RUN_START)
+    assert result.replied == 1
+
+
+def test_a_reply_the_run_only_prefixed_is_accepted(tmp_path, worktree):
+    """The posted note may carry more than the run reported -- a sentence of
+    explanation after the sha. What it may not do is be different text."""
+    sub = _Subprocess(worktree, report=_report(replied=["t1"],
+                                               reply="addressed in deadbee"))
+    glab = _Glab(_payload(_waiting("t1")),
+                 _payload(_answered("t1",
+                                    body="addressed in deadbee — the join is "
+                                         "bounded by the ranch filter")))
+    result = feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                              run_glab=glab, now=lambda: RUN_START)
+    assert result.replied == 1
+
+
+def test_a_claim_with_no_reported_text_is_rejected(tmp_path, worktree):
+    """An incomplete report is not a pass. Otherwise omitting the text is the
+    way around the check."""
+    sub = _Subprocess(worktree, report={"addressed": [], "escalated": [],
+                                        "replied": [{"thread": "t1"}]})
+    glab = _Glab(_payload(_waiting("t1")), _payload(_answered("t1")))
+    with pytest.raises(RunnerError) as e:
+        feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                         run_glab=glab, now=lambda: RUN_START)
+    assert "reported no reply text" in str(e.value)
+
+
+def test_a_claimed_commit_must_be_on_the_branch(tmp_path, worktree):
+    """The other half of f-019: the per-thread sha was discarded entirely, so
+    ALL addressed threads passed whenever the branch moved once -- including
+    for commits that were never made."""
+    class _NotAncestor(_Subprocess):
+        def __call__(self, cmd, **kw):
+            if "merge-base" in cmd:
+                self.calls.append(list(cmd))
+                return _Proc(1)
+            return super().__call__(cmd, **kw)
+
+    sub = _NotAncestor(worktree, remote_shas=(PRE_SHA, POST_SHA),
+                       report=_report(addressed=[{"thread": "t1",
+                                                  "sha": "deadbee"}]))
+    glab = _Glab(_payload(_waiting("t1")), _payload(_answered("t1")))
+    with pytest.raises(RunnerError) as e:
+        feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                         run_glab=glab, now=lambda: RUN_START)
+    assert "deadbee" in str(e.value)
+    assert "not on" in str(e.value)
+
+
+def test_the_ancestry_check_names_the_branch_it_checked(tmp_path, worktree):
+    sub = _Subprocess(worktree, remote_shas=(PRE_SHA, POST_SHA),
+                      report=_report(addressed=[{"thread": "t1",
+                                                 "sha": "deadbee"}]))
+    glab = _Glab(_payload(_waiting("t1")), _payload(_answered("t1")))
+    feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                     run_glab=glab, now=lambda: RUN_START)
+    checks = [c for c in sub.calls if "merge-base" in c]
+    assert len(checks) == 1
+    assert "deadbee" in checks[0]
+    assert f"origin/{BRANCH}" in checks[0]

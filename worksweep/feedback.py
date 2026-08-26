@@ -237,16 +237,20 @@ the fix.
 Then write your report to `{report}` in the checkout root, and do NOT commit \
 that file:
 
-    {{"addressed": [{{"thread": "<thread-id>", "sha": "<short-sha>"}}],
-     "replied": ["<thread-id>"],
+    {{"addressed": [{{"thread": "<thread-id>", "sha": "<short-sha>",
+                    "reply": "<the reply you posted, verbatim>"}}],
+     "replied": [{{"thread": "<thread-id>",
+                  "reply": "<the reply you posted, verbatim>"}}],
      "escalated": [{{"thread": "<thread-id>", "reason": "<one line>"}}]}}
 
 Every thread listed above must appear in exactly one of those three lists, and \
-only list one under `addressed` or `replied` if you really did post the reply: \
-afterwards Python re-reads the threads and checks that each thread you claim \
-now carries Chandler's own reply as its last note, and that origin/{branch} \
-moved whenever you claimed a commit. A report that does not match reality \
-fails the run.
+only list one under `addressed` or `replied` if you really did post the reply. \
+Afterwards Python re-reads the threads and checks that each thread you claim \
+carries a note from Chandler posted DURING this run whose text starts with the \
+`reply` you reported, and that every `sha` you claimed is actually a commit on \
+origin/{branch}. Copy the reply text verbatim -- a claim with missing or \
+mismatched text fails the run, because "somebody replied at some point" is \
+not evidence that YOU did.
 
 Do not touch any thread that is not listed above. Do not change the merge \
 request's title, description, reviewers or state. Do not merge anything."""
@@ -341,6 +345,8 @@ def _execute_in(item: WorkItem, cfg, checkout: str, iid: int, branch: str,
     # twice (fixed it AND was unsure about it) would otherwise report a tally
     # bigger than the number of threads it was given, and the tally is the
     # whole report -- so the strongest claim wins and the rest are dropped.
+    claims = dict(_claims(report.get("replied")))
+    claims.update(_claims(report.get("addressed")))   # addressed is stronger
     addressed = _ids(report.get("addressed"))
     replied = [t for t in _ids(report.get("replied")) if t not in addressed]
     handled = set(addressed) | set(replied)
@@ -348,7 +354,8 @@ def _execute_in(item: WorkItem, cfg, checkout: str, iid: int, branch: str,
                                             handled)
 
     after = _verify(run_subprocess, run_glab, cfg, item.repo, iid, branch,
-                    checkout, given, addressed, replied, pre_refs, run_start)
+                    checkout, given, addressed, replied, pre_refs, run_start,
+                    claims)
 
     # Nothing may fall off the end. A thread the report simply omitted is
     # still somebody waiting, so it is escalated rather than quietly counted
@@ -403,7 +410,8 @@ def _claude(run_subprocess: Callable, cfg, checkout: str, prompt: str) -> None:
 def _verify(run_subprocess: Callable, run_glab: Callable, cfg, repo: str,
             iid: int, branch: str, checkout: str,
             given: Sequence[ReviewThread], addressed: List[str],
-            replied: List[str], pre_refs: dict, run_start: str) -> dict:
+            replied: List[str], pre_refs: dict, run_start: str,
+            claims: dict) -> dict:
     """Trust nothing the run reported until git and GitLab agree with it.
 
     These check EFFECT, not shape. The earlier versions asked "does the world
@@ -461,11 +469,27 @@ def _verify(run_subprocess: Callable, run_glab: Callable, cfg, repo: str,
         if thread is None:
             raise RunnerError(f"the address-feedback run on !{iid} claims "
                               f"thread {tid}, which the MR no longer has")
-        if not _my_notes_since(thread, cfg.username, run_start):
+        posted = _my_notes_since(thread, cfg.username, run_start)
+        if not posted:
             raise RunnerError(
                 f"the address-feedback run on !{iid} claims it answered "
                 f"thread {tid}, but it did not post a reply there — its last "
                 f"word is {thread.last_author or 'nobody'}'s")
+        # f-019: and it has to be the reply the run SAID it wrote. Otherwise a
+        # note Chandler typed himself mid-run validates the claim -- and, in a
+        # batch, every other claim alongside it.
+        wanted = _squash(claims.get(tid, {}).get("reply", ""), _REPLY_QUOTE_MAX)
+        if not wanted:
+            raise RunnerError(
+                f"the address-feedback run on !{iid} claims thread {tid} but "
+                f"reported no reply text for it — an incomplete report is not "
+                f"proof it posted anything")
+        if not any(_squash(b, _REPLY_QUOTE_MAX).startswith(wanted)
+                   for b in posted):
+            raise RunnerError(
+                f"the address-feedback run on !{iid} claims thread {tid}, but "
+                f"the note it posted does not match the reply it reported "
+                f"({wanted!r})")
 
     # 4. A claimed commit has to be visible to the reviewer it was promised to.
     if addressed and _ref(branch) not in moved:
@@ -473,7 +497,26 @@ def _verify(run_subprocess: Callable, run_glab: Callable, cfg, repo: str,
             f"the address-feedback run on !{iid} claims {len(addressed)} "
             f"commit(s), but origin/{branch} never moved — the reply points "
             f"at a sha the reviewer cannot see")
+    # f-019: the branch moving ONCE used to clear every addressed thread at
+    # once, including ones whose sha was never committed. Each claimed commit
+    # has to actually be on the branch the reviewer will look at.
+    for tid in addressed:
+        sha = claims.get(tid, {}).get("sha", "")
+        if not sha:
+            continue          # a fix reported without a sha is checked above
+        proc = _run(["git", "-C", checkout, "merge-base", "--is-ancestor",
+                     sha, _ref_name(branch)], run_subprocess,
+                    timeout=_FETCH_TIMEOUT)
+        if proc.returncode != 0:
+            raise RunnerError(
+                f"the address-feedback run on !{iid} says thread {tid} was "
+                f"fixed in {sha}, but that commit is not on "
+                f"{_ref_name(branch)} — the reviewer cannot see it")
     return after
+
+
+def _ref_name(branch: str) -> str:
+    return f"origin/{branch}"
 
 
 def _ref(branch: str) -> str:
@@ -585,6 +628,27 @@ def _forget(path: str) -> None:
         os.remove(path)
     except OSError:
         pass
+
+
+def _claims(raw) -> dict:
+    """{thread id: {"reply": text, "sha": sha}} from a report list.
+
+    f-019: the run has to say WHAT it posted, not merely that it posted. A
+    thread id alone was satisfied by any note of Chandler's inside the window
+    -- including one he typed himself, on his phone, while the run was going,
+    which validated every other claim in the same batch.
+    """
+    out = {}
+    for entry in (raw or []):
+        if isinstance(entry, dict):
+            tid = entry.get("thread")
+            claim = {"reply": entry.get("reply") or "",
+                     "sha": str(entry.get("sha") or "")}
+        else:
+            tid, claim = entry, {"reply": "", "sha": ""}
+        if isinstance(tid, str) and tid and tid not in out:
+            out[tid] = claim
+    return out
 
 
 def _ids(raw) -> List[str]:
