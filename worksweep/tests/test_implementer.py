@@ -806,3 +806,18 @@ def test_a_failing_detach_never_masks_the_implement_result(tmp_path):
     result = execute(_item(), _cfg(tmp_path), [_box()], run_subprocess=run,
                      run_ssh=edges.ssh, http_get=edges.http)
     assert result.mr_iid == 42
+
+
+# --- magi 0.2.4: no --no-rebuttal on the advisory run (2026-08-26) ---------
+
+def test_the_advisory_magi_invocation_no_longer_suppresses_rebuttal(tmp_path):
+    """FALSIFYING: re-adding the flag fails here. The existing happy-path
+    assertion only substring-matched `--advisory`, so the flag was invisible
+    to it -- and passing one magi 0.2.4 no longer defines is an
+    unknown-argument error, not a no-op."""
+    _, edges = _run_execute(tmp_path)
+    advisory = [c for c, _ in edges.calls
+                if c[0] == "claude" and "--advisory" in " ".join(c)]
+    assert len(advisory) == 1
+    assert advisory[0][2] == "/magi:magi-review !42 --advisory --draft-findings"
+    assert "--no-rebuttal" not in " ".join(advisory[0])
