@@ -63,7 +63,8 @@ from .formatter import (
     DISCORD_MAX_CHARS, _FOOTER, _HEADER, _truncate_bytes,
     format_messages_from_records, format_reproposed,
 )
-from .queue import auto_approve, load_queue, reconcile, save_queue
+from .queue import (QueueLockError, auto_approve, load_queue, null_lock,
+                    reconcile, save_queue, write_lock)
 
 _QUEUE_DEFAULT = os.path.expanduser("~/.worksweep/queue.json")
 _CURSOR_DEFAULT = os.path.expanduser("~/.worksweep/intake-cursor")
@@ -341,9 +342,20 @@ def _run_intake(cfg: WorksweepConfig) -> int:
         return 1
 
     now = _now()
-    updated, approved = apply_approvals(records, messages, cfg.discord_user_id, now)
-    if approved != set():
-        save_queue(qpath, updated)
+    try:
+        with write_lock(qpath):
+            # Re-load INSIDE the lock: the Discord fetch above can take
+            # seconds, and a sweep or a dashboard tap may have written since
+            # the snapshot at the top of this function.
+            records = load_queue(qpath)
+            updated, approved = apply_approvals(records, messages,
+                                                cfg.discord_user_id, now)
+            if approved != set():
+                save_queue(qpath, updated)
+    except QueueLockError as e:
+        print(f"worksweep: intake could not lock the queue: {e}",
+              file=sys.stderr)
+        return 1
 
     # Advance the cursor to the newest message id seen so the next poll only
     # reads newer messages (Discord ids are monotonically increasing snowflakes).
@@ -532,11 +544,25 @@ def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
         # Observe (not change) reconcile's fresh-wins rule so a revoked ✅ can
         # be explained instead of the item just quietly reappearing.
         reproposed: set = set()
-        records = reconcile(records0, items, deps["now"](), resolved=resolved,
-                            resets=reproposed)
-        records = auto_approve(records, cfg.auto_approve)
+        # Everything above is sensing (GraphQL, probes, todos) and touches no
+        # state. The lock goes around the read-modify-write ONLY -- holding it
+        # across ~90s of network work would stall every dashboard tap.
         try:
-            deps["save"](records)
+            with deps.get("queue_lock", null_lock)():
+                # Re-load inside the lock: `records0` was read before all that
+                # network work, and intake or the dashboard may have written
+                # since. Bootstrap is idempotent, so re-running it here is
+                # cheap and keeps the seeded rows.
+                fresh_records = deps["load"]()
+                fresh_records = assessor.bootstrap_magi_records(
+                    fresh_records, authored, deps["now"]())
+                records = reconcile(fresh_records, items, deps["now"](),
+                                    resolved=resolved, resets=reproposed)
+                records = auto_approve(records, cfg.auto_approve)
+                deps["save"](records)
+        except QueueLockError as e:
+            print(f"worksweep: could not lock the queue: {e}", file=sys.stderr)
+            records = records0
         except OSError as e:
             print(f"worksweep: could not persist queue: {e}", file=sys.stderr)
 
@@ -803,6 +829,9 @@ def main(argv=None) -> int:
             "execute_address_feedback": (_dry_run_address_feedback
                                          if args.dry_run
                                          else _execute_address_feedback),
+            # --dry-run never saves, so it never needs to exclude anyone.
+            "queue_lock": (null_lock if args.dry_run
+                           else (lambda: write_lock(_queue_path()))),
         }
         return _runner.run_once(cfg, deps)
 
@@ -837,6 +866,8 @@ def main(argv=None) -> int:
     # Same reasoning: one read-only GET per authored MR with unresolved
     # threads, so --dry-run runs it for real too.
     deps["discussions"] = collectors.collect_discussions
+    if not args.dry_run:
+        deps["queue_lock"] = lambda: write_lock(_queue_path())
     return run_sweep(cfg, deps)
 
 
