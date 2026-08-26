@@ -58,6 +58,7 @@ from . import assessor, collectors, curator, devslots, implementer, keepcurrent
 from .approvals import apply_approvals
 from .config import WorksweepConfig, load_config
 from .discord_read import fetch_messages
+from .models import WorkItem
 from .formatter import (
     DISCORD_MAX_CHARS, _FOOTER, _HEADER, _truncate_bytes,
     format_messages_from_records, format_reproposed,
@@ -369,26 +370,39 @@ def _run_intake(cfg: WorksweepConfig) -> int:
 
 
 def _with_unaddressed(mr, cfg: WorksweepConfig,
-                      discussions: Callable[[str, int], str]):
-    """`mr` rebound with its unaddressed-thread count. Never raises.
+                      discussions: Callable[[str, int], str]) -> tuple:
+    """`(mr rebound with its unaddressed-thread count, probe_ok)`. Never raises.
 
-    Skipped (count stays 0) for an MR with nothing unresolved -- there is
-    nothing for the probe to find -- and for one already handed off, whose
-    threads belong to the maintainer who will merge it. A probe failure prints
-    and returns the MR untouched: a missing count under-proposes work, which
-    is the safe direction.
+    Skipped (count stays 0, probe_ok True) for an MR with nothing unresolved --
+    there is nothing for the probe to find -- and for one already handed off,
+    whose threads belong to the maintainer who will merge it.
+
+    A probe failure prints and returns the MR untouched with probe_ok False.
+    That flag matters twice: the caller must not DROP a feedback row it can no
+    longer derive (a freed number gets reused, and the highest is reused
+    first, so a stale `✅ 12` would approve something else entirely), and it
+    must not claim the signal is CLEAR when it simply could not look.
     """
     if mr.unresolved_count <= 0 or assessor.is_handed_off(mr, cfg.username):
-        return mr
+        return mr, True
     try:
         raw = discussions(mr.repo, mr.iid)
     except Exception as e:
         print(f"worksweep: discussions probe for {mr.repo}!{mr.iid} failed: "
               f"{type(e).__name__}: {e}", file=sys.stderr)
-        return mr
+        return mr, False
     return dataclasses.replace(
         mr, unaddressed_count=collectors.parse_unaddressed_count(
-            raw, cfg.username))
+            raw, cfg.username)), True
+
+
+def _retained_feedback(prior: WorkItem) -> WorkItem:
+    """The prior feedback row, carried forward because the probe could not
+    re-derive it. Marked so the digest says why it looks stale."""
+    why = prior.why or ""
+    if "(probe failed)" not in why:
+        why = f"{why} (probe failed)".strip()
+    return dataclasses.replace(prior, why=why, status="proposed")
 
 
 def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
@@ -420,15 +434,22 @@ def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
         # matching the Task H diverged-commits pattern) and never fatal: a bad
         # call degrades that ONE MR to zero unaddressed threads, which costs a
         # sweep of address-feedback work, not the digest.
+        records0 = deps["load"]()
+        prior_by_id = {r.item.id: r.item for r in records0}
         discussions_edge = deps.get("discussions")
+        probe_failed = set()
         if discussions_edge is not None:
-            authored = [_with_unaddressed(mr, cfg, discussions_edge)
-                        for mr in authored]
+            probed = []
+            for mr in authored:
+                mr, ok = _with_unaddressed(mr, cfg, discussions_edge)
+                probed.append(mr)
+                if not ok:
+                    probe_failed.add(f"feedback:{mr.repo}!{mr.iid}")
+            authored = probed
 
         items = []
         for mr in review_mrs:
             items += assessor.assess_review_request(mr, cfg.username)
-        records0 = deps["load"]()
         records0 = assessor.bootstrap_magi_records(
             records0, authored, deps["now"]())
         for mr in authored:
@@ -484,7 +505,25 @@ def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
             items += assessor.assess_todo(td)
         items = assessor.dedupe(items)
 
+        # A feedback row the probe could not re-derive is carried forward
+        # rather than dropped. Only when the assessor produced nothing for it:
+        # `changes_requested` is known without the probe, so that arm is still
+        # derivable and must not be shadowed by a stale row.
+        emitted = {it.id for it in items}
+        for fid in sorted(probe_failed - emitted):
+            if fid in prior_by_id:
+                items.append(_retained_feedback(prior_by_id[fid]))
+
         resolved = assessor.resolutions(review_mrs, cfg.username, authored)
+        # A feedback id whose signal is provably gone -- nothing unaddressed,
+        # no changes requested, and the probe actually looked. This is the one
+        # reason strong enough to close an `error` row instead of retaining it
+        # forever (see queue._CLOSES_AN_ERROR).
+        for mr in authored:
+            fid = f"feedback:{mr.repo}!{mr.iid}"
+            if (fid not in resolved and fid not in probe_failed
+                    and mr.unaddressed_count == 0 and not mr.changes_requested):
+                resolved[fid] = "signal-cleared"
         # Observe (not change) reconcile's fresh-wins rule so a revoked ✅ can
         # be explained instead of the item just quietly reappearing.
         reproposed: set = set()

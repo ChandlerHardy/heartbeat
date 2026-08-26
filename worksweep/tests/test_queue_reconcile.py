@@ -90,3 +90,140 @@ def test_retained_numbers_are_stable_when_lower_drops():
     assert ids["a"].number == 1
     assert ids["c"].number == 3
     assert "b" not in ids
+
+
+# --- consent across an arm swap (fix-mode round 2, blocker 4) --------------
+#
+# The feedback id is deliberately stable while its EXECUTOR changes between
+# the runnable `address-feedback` arm and the informational `triage` one. That
+# made reconcile's same-sha branch launder consent: a ✅ given to an
+# informational row carried over onto a row that now posts replies under
+# Chandler's name.
+
+NOW = T1
+
+
+def _fb(number=3, executor="address-feedback", status="proposed",
+        why="2 unaddressed threads", sha="s1", iid=3997):
+    return QueueRecord(
+        number=number, first_seen=NOW, last_seen=NOW,
+        item=WorkItem(schema_version=1, id=f"feedback:pb-www!{iid}",
+                      repo="pb-www", kind="feedback", executor=executor,
+                      risk="low", why=why,
+                      web_url=f"https://gl/x/-/merge_requests/{iid}", sha=sha,
+                      status=status, branch="chardy/1588-ranch-data"))
+
+
+def test_an_approved_triage_row_does_not_carry_its_tick_onto_a_runnable_one():
+    """FALSIFYING. The ✅ was given to "changes requested — go look". It must
+    not silently authorise a run that replies in his name."""
+    prior = [_fb(status="approved", executor="triage", why="changes requested")]
+    fresh = [_fb(executor="address-feedback", why="2 unaddressed threads").item]
+    resets = set()
+    out = reconcile(prior, fresh, NOW, resets=resets)
+    assert out[0].item.status == "proposed"
+    assert out[0].item.executor == "address-feedback"
+    assert out[0].number == 3                  # keeps its approval handle
+    assert resets == {3}                       # and he is told why
+
+
+def test_the_swap_back_also_resets():
+    prior = [_fb(status="approved", executor="address-feedback")]
+    fresh = [_fb(executor="triage", why="changes requested").item]
+    out = reconcile(prior, fresh, NOW, resets=set())
+    assert out[0].item.status == "proposed"
+
+
+def test_new_threads_arriving_need_a_new_tick():
+    """Same executor, same sha, but the ask grew. The ✅ covered two threads;
+    the third is work he has not seen."""
+    prior = [_fb(status="approved", why="2 unaddressed threads")]
+    fresh = [_fb(why="3 unaddressed threads").item]
+    resets = set()
+    out = reconcile(prior, fresh, NOW, resets=resets)
+    assert out[0].item.status == "proposed"
+    assert resets == {3}
+
+
+def test_an_unchanged_address_feedback_row_keeps_its_approval():
+    prior = [_fb(status="approved")]
+    out = reconcile(prior, [_fb().item], NOW, resets=set())
+    assert out[0].item.status == "approved"
+
+
+def test_a_live_claim_is_never_rewritten_by_a_sweep():
+    """A `running` row is mid-flight. Merging fresh content into it would let
+    a sweep rewrite the why/branch of work already in progress."""
+    prior = [_fb(status="running", why="2 unaddressed threads")]
+    fresh = [_fb(why="5 unaddressed threads").item]
+    out = reconcile(prior, fresh, NOW, resets=set())
+    assert out[0].item.status == "running"
+    assert out[0].item.why == "2 unaddressed threads"
+    assert out[0].last_seen == NOW             # still seen this sweep
+
+
+def test_a_running_row_survives_an_executor_change_untouched():
+    prior = [_fb(status="running", executor="address-feedback")]
+    fresh = [_fb(executor="triage", why="changes requested").item]
+    out = reconcile(prior, fresh, NOW, resets=set())
+    assert out[0].item.status == "running"
+    assert out[0].item.executor == "address-feedback"
+
+
+def test_a_needs_input_row_unstrands_when_the_arm_changes():
+    """W7: a halted address-feedback row whose signal decayed to the
+    informational arm used to stay `needs-input` forever -- not dismissable,
+    not runnable, and answering a question nobody could act on."""
+    from worksweep.queue import is_dismissable
+    prior = [_fb(status="needs-input", executor="address-feedback")]
+    fresh = [_fb(executor="triage", why="changes requested").item]
+    out = reconcile(prior, fresh, NOW, resets=set())
+    assert out[0].item.status == "proposed"
+    assert is_dismissable(out[0].item) is True
+
+
+def test_a_needs_input_row_stays_halted_when_the_arm_does_not_change():
+    prior = [_fb(status="needs-input", why="2 unaddressed threads")]
+    out = reconcile(prior, [_fb().item], NOW, resets=set())
+    assert out[0].item.status == "needs-input"
+
+
+def test_other_executors_keep_their_approval_when_the_why_drifts():
+    """Rule (c) is scoped to address-feedback. A keep-current row whose commit
+    count moved must not lose its ✅ -- it is auto-approved anyway, and
+    churning it would re-post the digest line every sweep."""
+    prior = [_fb(number=4, executor="keep-current", status="approved",
+                 why="7 commits behind master")]
+    fresh = [_fb(number=4, executor="keep-current",
+                 why="9 commits behind master").item]
+    out = reconcile(prior, fresh, NOW, resets=set())
+    assert out[0].item.status == "approved"
+
+
+# --- stranded error rows (fix-mode round 2, warning 12) --------------------
+
+def test_an_errored_feedback_row_closes_when_the_signal_clears():
+    """The run failed, then the reviewer resolved everything themselves. The
+    error row is no longer emitted, so it was retained forever -- a permanent
+    ⚠️ on the dashboard for work that no longer exists."""
+    prior = [_fb(status="error")]
+    out = reconcile(prior, [], NOW,
+                    resolved={"feedback:pb-www!3997": "signal-cleared"})
+    assert out[0].item.status == "done"
+    assert out[0].item.done_reason == "signal-cleared"
+
+
+def test_an_errored_row_is_still_retained_for_any_other_reason():
+    """Scoped deliberately: only a cleared signal closes an error row. Every
+    other resolution leaves the existing retain-and-retry behaviour alone."""
+    prior = [_fb(status="error")]
+    out = reconcile(prior, [], NOW,
+                    resolved={"feedback:pb-www!3997": "handed-off"})
+    assert out[0].item.status == "error"
+
+
+def test_a_cleared_signal_does_not_disturb_a_live_claim():
+    prior = [_fb(status="running")]
+    out = reconcile(prior, [], NOW,
+                    resolved={"feedback:pb-www!3997": "signal-cleared"})
+    assert out[0].item.status == "running"

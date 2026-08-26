@@ -28,7 +28,28 @@ _TERMINAL = ("done", "error")
 # to `approved` is a fresh Discord ✅ (approvals.apply_approvals).
 _RETAIN_IF_GONE = ("approved", "running", "done", "error", "needs-input")
 _NEEDS_INPUT = "needs-input"
+# Executors whose approval is tied to the SIZE of the ask, not just the sha.
+# An address-feedback ✅ covers the threads it named; three threads is not the
+# consent that was given for two.
+_WHY_SENSITIVE = ("address-feedback",)
+# Resolution reasons strong enough to close an already-`error` row rather than
+# retain it. Deliberately narrow: only "the signal is provably gone".
+_CLOSES_AN_ERROR = ("signal-cleared",)
 _COMPACT_AFTER_DAYS = 90
+
+
+def _consent_holds(prior: WorkItem, fresh: WorkItem) -> bool:
+    """Whether `prior`'s status may carry onto `fresh` at an unchanged sha.
+
+    For most executors the sha IS the ask, so an unchanged sha means unchanged
+    consent. `address-feedback` is different: its sha is the MR head, but what
+    was approved is a set of threads, and a reviewer can add a thread without
+    anyone pushing a commit. Its why-string carries that count, so a changed
+    why means a changed ask.
+    """
+    if prior.executor not in _WHY_SENSITIVE:
+        return True
+    return prior.why == fresh.why
 
 
 def _older_than_days(iso_ts: str, iso_now: str, days: int) -> bool:
@@ -211,7 +232,27 @@ def reconcile(existing: List[QueueRecord], fresh: List[WorkItem],
             next_num += 1
             continue
         ps = prior.item.status
-        if ps == _NEEDS_INPUT:
+        if ps == "running":
+            # A live claim reconciles WHOLLY from the prior record. The
+            # executor is mid-flight against exactly this item; merging fresh
+            # content in would let a sweep rewrite the why, branch or executor
+            # of work already in progress, and the claim would finish against
+            # a description of itself that nobody consented to.
+            out.append(QueueRecord(number=prior.number, item=prior.item,
+                                   first_seen=prior.first_seen, last_seen=now))
+            continue
+        if prior.item.executor != it.executor:
+            # The ARM changed under a stable id (the feedback row moves between
+            # runnable `address-feedback` and informational `triage`). A ✅
+            # given to one arm is not consent for the other -- "go look at
+            # this" is not "reply to the reviewer in my name" -- so any
+            # executor change re-proposes. This also un-strands a `needs-input`
+            # row whose signal decayed: it becomes an ordinary proposed row
+            # again, and therefore dismissable.
+            if ps == "approved" and resets is not None:
+                resets.add(prior.number)
+            merged = dataclasses.replace(it, status="proposed")
+        elif ps == _NEEDS_INPUT:
             # A halted item stays halted no matter what the sweep says (even
             # on a new sha): re-proposing it would let the runner re-claim
             # work the human was asked to unblock, and the question would
@@ -227,7 +268,7 @@ def reconcile(existing: List[QueueRecord], fresh: List[WorkItem],
                                        first_seen=prior.first_seen, last_seen=now))
                 continue
             merged = dataclasses.replace(it, status="proposed")
-        elif prior.item.sha == it.sha:
+        elif prior.item.sha == it.sha and _consent_holds(prior.item, it):
             # Carry the executor's own bookkeeping across the sweep. `dev_box`
             # in particular: issue items have sha="" so this branch fires
             # EVERY sweep, and rebuilding from the fresh item (dev_box="")
@@ -252,6 +293,24 @@ def reconcile(existing: List[QueueRecord], fresh: List[WorkItem],
         if r.item.id in fresh_ids:
             continue
         reason = resolved.get(r.item.id)
+        if reason in _CLOSES_AN_ERROR:
+            if r.item.status == "error":
+                # The run failed, and then the signal went away on its own
+                # (the reviewer answered or closed everything themselves).
+                # Retaining the error row leaves a permanent warning on the
+                # dashboard for work that no longer exists.
+                out.append(QueueRecord(
+                    number=r.number, first_seen=r.first_seen, last_seen=now,
+                    item=dataclasses.replace(r.item, status="done",
+                                             done_reason=reason)))
+                continue
+            if r.item.status == "running":
+                # A cleared signal RACES the live claim -- the run itself is
+                # what clears it. Closing the claim from under the executor
+                # would report the work finished before it is. Retain, and let
+                # the executor (or the stale reap) settle it.
+                out.append(r)
+                continue
         if reason and r.item.status not in _TERMINAL:
             out.append(QueueRecord(
                 number=r.number, first_seen=r.first_seen, last_seen=now,

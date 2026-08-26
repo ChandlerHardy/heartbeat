@@ -391,3 +391,103 @@ def test_run_sweep_wires_the_real_discussions_edge():
                          lambda cfg, deps: (seen.update(deps=deps), 0)[1]):
         assert m.main([]) == 0
     assert seen["deps"]["discussions"] is collectors.collect_discussions
+
+
+# --- probe failure and cleared signals (fix-mode round 2, 11 + 12) ---------
+
+def _queue_rec(number, executor="address-feedback", status="proposed",
+               why="2 unaddressed threads", iid=3997):
+    from worksweep.models import QueueRecord, WorkItem
+    return QueueRecord(
+        number=number, first_seen="2026-08-25T00:00:00+00:00",
+        last_seen="2026-08-25T00:00:00+00:00",
+        item=WorkItem(schema_version=1, id=f"feedback:pb-www!{iid}",
+                      repo="pb-www", kind="feedback", executor=executor,
+                      risk="low", why=why,
+                      web_url=f"https://gl/x/-/merge_requests/{iid}",
+                      sha=f"s{iid}", status=status,
+                      branch="chardy/1588-ranch-data"))
+
+
+def _saved(store):
+    saved = [p for p in store if isinstance(p, tuple) and p[0] == "saved"]
+    return saved[-1][1] if saved else []
+
+
+def test_a_failed_probe_keeps_the_row_it_cannot_re_derive():
+    """A dropped row frees its number for reuse, and the highest number is
+    reused first -- so a stale `✅ 12` on Chandler's phone would approve a
+    completely different item."""
+    def boom(repo, iid):
+        raise RuntimeError("glab api timed out after 30s")
+
+    posts = []
+    prior = [_queue_rec(12)]
+    rc = run_sweep(_cfg(), _probe_deps(posts, _gql(authored_nodes=[_authored()]),
+                                       discussions=boom, queue=prior))
+    assert rc == 0
+    rows = {r.item.id: r for r in _saved(posts)}
+    row = rows["feedback:pb-www!3997"]
+    assert row.number == 12
+    assert row.item.executor == "address-feedback"
+    assert "probe failed" in row.item.why
+
+
+def test_a_failed_probe_does_not_invent_a_row_that_never_existed():
+    posts = []
+    def boom(repo, iid):
+        raise RuntimeError("nope")
+    run_sweep(_cfg(), _probe_deps(posts, _gql(authored_nodes=[_authored()]),
+                                  discussions=boom))
+    assert "feedback:pb-www!3997" not in {r.item.id for r in _saved(posts)}
+
+
+def test_a_failed_probe_never_overrides_a_row_the_assessor_still_emits():
+    """changes_requested is known without the probe, so the informational arm
+    is still derivable -- the retained row must not shadow it."""
+    posts = []
+    prior = [_queue_rec(12)]
+    def boom(repo, iid):
+        raise RuntimeError("nope")
+    run_sweep(_cfg(), _probe_deps(
+        posts, _gql(authored_nodes=[_authored(changes_requested=True)]),
+        discussions=boom, queue=prior))
+    rows = {r.item.id: r for r in _saved(posts)}
+    assert rows["feedback:pb-www!3997"].item.executor == "triage"
+    assert rows["feedback:pb-www!3997"].item.why == "changes requested"
+
+
+def test_a_cleared_signal_closes_a_stranded_error_row():
+    """W12: the run errored, then the reviewer resolved everything. Without
+    this the ⚠️ row sits on the dashboard forever."""
+    posts = []
+    prior = [_queue_rec(12, status="error")]
+    run_sweep(_cfg(), _probe_deps(
+        posts, _gql(authored_nodes=[_authored()]),
+        discussions=lambda repo, iid: _threads("me"), queue=prior))
+    row = {r.item.id: r for r in _saved(posts)}["feedback:pb-www!3997"]
+    assert row.item.status == "done"
+    assert row.item.done_reason == "signal-cleared"
+
+
+def test_a_failed_probe_never_reports_a_cleared_signal():
+    """We do not know what the threads say, so we may not claim they are
+    settled -- that would close an error row on a guess."""
+    posts = []
+    prior = [_queue_rec(12, status="error")]
+    def boom(repo, iid):
+        raise RuntimeError("nope")
+    run_sweep(_cfg(), _probe_deps(posts, _gql(authored_nodes=[_authored()]),
+                                  discussions=boom, queue=prior))
+    row = {r.item.id: r for r in _saved(posts)}["feedback:pb-www!3997"]
+    assert row.item.status != "done"
+
+
+def test_changes_requested_is_never_a_cleared_signal():
+    posts = []
+    prior = [_queue_rec(12, status="error")]
+    run_sweep(_cfg(), _probe_deps(
+        posts, _gql(authored_nodes=[_authored(changes_requested=True)]),
+        discussions=lambda repo, iid: _threads("me"), queue=prior))
+    row = {r.item.id: r for r in _saved(posts)}["feedback:pb-www!3997"]
+    assert row.item.status != "done"
