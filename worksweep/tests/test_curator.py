@@ -445,3 +445,88 @@ def test_curate_gives_up_after_two_failed_attempts():
 
     assert curate(recs, NOW, run_llm=llm) is None
     assert len(calls) == 2
+
+
+# --- address-feedback in the digest (2026-08-25) --------------------------
+#
+# Rule 2 used to key on `executor == "triage"`, which now covers only half the
+# feedback rows. A rename that missed one of these two call sites would drop
+# real feedback out of the briefing entirely -- the M3.5 silent-vanish class.
+
+def _af(number=5, iid=3997, status="proposed"):
+    return _rec(number, _wi(iid=iid, kind="feedback",
+                            executor="address-feedback", status=status,
+                            why="2 unaddressed threads"))
+
+
+def test_partition_counts_keys_feedback_on_address_feedback():
+    """FALSIFYING (AC #13). The old predicate carried BOTH kinds in one line;
+    a naive rename drops CI rows from the actionable count. Both must survive.
+    """
+    ci = _rec(6, _wi(iid=4064, kind="ci_red", executor="triage",
+                     status="proposed", why="head pipeline failed"))
+    info = _rec(7, _wi(iid=4065, kind="feedback", executor="triage",
+                       status="proposed", why="changes requested"))
+    n, m = partition_counts([_af(), ci, info])
+    assert (n, m) == (3, 0)
+
+
+def test_partition_counts_still_holds_a_ci_row_actionable_on_its_own():
+    ci = _rec(6, _wi(iid=4064, kind="ci_red", executor="triage",
+                     status="proposed", why="head pipeline failed"))
+    assert partition_counts([ci]) == (1, 0)
+
+
+def test_the_feedback_clause_keeps_its_pre_existing_status_blindness():
+    """Pins behaviour this change deliberately did NOT touch: the feedback/CI
+    clause has never gated on status (unlike the magi/issue/stale clauses), so
+    the split must not quietly introduce one. The digest header's counts for
+    existing rows stay exactly where they were."""
+    triage_done = _rec(6, _wi(iid=4065, kind="feedback", executor="triage",
+                              status="done", why="changes requested"))
+    assert partition_counts([_af(status="done")]) == (1, 0)
+    assert partition_counts([triage_done]) == (1, 0)
+
+
+def test_curator_requires_feedback_numbers():
+    """FALSIFYING (AC #13). An `address-feedback` row is a first-class ask --
+    Chandler ✅s it or it never runs -- so a briefing that quietly folds it
+    into the low-priority tally is rejected, exactly as for magi-review.
+
+    Mutation: drop the executor from the required-set predicate and the
+    missing-number case starts validating.
+    """
+    recs = [_rec(1, _wi(iid=4061, executor="magi-review")), _af(number=5)]
+    without = "**Needs your review:**\n**1.** pb-www !4061 -- review requested"
+    assert validate(without, recs) is False
+
+    with_it = ("**Needs your review:**\n**1.** pb-www !4061 -- review requested\n\n"
+               "**Feedback / CI on your MRs:**\n"
+               "**5.** pb-www !3997 -- 2 unaddressed threads -- ✅ to address")
+    assert validate(with_it, recs) is True
+
+
+def test_an_approved_address_feedback_number_is_required_too():
+    recs = [_af(number=5, status="approved")]
+    assert validate("nothing to report", recs) is False
+
+
+def test_a_done_address_feedback_number_is_not_required():
+    recs = [_af(number=5, status="done")]
+    assert validate("nothing to report", recs) is True
+
+
+def test_the_informational_feedback_row_is_not_required():
+    """`changes requested` with every thread already answered has nothing to
+    ✅ -- it is allowed to be collapsed into the held tally."""
+    recs = [_rec(5, _wi(iid=4065, kind="feedback", executor="triage",
+                        status="proposed", why="changes requested"))]
+    assert validate("nothing needs you right now", recs) is True
+
+
+def test_prompt_rule_2_names_both_feedback_executors():
+    recs = [_af()]
+    prompt = build_prompt(recs, NOW)
+    assert "address-feedback" in prompt
+    assert "✅ to address" in prompt
+    assert "ci_red" in prompt

@@ -106,8 +106,11 @@ Write the briefing as plain text with these rules, in this order:
    `**{number}.** {repo} !{ref} -- {short title} -- {why}` (the number
    MUST be bolded `**{number}.**` -- a bare leading `12.` makes Discord
    render the line as an ordered list and eat the number).
-2. "**Feedback / CI on your MRs:**" -- one line per remaining item whose executor
-   is `triage` and whose kind is `feedback` or `ci_red`, same line format.
+2. "**Feedback / CI on your MRs:**" -- one line per remaining item whose kind is
+   `feedback` or `ci_red`, same line format. Append " -- ✅ to address" to any
+   whose executor is `address-feedback`: those are threads waiting on a reply
+   and worksweep will answer them once you ✅ the number. The rest (executor
+   `triage`) are yours to handle by hand -- no affordance.
 2a. If any items have kind `stale` (executor `keep-current`), write exactly
    ONE trailing line for ALL of them together: "Auto-merging master into:
    !{ref}, !{ref}, ..." -- seneschal merges these without a ✅. Never give
@@ -264,17 +267,21 @@ def validate(output: str, records: List[QueueRecord]) -> bool:
               f"invented number(s) {sorted(invented)}", file=sys.stderr)
         return False
 
-    # Required = every proposed/approved magi-review item AND every
-    # proposed/approved assigned-issue item: both are first-class asks that a
-    # curated briefing may never silently drop (2026-08-18: the LLM folded four
-    # new assigned issues into the low-priority line and they vanished).
+    # Required = every proposed/approved magi-review item, every
+    # proposed/approved address-feedback item, AND every proposed/approved
+    # assigned-issue item: all three are first-class asks that a curated
+    # briefing may never silently drop (2026-08-18: the LLM folded four new
+    # assigned issues into the low-priority line and they vanished). An
+    # address-feedback row is only work if its number reaches Chandler -- it
+    # runs on a ✅ against that number and on nothing else.
     required = {r.number for r in records
                 if r.item.status in _MAGI_LEAD_STATUSES
-                and (r.item.executor == "magi-review" or r.item.kind == "issue")}
+                and (r.item.executor in ("magi-review", "address-feedback")
+                     or r.item.kind == "issue")}
     missing = {n for n in required if not re.search(rf"\b{n}\b", stripped)}
     if missing:
         print(f"worksweep: curator validation failed: "
-              f"missing magi-review number(s) {sorted(missing)}", file=sys.stderr)
+              f"missing required number(s) {sorted(missing)}", file=sys.stderr)
         return False
 
     return True
@@ -323,7 +330,14 @@ def partition_counts(records: List[QueueRecord]) -> Tuple[int, int]:
     own text."""
     n = sum(1 for r in records if
             (r.item.executor == "magi-review" and r.item.status in _MAGI_LEAD_STATUSES)
-            or (r.item.executor == "triage" and r.item.kind in ("feedback", "ci_red"))
+            # Both feedback arms count: the runnable `address-feedback` one and
+            # the informational `triage` one. Kept as two clauses rather than
+            # one `kind in (...)` line because `ci_red` never leaves `triage`,
+            # and folding them back together is how a rename silently drops
+            # one of the three from the actionable count.
+            or (r.item.kind == "feedback"
+                and r.item.executor in ("address-feedback", "triage"))
+            or (r.item.kind == "ci_red" and r.item.executor == "triage")
             or (r.item.kind == "issue" and r.item.status in _MAGI_LEAD_STATUSES)
             or (r.item.kind == "stale" and r.item.status in _MAGI_LEAD_STATUSES))
     return n, len(records) - n
