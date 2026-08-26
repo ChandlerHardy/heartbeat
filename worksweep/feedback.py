@@ -51,8 +51,19 @@ glab credentials:
 * At most `_MAX_THREADS` threads per run, overflow escalated rather than
   dropped.
 
-Every edge is injected (`run_subprocess`, `run_glab`); this module never shells
-out or reaches the network on its own, so the tests never do either.
+Two things are accepted as residual rather than solved, both deliberately:
+
+* Reply CONTENT is not machine-vetted. Nothing here can judge whether an answer
+  is a GOOD answer. It is audited by a human instead: `done_message` quotes
+  every reply that went out, so Chandler reads the words posted under his
+  identity the moment they are posted.
+* The prompt size is bounded by a flat thread count, not byte accounting. A
+  count is the number a person can sanity-check, and the overflow is escalated
+  rather than truncated, so the imprecision costs latency and never coverage.
+
+Every edge is injected (`run_subprocess`, `run_glab`, `now`); this module never
+shells out, reaches the network, or reads the clock on its own, so the tests
+never do either.
 """
 from __future__ import annotations
 

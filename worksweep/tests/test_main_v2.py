@@ -470,9 +470,10 @@ def test_a_cleared_signal_closes_a_stranded_error_row():
     assert row.item.done_reason == "signal-cleared"
 
 
-def test_a_failed_probe_never_reports_a_cleared_signal():
-    """We do not know what the threads say, so we may not claim they are
-    settled -- that would close an error row on a guess."""
+def test_a_failed_probe_leaves_an_errored_row_visible_not_closed():
+    """We do not know what the threads say, so we may not call them settled.
+    The row comes back as ordinary retryable work, flagged, rather than being
+    closed as `signal-cleared` on a guess."""
     posts = []
     prior = [_queue_rec(12, status="error")]
     def boom(repo, iid):
@@ -480,7 +481,22 @@ def test_a_failed_probe_never_reports_a_cleared_signal():
     run_sweep(_cfg(), _probe_deps(posts, _gql(authored_nodes=[_authored()]),
                                   discussions=boom, queue=prior))
     row = {r.item.id: r for r in _saved(posts)}["feedback:pb-www!3997"]
-    assert row.item.status != "done"
+    assert row.item.status == "proposed"
+    assert row.item.done_reason != "signal-cleared"
+    assert "probe failed" in row.item.why
+
+
+def test_an_unwired_probe_never_reports_a_cleared_signal():
+    """FALSIFYING. Without the probe dep every authored MR reads
+    unaddressed_count 0 -- which is ignorance, not a cleared signal. Declaring
+    it cleared would close error rows across the whole queue on no evidence."""
+    posts = []
+    prior = [_queue_rec(12, status="error")]
+    run_sweep(_cfg(), _deps(posts, _gql(authored_nodes=[_authored()]),
+                            queue=prior))
+    row = {r.item.id: r for r in _saved(posts)}["feedback:pb-www!3997"]
+    assert row.item.status == "error"
+    assert row.item.done_reason != "signal-cleared"
 
 
 def test_changes_requested_is_never_a_cleared_signal():

@@ -515,15 +515,20 @@ def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
                 items.append(_retained_feedback(prior_by_id[fid]))
 
         resolved = assessor.resolutions(review_mrs, cfg.username, authored)
-        # A feedback id whose signal is provably gone -- nothing unaddressed,
+        # A feedback id whose signal is PROVABLY gone -- nothing unaddressed,
         # no changes requested, and the probe actually looked. This is the one
         # reason strong enough to close an `error` row instead of retaining it
-        # forever (see queue._CLOSES_AN_ERROR).
-        for mr in authored:
-            fid = f"feedback:{mr.repo}!{mr.iid}"
-            if (fid not in resolved and fid not in probe_failed
-                    and mr.unaddressed_count == 0 and not mr.changes_requested):
-                resolved[fid] = "signal-cleared"
+        # forever (see queue._CLOSES_AN_ERROR), so the bar is evidence, not
+        # absence of evidence: with no probe wired every MR reads
+        # unaddressed_count 0, which is ignorance, and acting on it would close
+        # errored rows across the whole queue on no information at all.
+        if discussions_edge is not None:
+            for mr in authored:
+                fid = f"feedback:{mr.repo}!{mr.iid}"
+                if (fid not in resolved and fid not in probe_failed
+                        and mr.unaddressed_count == 0
+                        and not mr.changes_requested):
+                    resolved[fid] = "signal-cleared"
         # Observe (not change) reconcile's fresh-wins rule so a revoked ✅ can
         # be explained instead of the item just quietly reappearing.
         reproposed: set = set()
