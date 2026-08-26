@@ -323,3 +323,86 @@ def test_the_needs_input_post_is_clamped_too(tmp_path):
     asked = [p for p in posts if p.startswith("❓")][0]
     assert len(asked.encode("utf-8")) <= DISCORD_MAX_CHARS - 100
     assert state["records"][0].item.status == "needs-input"
+
+
+# --- branch mutual exclusion (2026-08-26 live failure) ---------------------
+#
+# address-feedback got its own lock in the previous round, which is right for
+# throughput and wrong for branches: keep-current and address-feedback can now
+# run CONCURRENTLY, and if both target the same branch the second one's
+# `checkout -B` lands in a worktree the first is actively working in.
+
+def _rec_on(number, branch, executor=_ADDRESS_FEEDBACK, status="approved",
+            iid=3997):
+    """A record on `branch`. A `running` one is stamped with a claim time --
+    without it the reap treats the claim as unprovable and frees the branch
+    before the guard ever sees it."""
+    import dataclasses
+    rec = _rec(number, status=status, executor=executor, iid=iid,
+               branch=branch)
+    if status == "running":
+        rec = dataclasses.replace(
+            rec, item=dataclasses.replace(rec.item, claimed_at=NOW))
+    return rec
+
+
+def test_a_branch_already_being_worked_is_not_claimed_again():
+    """FALSIFYING: a running keep-current on branch X must block an approved
+    address-feedback row on X, even though they are different executors on
+    different locks."""
+    recs = [_rec_on(1, "refactor/1681-analytics", executor=_KEEP_CURRENT,
+                    status="running", iid=4020),
+            _rec_on(2, "refactor/1681-analytics")]
+    assert pick_claim(recs, (_ADDRESS_FEEDBACK,)) is None
+
+
+def test_the_pass_moves_on_to_a_different_branch():
+    """Blocking the branch must not stall the queue -- the next eligible item
+    on a free branch is still claimed."""
+    recs = [_rec_on(1, "refactor/1681-analytics", executor=_KEEP_CURRENT,
+                    status="running", iid=4020),
+            _rec_on(2, "refactor/1681-analytics"),
+            _rec_on(3, "chardy/1588-ranch-data", iid=4001)]
+    assert pick_claim(recs, (_ADDRESS_FEEDBACK,)).number == 3
+
+
+def test_a_free_branch_is_claimed_normally():
+    recs = [_rec_on(1, "some/other-branch", executor=_KEEP_CURRENT,
+                    status="running", iid=4020),
+            _rec_on(2, "refactor/1681-analytics")]
+    assert pick_claim(recs, (_ADDRESS_FEEDBACK,)).number == 2
+
+
+def test_branchless_items_are_unaffected():
+    """magi-review and triage rows carry no branch. An empty branch must not
+    collide with every other empty branch in the queue."""
+    recs = [_rec_on(1, "", executor=_MAGI, status="running", iid=4020),
+            _rec_on(2, "", executor=_MAGI)]
+    assert pick_claim(recs, (_MAGI,)).number == 2
+
+
+def test_the_guard_holds_across_the_whole_queue_not_just_one_pass():
+    """A running implement on branch X blocks a feedback claim on X too --
+    the exclusion is by branch, not by which pass happens to be looking."""
+    from worksweep.runner import _IMPLEMENT
+    recs = [_rec_on(1, "feat/1775-thing", executor=_IMPLEMENT,
+                    status="running", iid=4020),
+            _rec_on(2, "feat/1775-thing")]
+    assert pick_claim(recs, (_ADDRESS_FEEDBACK,)) is None
+
+
+def test_the_feedback_pass_claims_nothing_and_stays_quiet(tmp_path):
+    """End to end: the pass sees a blocked branch, claims nothing, runs no
+    executor, saves nothing and posts nothing. It is not an error -- the item
+    is simply claimed on a later pass."""
+    ran = []
+    recs = [_rec_on(1, "refactor/1681-analytics", executor=_KEEP_CURRENT,
+                    status="running", iid=4020),
+            _rec_on(2, "refactor/1681-analytics")]
+    deps, posts, saves, state = _deps(
+        recs, execute=lambda i, c: (ran.append(1), _result())[1])
+    assert run_once(_cfg(tmp_path), deps, **_locks(tmp_path)) == 0
+    assert ran == []
+    assert posts == []
+    assert saves == []
+    assert [r.item.status for r in state["records"]] == ["running", "approved"]
