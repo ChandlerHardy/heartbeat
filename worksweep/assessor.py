@@ -346,7 +346,8 @@ def bootstrap_magi_records(records, authored, now: str,
             continue
         out.append(QueueRecord(
             number=next_num, first_seen=now, last_seen=now,
-            item=WorkItem(schema_version=1, id=magi_item_id(mr.repo, mr.iid, mr.sha),
+            item=WorkItem(schema_version=1,
+                          id=magi_item_id(mr.repo, mr.iid, mr.sha),
                           repo=mr.repo, kind="mr", executor="magi-review",
                           risk="low", why="seeded from legacy .magi report",
                           web_url=mr.web_url, sha=mr.sha, status="done",
