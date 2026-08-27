@@ -86,6 +86,14 @@ _SYNC_FALLBACK_SECONDS = 120
 # runner completion / intake approval / keep-current merge shows up within one
 # interval instead of waiting for the next timed reload.
 _POLL_SECONDS = 10
+# GET /events stats the queue file itself on its own thread rather than sharing
+# a broadcaster: thread-per-connection makes per-client polling correct and
+# trivial, and at the two or three viewers this page ever has, a registry with
+# condition variables would be shared mutable state bought for nothing.
+_EVENT_STAT_SECONDS = 1.0
+# Quiet enough to be invisible, frequent enough that a client which went away
+# surfaces as a write error and its thread exits within the minute.
+_EVENT_HEARTBEAT_SECONDS = 15.0
 # A workstream card is named after a human-readable thing, not an iid. Long MR
 # titles are truncated so a card header stays one scannable line.
 _CARD_TITLE_LIMIT = 60
@@ -804,6 +812,9 @@ _BODY_SCRIPT = """
   })();
   // An update arrived while the page was busy and is waiting to be applied.
   var pending=false;
+  // The 10s poll is the DEGRADED path now and is armed at most once, by the
+  // event stream failing terminally -- never by a user action, and never twice.
+  var polling=false;
   // The selection captured just before a swap, re-applied just after.
   var carried=[];
 
@@ -957,7 +968,8 @@ _BODY_SCRIPT = """
     applyFilter();refresh();marks();
   });
 
-  // ---- the 10s mtime poll: a fallback for when the event stream is not up --
+  // ---- the 10s mtime poll: the fallback for when the stream will not run --
+  function armPoll(){if(polling){return;}polling=true;setTimeout(poll,POLL_MS);}
   function poll(){
     fetch('/mtime',{cache:'no-store'})
       .then(function(r){return r.text();})
@@ -973,7 +985,23 @@ _BODY_SCRIPT = """
       })
       .catch(function(){setTimeout(poll,POLL_MS);});
   }
-  setTimeout(poll,POLL_MS);
+
+  // ---- the event stream: the queue says when it changed, once, when it did --
+  // The poll asked "anything yet?" every ten seconds per open tab forever and
+  // was told "no" almost every time. One held connection replaces all of that.
+  // EventSource reconnects by itself, which covers the common case of the
+  // dashboard agent being restarted under the page.
+  (function(){
+    if(!window.EventSource){armPoll();return;}
+    var es=new EventSource('/events');
+    htmx.on(es,'queue',function(){applyFragments();});
+    // CLOSED (2) only. EventSource retries CONNECTING on its own, and arming
+    // the poll on every transient blip would leave the page with two refresh
+    // paths racing each other. This is the terminal case -- a proxy that will
+    // not stream, a browser quirk -- where the page must degrade rather than
+    // silently freeze.
+    es.onerror=function(){if(es.readyState===2){armPoll();}};
+  })();
 
   function approveSelected(){
     var n=selected();
@@ -1611,6 +1639,12 @@ class DashboardHandler(BaseHTTPRequestHandler):
     """
 
     server_version = "worksweep-dashboard/1"
+    # Required by GET /events: HTTP/1.0 closes the connection after every
+    # response, so a stream could never stay open. Class-wide, so every route
+    # became keep-alive at the same moment -- which is safe only because _send
+    # always sets a Content-Length, and because a refusal that skipped reading
+    # the request body now closes rather than leaving it on the wire.
+    protocol_version = "HTTP/1.1"
 
     def _log_line(self, fmt, args) -> str:
         """Render a log line with control bytes stripped.
@@ -1662,6 +1696,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def _text(self, code: int, message: str) -> None:
         self._send(code, "text/plain; charset=utf-8",
                    message.encode("utf-8"))
+
+    def _reject(self, code: int, message: str) -> None:
+        """A refusal issued WITHOUT reading the request body.
+
+        Under HTTP/1.1 the connection is reused, so an unread body would be
+        parsed as the next request line: a CSRF rejection would be followed by
+        a mystery 400 on a socket the browser believed was clean. Closing is
+        the correct answer to "I am not going to read what you sent".
+        """
+        self._send(code, "text/plain; charset=utf-8", message.encode("utf-8"),
+                   headers={"Connection": "close"})
 
     def _path(self) -> str:
         return urllib.parse.urlsplit(self.path).path
@@ -1722,6 +1767,9 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return
             self._send(200, "text/html; charset=utf-8", body)
             return
+        if path == "/events":
+            self._events()
+            return
         if path != "/":
             self._text(404, "not found")
             return
@@ -1735,18 +1783,67 @@ class DashboardHandler(BaseHTTPRequestHandler):
             body = _ERROR_PAGE.encode("utf-8")
         self._send(200, "text/html; charset=utf-8", body)
 
+    def _events(self) -> None:
+        """Server-sent events: one frame whenever queue.json's mtime moves.
+
+        Holds NO lock, deliberately and permanently. This connection stays open
+        for hours; the write side takes _WRITE_LOCK and the queue file lock for
+        the shortest possible window and must never end up queued behind a
+        reader that never finishes. All this route ever does is stat a path.
+
+        Bypasses _send, which is body-first with a fixed Content-Length -- the
+        one thing a stream by definition cannot supply.
+
+        Like every other handler it may not raise: the only way out is a failed
+        write to a client that went away, and that is the intended exit.
+        """
+        qpath = self.server.queue_path
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            # No Content-Length is possible, so the connection cannot be
+            # reused; say so rather than leaving a keep-alive client guessing.
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.flush()
+            last = mtime_token(_queue_mtime(qpath))
+            beat = time.monotonic()
+            while True:
+                time.sleep(_EVENT_STAT_SECONDS)
+                token = mtime_token(_queue_mtime(qpath))
+                now = time.monotonic()
+                if token != last:
+                    last = token
+                    self.wfile.write(
+                        f"event: queue\ndata: {token}\n\n".encode("utf-8"))
+                    self.wfile.flush()
+                    beat = now
+                elif now - beat >= _EVENT_HEARTBEAT_SECONDS:
+                    # Invisible to EventSource, but it is still a WRITE: a
+                    # client that vanished fails here and this thread ends,
+                    # instead of spinning on a socket nobody is reading.
+                    self.wfile.write(b": heartbeat\n\n")
+                    self.wfile.flush()
+                    beat = now
+        except Exception:
+            # Almost always the client going away, which is the normal end of
+            # a stream and not worth a log line.
+            return
+
     def do_POST(self) -> None:                                 # noqa: N802
         path = self._path()
         if path not in ("/approve", "/approve-all", "/sweep", "/dismiss"):
-            self._text(404, "not found")
+            self._reject(404, "not found")
             return
         if not self._csrf_ok():
-            self._text(403, "forbidden")
+            self._reject(403, "forbidden")
             return
 
         raw = self._body_bytes()
         if raw is None:
-            self._text(400, "bad request")
+            self._reject(400, "bad request")
             return
 
         if path == "/sweep":

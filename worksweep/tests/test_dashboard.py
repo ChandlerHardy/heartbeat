@@ -1,4 +1,4 @@
-import ast, dataclasses, http.client, json, os, re, sys, threading
+import ast, contextlib, dataclasses, http.client, json, os, re, socket, sys, threading, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 import pytest  # noqa: E402
 from worksweep import dashboard  # noqa: E402
@@ -140,6 +140,36 @@ def _called_names(tree):
 
 # --- server harness: real HTTP on port 0, always shut down --------------------
 
+class _Reader:
+    """Reads one blank-line-terminated SSE frame at a time, under a deadline."""
+
+    def __init__(self, sock):
+        self.sock, self.buf = sock, b""
+
+    def _fill(self, deadline):
+        left = deadline - time.monotonic()
+        assert left > 0, "timed out waiting on the stream"
+        self.sock.settimeout(left)
+        chunk = self.sock.recv(4096)
+        assert chunk, "stream closed by the server"
+        self.buf += chunk
+
+    def _until(self, sep, timeout):
+        deadline = time.monotonic() + timeout
+        while sep not in self.buf:
+            self._fill(deadline)
+        head, _, self.buf = self.buf.partition(sep)
+        return head.decode()
+
+    def headers(self, timeout=5):
+        return self._until(b"\r\n\r\n", timeout)
+
+    def frame(self, timeout=5):
+        """One SSE frame: every line up to the terminating blank line."""
+        return self._until(b"\n\n", timeout)
+
+
+
 class _Server:
     def __init__(self, qpath, post=None, webhook="", now=NOW, sweep=None,
                  mark_todo_done=None):
@@ -191,6 +221,23 @@ class _Server:
         if actor is not _UNSET:
             body["actor"] = actor
         return self.request("POST", "/approve-all", json.dumps(body), h)
+
+    @contextlib.contextmanager
+    def stream(self, path="/events", timeout=5):
+        """A raw-socket client for a response that never ends.
+
+        `request()` cannot be reused: getresponse() + read() block until the
+        body is complete, and a stream has no end -- it would sit on the fixed
+        5s timeout and then raise. Always closed before the server is.
+        """
+        sock = socket.create_connection((self.host, self.port), timeout=timeout)
+        try:
+            sock.sendall(
+                f"GET {path} HTTP/1.1\r\nHost: {self.host}:{self.port}\r\n"
+                "Accept: text/event-stream\r\n\r\n".encode())
+            yield _Reader(sock)
+        finally:
+            sock.close()
 
     def close(self):
         self.httpd.shutdown()
@@ -2094,17 +2141,19 @@ def test_dismiss_button_is_wired_in_the_page():
 
 # --- always-on live polling --------------------------------------------------
 
-def test_live_poll_is_always_armed_not_gated_on_a_sync_tap():
-    """Addendum 3 (falsifying): if the poll only started after a Sync tap, a
-    runner completion would not appear until the next timed reload."""
+def test_the_mtime_poll_is_the_degraded_path_never_gated_on_a_tap():
+    """Addendum 3, still binding in its real substance: the poll must never be
+    something the user has to trigger. It is no longer the primary path -- the
+    event stream is -- but when it runs it is armed by the transport failing,
+    and it is armed exactly once however many times that failure repeats."""
     js = _script(_page([_rec(1)])).replace(" ", "").replace("\n", "")
     assert "POLL_MS=10000" in js
-    # Armed at TOP LEVEL, not inside a handler. Matched at exactly two spaces
-    # of indent so the rescheduling calls inside poll() (deeper indent) cannot
-    # satisfy this on their own.
-    script = _script(_page([_rec(1)]))
-    assert re.search(r"^  setTimeout\(poll,POLL_MS\);$", script, re.M)
     assert "fetch('/mtime',{cache:'no-store'})" in js
+    assert ("functionarmPoll(){if(polling){return;}"
+            "polling=true;setTimeout(poll,POLL_MS);}") in js
+    # and never armed at top level any more, at any indent
+    script = _script(_page([_rec(1)]))
+    assert not re.search(r"^  setTimeout\(poll,POLL_MS\);$", script, re.M)
 
 
 def test_live_poll_hands_the_busy_decision_to_the_swap_path():
@@ -2114,9 +2163,9 @@ def test_live_poll_hands_the_busy_decision_to_the_swap_path():
     the update would be lost rather than held."""
     js = _script(_page([_rec(1)])).replace(" ", "").replace("\n", "")
     assert "if(lastMtime&&t!==lastMtime){applyFragments();}" in js
-    src = _script(_page([_rec(1)]))
-    body = src[src.index("function poll(){"):src.index("\n  setTimeout(poll,POLL_MS);\n")]
-    assert "busy()" not in body
+    body = re.search(r"^  function poll\(\)\{$.*?^  \}$",
+                     _script(_page([_rec(1)])), re.S | re.M)
+    assert body and "busy()" not in body.group(0)
     # and it keeps polling either way, so it resumes rather than giving up
     assert "setTimeout(poll,POLL_MS);" in js
 
@@ -2760,3 +2809,146 @@ def test_the_emitted_javascript_actually_parses():
         finally:
             if os.path.exists(path):
                 os.remove(path)
+
+
+# =============================================================================
+# htmx live updates, Phase 4 -- GET /events, and the poll demoted to a fallback
+#
+# The 10s poll was one round trip every ten seconds per open tab forever, to
+# learn "no, still nothing" almost every time. One held connection per viewer
+# says it once, when it happens. The poll stays, as the degraded path.
+# =============================================================================
+
+def test_events_emits_on_mtime_change(serve_queue):
+    """Falsifying: remove the stat loop or malform the framing and this fails.
+    Deliberately run at the REAL 1s cadence against AC1's 2s budget, not a
+    monkeypatched one -- the budget is the thing being tested."""
+    s, qpath = serve_queue([_rec(1)])
+    with s.stream() as r:
+        head = r.headers()
+        assert head.splitlines()[0].startswith("HTTP/1.1 200")
+        assert "Content-Type: text/event-stream" in head
+        os.utime(qpath, (1_800_000_000, 1_800_000_000))
+        lines = r.frame(timeout=2).splitlines()
+    assert lines[0] == "event: queue"
+    assert lines[1] == "data: " + dashboard.mtime_token(1_800_000_000)
+    assert len(lines) == 2                       # ...and then the blank line
+
+
+def test_events_sends_heartbeat_comments(serve_queue, monkeypatch):
+    """A comment line is invisible to EventSource but it is still a WRITE, so a
+    client that went away surfaces here as an error instead of pinning a
+    connection and a thread until the process restarts."""
+    monkeypatch.setattr(dashboard, "_EVENT_STAT_SECONDS", 0.01)
+    monkeypatch.setattr(dashboard, "_EVENT_HEARTBEAT_SECONDS", 0.05)
+    s, _ = serve_queue([_rec(1)])
+    with s.stream() as r:
+        r.headers()
+        assert r.frame(timeout=3) == ": heartbeat"
+        assert r.frame(timeout=3) == ": heartbeat"
+
+
+def test_events_holds_no_write_lock():
+    """Falsifying: a stream is open for hours. Taking either lock inside it
+    would park every approve on the page behind a reader that never finishes --
+    the exact inversion the short-window lock discipline exists to prevent."""
+    fn = next(n for n in ast.walk(ast.parse(_dashboard_src()))
+              if isinstance(n, ast.FunctionDef) and n.name == "_events")
+    used = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name)}
+    used |= {n.attr for n in ast.walk(fn) if isinstance(n, ast.Attribute)}
+    for forbidden in ("_WRITE_LOCK", "write_lock", "load_queue", "save_queue"):
+        assert forbidden not in used, forbidden
+    assert "_queue_mtime" in used                # it stats a path, nothing more
+
+
+def test_approve_during_open_stream_completes(serve_queue):
+    """The behavioural half of the assertion above: if the stream held a lock,
+    this approve would sit on the harness's 5s timeout and raise."""
+    s, _ = serve_queue([_rec(1), _rec(2)])
+    with s.stream() as r:
+        r.headers()
+        status, _, body = s.approve([1])
+        assert status == 200
+        assert json.loads(body)["approved"] == [1]
+        assert s.request("GET", "/fragments")[0] == 200
+
+
+def test_http11_responses_carry_content_length(serve_queue):
+    """`protocol_version = "HTTP/1.1"` is class-wide, so every route switched to
+    keep-alive at once. It is safe only because _send always sets a
+    Content-Length -- a response without one hangs a keep-alive client until it
+    times out. This makes that a regression test, not a standing assumption."""
+    assert dashboard.DashboardHandler.protocol_version == "HTTP/1.1"
+    s, _ = serve_queue([_rec(1)])
+    for path in ("/", "/mtime", "/fragments", "/definitely-not-a-route"):
+        status, headers, body = s.request("GET", path)
+        assert "Content-Length" in headers, path
+        assert int(headers["Content-Length"]) == len(body), path
+    with s.stream("/mtime") as r:
+        assert r.headers().splitlines()[0].startswith("HTTP/1.1 200")
+
+
+def test_a_rejected_post_closes_the_connection(serve_queue):
+    """Falsifying, and only reachable under HTTP/1.1: a 403 or 404 that never
+    read the request body would leave that body on the socket to be parsed as
+    the NEXT request line -- so a CSRF rejection would be followed by a mystery
+    400 on a connection the browser thought was clean."""
+    s, _ = serve_queue([_rec(1)])
+    payload = json.dumps({"numbers": [1]}).encode()
+    for path, code in (("/approve", b"403"), ("/definitely-not-a-route", b"404")):
+        sock = socket.create_connection((s.host, s.port), timeout=5)
+        try:
+            sock.sendall(
+                f"POST {path} HTTP/1.1\r\nHost: {s.host}:{s.port}\r\n"
+                f"Content-Type: application/json\r\n"
+                f"Content-Length: {len(payload)}\r\n\r\n".encode() + payload)
+            got = _Reader(sock).headers()
+        finally:
+            sock.close()
+        assert code.decode() in got.splitlines()[0], (path, got.splitlines()[0])
+        assert "Connection: close" in got, path
+        assert "Content-Length:" in got, path
+
+
+def test_events_thread_exits_on_client_disconnect(tmp_path, monkeypatch):
+    """Falsifying: without a write in the loop, a vanished client leaves a
+    thread spinning on a socket nobody is reading until the agent restarts.
+    Also pins that close() never blocks on it -- daemon_threads keeps the
+    request thread out of the list server_close() joins."""
+    monkeypatch.setattr(dashboard, "_EVENT_STAT_SECONDS", 0.01)
+    monkeypatch.setattr(dashboard, "_EVENT_HEARTBEAT_SECONDS", 0.02)
+    qpath = os.path.join(str(tmp_path), "queue.json")
+    save_queue(qpath, [_rec(1)])
+    s = _Server(qpath)
+    before = set(threading.enumerate())
+    sock = socket.create_connection((s.host, s.port), timeout=5)
+    sock.sendall(f"GET /events HTTP/1.1\r\nHost: {s.host}:{s.port}\r\n\r\n".encode())
+    _Reader(sock).headers()                      # the loop is definitely running
+    spawned = [t for t in threading.enumerate() if t not in before]
+    assert spawned, "no thread was serving the stream"
+    sock.close()
+    started = time.monotonic()
+    s.close()
+    assert time.monotonic() - started < 5, "close() blocked on the stream thread"
+    for t in spawned:
+        t.join(timeout=5)
+        assert not t.is_alive(), t.name
+
+
+def test_sse_error_falls_back_to_fragment_poll():
+    """Falsifying: without the fallback, a proxy that refuses to stream or a
+    browser quirk leaves the page frozen with no refresh path at all -- silent,
+    which is the failure mode this whole build exists to remove."""
+    page = _page([_rec(1)])
+    js = _script(page).replace(" ", "").replace("\n", "")
+    assert "vares=newEventSource('/events');" in js
+    assert "htmx.on(es,'queue',function(){applyFragments();});" in js
+    # CLOSED (2) only: EventSource retries CONNECTING by itself, and arming the
+    # poll on every transient blip would give the page two refresh paths at once
+    assert "es.onerror=function(){if(es.readyState===2){armPoll();}};" in js
+    assert "if(!window.EventSource){armPoll();return;}" in js
+    assert js.count("armPoll();") == 2           # exactly those two, nowhere else
+    assert "location.reload" not in js
+    assert "location.reload" in page             # ...still htmx's own
+    assert js.count("addEventListener(") == 2    # htmx.on keeps the budget
+
