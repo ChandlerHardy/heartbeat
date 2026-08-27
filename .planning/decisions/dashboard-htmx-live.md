@@ -80,3 +80,10 @@ The dashboard's "live" mechanism is a 10s `/mtime` poll that does a full `locati
 1. Suite green locally + mini (1211 + new).
 2. Deploy: rsync worksweep/ (now incl. static/) to the mini, restart dashboard agent.
 3. Live: open dashboard in two tabs; kick a sweep; both update in place ≤2s. Check a box in tab A, kick a sweep → A shows pending chip and holds; uncheck → A drains. ✅ an item → fragments refresh without reload. Kill/restart the dashboard agent → tabs reconnect via EventSource retry.
+
+## Round 2 amendment (orchestrator, resolving plan-author deferrals)
+
+- Decision 3's "four dynamic regions" is corrected to **five** (telemetry, sync, sections, branches, bar) — both enumerations already agreed; the count word was wrong.
+- The five stable-id containers present in every queue state (incl. empty) are CONFIRMED as part of Decision 3 — the empty-queue OOB-target gap the plan derived (AC 13) is real and binding.
+- `lastMtime` as a script-scoped variable reassigned on every /mtime response and after every swap: confirmed.
+- Deploy: the existing `rsync -a --delete worksweep/` deploy already carries `worksweep/static/`; the import-time loud failure (AC 9) is the guard if it ever doesn't.
