@@ -1,4 +1,4 @@
-import ast, contextlib, dataclasses, http.client, json, os, re, socket, sys, threading, time
+import ast, contextlib, dataclasses, http.client, json, os, re, socket, struct, sys, threading, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 import pytest  # noqa: E402
 from worksweep import dashboard  # noqa: E402
@@ -3426,3 +3426,40 @@ def test_the_vendored_pin_records_a_second_source():
     assert "cdn.jsdelivr.net" in pin
     assert "unpkg.com" in pin
     assert _HTMX_SHA256 in pin
+
+
+def test_a_client_reset_is_not_an_error_in_the_log(tmp_path):
+    """Keep-alive made a reset connection routine, and noisy.
+
+    Under HTTP/1.0 every response closed the socket, so the read for a NEXT
+    request never happened. Under 1.1 it always does, and a client that simply
+    went away -- a closed tab, a phone leaving the tailnet -- surfaces as
+    ConnectionResetError out of the base class, which socketserver prints as a
+    full traceback. That is per-tab-close noise in the .err file the agent's
+    real failures are supposed to stand out in, and .err staying meaningful is
+    a stated design constraint of this module.
+    """
+    qpath = os.path.join(str(tmp_path), "queue.json")
+    save_queue(qpath, [_rec(1)])
+    s = _Server(qpath)
+    try:
+        errors = []
+        s.httpd.handle_error = lambda request, addr: errors.append(addr)
+        before = set(threading.enumerate())
+        sock = socket.create_connection((s.host, s.port), timeout=5)
+        sock.sendall(f"GET /mtime HTTP/1.1\r\nHost: {s.host}:{s.port}\r\n\r\n".encode())
+        head = _Reader(sock).headers()
+        assert head.splitlines()[0].startswith("HTTP/1.1 200")
+        spawned = [t for t in threading.enumerate() if t not in before]
+        assert spawned
+        # RST, not FIN: the abrupt disappearance, which is what a killed tab
+        # or a dropped tailnet link actually looks like on the wire
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER,
+                        struct.pack("ii", 1, 0))
+        sock.close()
+        for t in spawned:
+            t.join(timeout=5)
+            assert not t.is_alive(), t.name
+        assert errors == [], "a client going away was logged as a server error"
+    finally:
+        s.close()

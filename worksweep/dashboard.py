@@ -1780,6 +1780,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
         # otherwise echo the raw request line to stderr unsanitised.
         sys.stderr.write(self._log_line(fmt, args) + "\n")
 
+    def handle_one_request(self):
+        """As the base class, minus the traceback for a client going away.
+
+        Keep-alive means the read for a NEXT request always happens, so a
+        closed tab or a phone leaving the tailnet arrives here as a
+        ConnectionResetError -- which socketserver turns into a full traceback
+        in the .err file. A client disappearing is the ordinary end of a
+        connection, not a server failure, and .err staying meaningful for real
+        failures is the whole reason access logs go to stdout.
+
+        The base class already handles the read TIMEOUT (one sanitised line);
+        this adds only the reset family, and closes rather than swallowing.
+        """
+        try:
+            super().handle_one_request()
+        except ConnectionError:
+            self.close_connection = True
+
     # -- plumbing --------------------------------------------------------
     def _send(self, code: int, ctype: str, body: bytes,
               headers: Optional[Dict[str, str]] = None) -> None:
