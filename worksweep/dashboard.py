@@ -60,7 +60,6 @@ _LOOPBACK = "127.0.0.1"
 # do_OPTIONS and do not emit any Access-Control-* header, or the guard evaporates.
 _CSRF_HEADER = "X-Worksweep"
 _MAX_BODY_BYTES = 64 * 1024
-_REFRESH_SECONDS = 60
 _DONE_WINDOW_DAYS = 7
 _RECENT_DONE_LIMIT = 20
 _LAYOUT_STORAGE_KEY = "worksweep-layout"
@@ -80,8 +79,6 @@ _BIND_RETRY_SECONDS = 30
 # Every sync posts a normal Discord digest (the standard sweep contract), so
 # the throttle is what bounds channel noise, not an accident of timing.
 _SWEEP_MIN_INTERVAL_SECONDS = 60
-# Polling cadence for the page's "has the queue changed yet?" check.
-_MTIME_POLL_SECONDS = 5
 # Give up waiting and reload anyway: a sweep that errors out may never move the
 # mtime, and the user should not be left staring at a spinner.
 _SYNC_FALLBACK_SECONDS = 120
@@ -749,8 +746,12 @@ _BODY_SCRIPT = """
   var root=document.documentElement,KEY='%(key)s';
   var POLL_MS=%(poll)d,FALLBACK_MS=%(fallback_reload)d,SYNC_MAX_MS=%(sync_max)d;
   var inflight=false,syncing=false,confirming=false;
-  var sync=document.getElementById('sync');
-  var baseMtime=sync?(sync.getAttribute('data-mtime')||'').trim():'';
+  // A VALUE, not an element: any element captured at load time is stale the
+  // moment its region is re-rendered. Every handler below re-queries by id.
+  var baseMtime=(function(){
+    var s=document.getElementById('sync');
+    return s?(s.getAttribute('data-mtime')||'').trim():'';
+  })();
 
   function scope(){
     return document.querySelector(root.getAttribute('data-layout')==='branches'?'.branches':'.sections');
@@ -882,33 +883,12 @@ _BODY_SCRIPT = """
   }
   setTimeout(tick,FALLBACK_MS);
 
-  document.addEventListener('click',function(e){
-    if(!e.target||!e.target.closest){return;}
-    var t=e.target.closest('[data-set-layout]');
-    if(t){setLayout(t.getAttribute('data-set-layout'));return;}
-    var f=e.target.closest('[data-filter]');
-    if(f){toggleFilter(f.getAttribute('data-filter'));return;}
-    var d=e.target.closest('[data-dismiss]');
-    if(d&&!inflight){send('/dismiss',{number:parseInt(d.getAttribute('data-dismiss'),10)});}
-  });
-  document.addEventListener('change',function(e){
-    var b=e.target;
-    if(b&&b.type==='checkbox'&&b.hasAttribute('data-view')){
-      // the same record has a checkbox in each view: keep them in step so a
-      // selection survives a layout switch
-      var twins=document.querySelectorAll('input[type=checkbox][value="'+b.value+'"]');
-      for(var i=0;i<twins.length;i++){twins[i].checked=b.checked;}
-      refresh();
-    }
-  });
-  var sel=document.getElementById('approve-selected');
-  if(sel){sel.addEventListener('click',function(){
+  function approveSelected(){
     var n=selected();
     if(!n.length){return;}
     send('/approve',{numbers:n});
-  });}
-  var all=document.getElementById('approve-all');
-  if(all){all.addEventListener('click',function(){
+  }
+  function approveAll(){
     // There is NO un-approve path anywhere in worksweep, and this is one tap
     // wide on a phone -- so the bulk action confirms with its blast radius,
     // counting exactly the set it is about to send.
@@ -919,19 +899,26 @@ _BODY_SCRIPT = """
     confirming=false;
     if(!ok){return;}
     send('/approve-all',{numbers:n});
-  });}
+  }
 
   // ---- Sync: kick a sweep; the always-on poll picks up the result ----
   function syncDone(label){
     syncing=false;
+    var sync=document.getElementById('sync');
     if(!sync){return;}
     sync.textContent=label;
     setTimeout(function(){
-      if(!syncing){sync.disabled=false;sync.textContent='Sync';}
+      // Re-queried again: 3s is long enough for the header to be re-rendered.
+      var b=document.getElementById('sync');
+      if(b&&!syncing){b.disabled=false;b.textContent='Sync';}
     },3000);
   }
-  if(sync){sync.addEventListener('click',function(){
-    if(syncing||sync.disabled){return;}
+  function kickSweep(){
+    // Re-queried per click, and guarded: the button may be gone (a re-render
+    // landed between click and dispatch). Return quietly rather than throwing,
+    // and above all do not POST /sweep.
+    var sync=document.getElementById('sync');
+    if(!sync||syncing||sync.disabled){return;}
     syncing=true;sync.disabled=true;sync.textContent='syncing…';
     fetch('/sweep',{method:'POST',headers:{'X-Worksweep':'approve'}})
       .then(function(r){
@@ -945,7 +932,34 @@ _BODY_SCRIPT = """
         syncDone('sync failed');
       })
       .catch(function(){syncDone('sync failed');});
-  });}
+  }
+
+  // ---- one delegated click listener: every control survives a re-render ----
+  document.addEventListener('click',function(e){
+    if(!e.target||!e.target.closest){return;}
+    var t=e.target.closest('[data-set-layout]');
+    if(t){setLayout(t.getAttribute('data-set-layout'));return;}
+    var f=e.target.closest('[data-filter]');
+    if(f){toggleFilter(f.getAttribute('data-filter'));return;}
+    var d=e.target.closest('[data-dismiss]');
+    if(d){
+      if(!inflight){send('/dismiss',{number:parseInt(d.getAttribute('data-dismiss'),10)});}
+      return;
+    }
+    if(e.target.closest('#approve-selected')){approveSelected();return;}
+    if(e.target.closest('#approve-all')){approveAll();return;}
+    if(e.target.closest('#sync')){kickSweep();return;}
+  });
+  document.addEventListener('change',function(e){
+    var b=e.target;
+    if(b&&b.type==='checkbox'&&b.hasAttribute('data-view')){
+      // the same record has a checkbox in each view: keep them in step so a
+      // selection survives a layout switch
+      var twins=document.querySelectorAll('input[type=checkbox][value="'+b.value+'"]');
+      for(var i=0;i<twins.length;i++){twins[i].checked=b.checked;}
+      refresh();
+    }
+  });
   marks();applyFilter();refresh();
 })();
 """ % {"key": _LAYOUT_STORAGE_KEY, "poll": _POLL_SECONDS * 1000,

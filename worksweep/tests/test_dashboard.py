@@ -1764,7 +1764,9 @@ def test_sync_posts_to_sweep_and_leaves_the_reload_to_the_live_poll():
     reloads when the sweep lands, so there is one refresh path, not two."""
     js = _page([_rec(1)]).replace(" ", "").replace("\n", "")
     assert "fetch('/sweep',{method:'POST',headers:{'X-Worksweep':'approve'}})" in js
-    assert "sync.disabled=true;sync.textContent='syncing…';" in js
+    assert ("varsync=document.getElementById('sync');"
+            "if(!sync||syncing||sync.disabled){return;}"
+            "syncing=true;sync.disabled=true;sync.textContent='syncing…';") in js
     assert "if(r.status===429){syncDone('justsynced');return;}" in js
     assert "pollMtime" not in js                    # the private poll is gone
     # the button still un-spins if the sweep dies without moving the queue
@@ -2375,3 +2377,57 @@ def test_a_hostile_dismiss_actor_is_ignored_like_an_approve_one(serve_queue):
     body = json.dumps({"number": 1, "actor": "@everyone " + "x" * 4000})
     assert s.dismiss(1, body=body)[0] == 200
     assert [p for p in posted if p.startswith("🗑️")][0].endswith(" (dashboard)")
+
+
+# =============================================================================
+# htmx live updates, Phase 1 -- every listener is delegated (decision 6)
+#
+# Direct `getElementById(...).addEventListener` bindings survive exactly one
+# page load: the moment a region is swapped out from under them the new node
+# has no listener and the control is dead chrome. Delegating on `document`
+# makes the page swap-safe BEFORE any swap exists, so the refactor ships as its
+# own behaviour-neutral commit.
+# =============================================================================
+
+def test_all_click_handlers_are_delegated():
+    """Falsifying: re-introduce any direct binding and the count goes to 3."""
+    js = _page([_rec(1)]).replace(" ", "").replace("\n", "")
+    assert js.count("addEventListener(") == 2
+    assert "document.addEventListener('click'," in js
+    assert "document.addEventListener('change'," in js
+    # the three ex-direct bindings now arrive through the delegated handler,
+    # appended BELOW the pre-existing layout/filter/dismiss branches
+    assert "e.target.closest('#approve-selected')" in js
+    assert "e.target.closest('#approve-all')" in js
+    assert "e.target.closest('#sync')" in js
+    assert js.index("closest('[data-dismiss]')") < js.index("closest('#sync')")
+
+
+def test_sync_done_requeries_the_button():
+    """Falsifying: close over the button at load time and a swapped page can
+    never un-spin it -- the Sync control stays 'syncing…' forever."""
+    js = _page([_rec(1)]).replace(" ", "").replace("\n", "")
+    body = js[js.index("functionsyncDone(label){"):]
+    body = body[:body.index("functionkickSweep(")]
+    assert "document.getElementById('sync')" in body
+    # and the 3s un-spin timer re-queries too: 3s is long enough for a swap
+    assert body.count("document.getElementById('sync')") == 2
+    assert "varsync=document.getElementById('sync');" not in js[:js.index("functionscope(")]
+
+
+def test_a_sync_click_without_the_button_is_a_no_op():
+    """Falsifying: drop the guard and a click delegated after the button has
+    been swapped away throws and POSTs nothing but a console error."""
+    js = _page([_rec(1)]).replace(" ", "").replace("\n", "")
+    assert "if(!sync||syncing||sync.disabled){return;}" in js
+    guard = js.index("if(!sync||syncing||sync.disabled){return;}")
+    assert guard < js.index("fetch('/sweep'")
+
+
+def test_dead_refresh_constants_are_gone():
+    """Falsifying: both were unreferenced anywhere in the package -- leaving
+    them invites a future reader to wire the wrong cadence back up."""
+    assert not hasattr(dashboard, "_REFRESH_SECONDS")
+    assert not hasattr(dashboard, "_MTIME_POLL_SECONDS")
+    # the live cadences that ARE real stay
+    assert dashboard._POLL_SECONDS == 10
