@@ -1776,7 +1776,8 @@ def test_mtime_returns_the_queue_file_mtime(serve_queue):
     status, headers, body = s.request("GET", "/mtime")
     assert status == 200
     assert headers["Content-Type"].startswith("text/plain")
-    assert body.decode() == dashboard.mtime_token(os.path.getmtime(qpath))
+    st = os.stat(qpath)
+    assert body.decode() == dashboard.mtime_token(st.st_mtime, st.st_size)
 
 
 def test_mtime_changes_when_the_queue_is_rewritten(serve_queue):
@@ -1786,7 +1787,14 @@ def test_mtime_changes_when_the_queue_is_rewritten(serve_queue):
     os.utime(qpath, (1_800_000_000, 1_800_000_000))
     after = s.request("GET", "/mtime")[2]
     assert after != before
-    assert after.decode() == dashboard.mtime_token(1_800_000_000)
+    assert after.decode() == dashboard.mtime_token(1_800_000_000,
+                                                   os.path.getsize(qpath))
+    # ...and a rewrite that lands inside the SAME filesystem tick still moves
+    # it, which mtime alone could not do on a one-second-granularity volume
+    save_queue(qpath, [_rec(1), _rec(2)])
+    os.utime(qpath, (1_800_000_000, 1_800_000_000))
+    same_tick = s.request("GET", "/mtime")[2]
+    assert same_tick != after
 
 
 def test_mtime_needs_no_csrf_header(serve_queue):
@@ -2831,7 +2839,8 @@ def test_events_emits_on_mtime_change(serve_queue):
         os.utime(qpath, (1_800_000_000, 1_800_000_000))
         lines = r.frame(timeout=2).splitlines()
     assert lines[0] == "event: queue"
-    assert lines[1] == "data: " + dashboard.mtime_token(1_800_000_000)
+    assert lines[1] == "data: " + dashboard.mtime_token(1_800_000_000,
+                                                        os.path.getsize(qpath))
     assert len(lines) == 2                       # ...and then the blank line
 
 
@@ -2858,7 +2867,7 @@ def test_events_holds_no_write_lock():
     used |= {n.attr for n in ast.walk(fn) if isinstance(n, ast.Attribute)}
     for forbidden in ("_WRITE_LOCK", "write_lock", "load_queue", "save_queue"):
         assert forbidden not in used, forbidden
-    assert "_queue_mtime" in used                # it stats a path, nothing more
+    assert "_queue_stamp" in used                # it stats a path, nothing more
 
 
 def test_approve_during_open_stream_completes(serve_queue):
@@ -2952,3 +2961,60 @@ def test_sse_error_falls_back_to_fragment_poll():
     assert "location.reload" in page             # ...still htmx's own
     assert js.count("addEventListener(") == 2    # htmx.on keeps the budget
 
+
+
+# =============================================================================
+# Review round 2 -- hardening found by the security and edge-case passes
+# =============================================================================
+
+def test_mtime_token_carries_the_size_so_a_same_tick_rewrite_is_seen():
+    """Falsifying: drop the size and a queue rewritten twice inside one
+    filesystem tick is invisible. APFS has nanosecond mtimes, but HFS+ and most
+    network filesystems have one-second granularity, and a sweep landing twice
+    in a second is exactly the busy moment the page most needs to keep up with.
+    """
+    assert dashboard.mtime_token(1_750_000_000.0, 40) == "1750000000.000000:40"
+    # same instant, different content -> a different token
+    assert (dashboard.mtime_token(1_750_000_000.0, 40)
+            != dashboard.mtime_token(1_750_000_000.0, 41))
+    # a missing queue is still the one distinguished value
+    assert dashboard.mtime_token(None, None) == "0"
+    assert dashboard.mtime_token(0, 12) == "0"
+
+
+def test_queue_stamp_is_one_stat_and_degrades_to_none(tmp_path, monkeypatch):
+    """One stat, not two: reading mtime and size separately could straddle a
+    rewrite and mint a token for a state that never existed on disk."""
+    qpath = os.path.join(str(tmp_path), "queue.json")
+    save_queue(qpath, [_rec(1)])
+    st = os.stat(qpath)
+    assert dashboard._queue_stamp(qpath) == (st.st_mtime, st.st_size)
+    assert dashboard._queue_stamp(os.path.join(str(tmp_path), "gone.json")) == (None, None)
+    # ...and it really is one call. Two lookups could straddle a rewrite and
+    # pair an old mtime with a new size -- a token for a state never on disk.
+    calls = []
+    real = os.stat
+    monkeypatch.setattr(os, "stat", lambda *a, **k: (calls.append(a), real(*a, **k))[1])
+    monkeypatch.setattr(os.path, "getmtime",
+                        lambda *a: pytest.fail("_queue_stamp made a second lookup"))
+    monkeypatch.setattr(os.path, "getsize",
+                        lambda *a: pytest.fail("_queue_stamp made a second lookup"))
+    dashboard._queue_stamp(qpath)
+    assert len(calls) == 1
+
+
+def test_the_page_and_the_mtime_route_mint_the_same_token(serve_queue):
+    """Falsifying: if the page embedded a token of a different SHAPE from the
+    one /mtime returns, the very first poll would see a mismatch and refresh --
+    then do it again ten seconds later, forever."""
+    s, qpath = serve_queue([_rec(1)])
+    page = s.request("GET", "/")[2].decode()
+    embedded = re.search(r'<button[^>]*id="sync"[^>]*data-mtime="([^"]+)"', page).group(1)
+    served = s.request("GET", "/mtime")[2].decode()
+    assert embedded == served
+    st = os.stat(qpath)
+    assert served == dashboard.mtime_token(st.st_mtime, st.st_size)
+    # and the fragment response carries that same token, so a swap re-seeds
+    # lastMtime with a value the poll can compare against
+    frag = s.request("GET", "/fragments")[2].decode()
+    assert f'data-mtime="{served}"' in frag

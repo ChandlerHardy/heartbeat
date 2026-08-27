@@ -1323,7 +1323,8 @@ def _telemetry_html(records: Sequence[QueueRecord],
             f'<span class="cnt cnt-week">done this week: {week}</span></div>')
 
 
-def _sync_html(queue_mtime: Optional[float]) -> str:
+def _sync_html(queue_mtime: Optional[float],
+               queue_size: Optional[int] = None) -> str:
     """The header's Sync control.
 
     Carries the mtime token the page was rendered from, so the page can tell a
@@ -1336,7 +1337,7 @@ def _sync_html(queue_mtime: Optional[float]) -> str:
     swap that applies the update it was announcing.
     """
     return (f'<button type="button" class="btn-sync" id="sync" '
-            f'data-mtime="{_e(mtime_token(queue_mtime))}" '
+            f'data-mtime="{_e(mtime_token(queue_mtime, queue_size))}" '
             f'title="run a sweep now">Sync</button>'
             f'<button type="button" class="pending" id="pending" hidden '
             f'title="apply the update now">'
@@ -1374,7 +1375,8 @@ _REGION_IDS = ("telemetry", "sync-region", "sections", "branches", "bar")
 
 
 def _regions(records: Sequence[QueueRecord], now: str,
-             queue_mtime: Optional[float]) -> Dict[str, str]:
+             queue_mtime: Optional[float],
+             queue_size: Optional[int] = None) -> Dict[str, str]:
     """Inner HTML of each dynamic region, keyed by container id.
 
     The single producer for BOTH the full page and the fragment response, so
@@ -1400,7 +1402,7 @@ def _regions(records: Sequence[QueueRecord], now: str,
         branches = ""
         bar = ""
     return {"telemetry": _telemetry_html(records, sections, now, queue_mtime),
-            "sync-region": _sync_html(queue_mtime),
+            "sync-region": _sync_html(queue_mtime, queue_size),
             "sections": content,
             "branches": branches,
             "bar": bar}
@@ -1417,20 +1419,22 @@ def _container(rid: str, inner: str, oob: bool = False) -> str:
 
 
 def render_fragments(records: Sequence[QueueRecord], now: str,
-                     queue_mtime: Optional[float] = None) -> str:
+                     queue_mtime: Optional[float] = None,
+                     queue_size: Optional[int] = None) -> str:
     """The five dynamic regions, each marked for an out-of-band swap.
 
     One response, not five endpoints: the whole page updates in one round trip
     and cannot tear between regions that were rendered from different reads of
     the queue.
     """
-    regions = _regions(records, now, queue_mtime)
+    regions = _regions(records, now, queue_mtime, queue_size)
     return "".join(_container(rid, regions[rid], oob=True)
                    for rid in _REGION_IDS) + "\n"
 
 
 def render_page(records: Sequence[QueueRecord], now: str,
-                queue_mtime: Optional[float] = None) -> str:
+                queue_mtime: Optional[float] = None,
+                queue_size: Optional[int] = None) -> str:
     """Render the whole dashboard as one self-contained HTML page.
 
     Pure: a function of its arguments only. No I/O, no network, no clock -- the
@@ -1441,7 +1445,7 @@ def render_page(records: Sequence[QueueRecord], now: str,
     round trip. The layout is never carried in the URL (decision 12's rejected
     alternative): a pinned home-screen app must keep its stored default.
     """
-    regions = _regions(records, now, queue_mtime)
+    regions = _regions(records, now, queue_mtime, queue_size)
     part = {rid: _container(rid, regions[rid]) for rid in _REGION_IDS}
     toggle = "".join(
         f'<button type="button" class="toggle-btn" data-set-layout="{_e(v)}" '
@@ -1485,17 +1489,27 @@ _ERROR_PAGE = ('<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'
 # HTTP surface
 # =============================================================================
 
-def mtime_token(queue_mtime: Optional[float]) -> str:
-    """Stable string form of the queue mtime, for change detection.
+def mtime_token(queue_mtime: Optional[float],
+                queue_size: Optional[int] = None) -> str:
+    """Stable string form of the queue's identity, for change detection.
 
     The page embeds the token it was rendered from and polls GET /mtime for a
     different one. A string compare needs no clock maths on the client and no
     agreement about float formatting between the two ends -- only that the same
     function produced both.
+
+    The SIZE rides along because mtime alone is not a change detector on every
+    filesystem: APFS keeps nanoseconds, but HFS+ and most network filesystems
+    round to the second, and two sweeps landing inside one second is exactly
+    the busy moment the page most needs to keep up with. Size is not a hash --
+    a same-second rewrite to an identical length still hides -- but it costs
+    one field of the stat already being made and removes the common case.
     """
     if not queue_mtime:
         return "0"
-    return "%.6f" % queue_mtime
+    if queue_size is None:
+        return "%.6f" % queue_mtime
+    return "%.6f:%d" % (queue_mtime, queue_size)
 
 
 def relative_age(queue_mtime: Optional[float], now: str) -> str:
@@ -1530,6 +1544,19 @@ def _queue_mtime(path: str) -> Optional[float]:
         return os.path.getmtime(path)
     except OSError:
         return None
+
+
+def _queue_stamp(path: str) -> Tuple[Optional[float], Optional[int]]:
+    """(mtime, size) from ONE stat.
+
+    One call, not two: reading the mtime and the size separately could straddle
+    a rewrite and mint a token for a pairing that never existed on disk.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return (None, None)
+    return (st.st_mtime, st.st_size)
 
 
 def _valid_numbers(payload) -> Optional[List[int]]:
@@ -1748,7 +1775,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             # Read-only and side-effect free, so no CSRF guard: it leaks only
             # "when did the queue last change", which the page already shows.
             # The Sync flow polls this to know when a kicked sweep has landed.
-            self._text(200, mtime_token(_queue_mtime(self.server.queue_path)))
+            self._text(200, mtime_token(*_queue_stamp(self.server.queue_path)))
             return
         if path == "/fragments":
             # Same rationale as /mtime, and the same absence of a CSRF guard:
@@ -1758,7 +1785,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             qpath = self.server.queue_path
             try:
                 body = render_fragments(load_queue(qpath), self.server.now(),
-                                        _queue_mtime(qpath)).encode(
+                                        *_queue_stamp(qpath)).encode(
                                             "utf-8", errors="replace")
             except Exception as e:             # never crash the agent
                 print(f"worksweep: dashboard fragment render failed: {e}",
@@ -1776,7 +1803,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         qpath = self.server.queue_path
         try:
             body = render_page(load_queue(qpath), self.server.now(),
-                               _queue_mtime(qpath)).encode("utf-8",
+                               *_queue_stamp(qpath)).encode("utf-8",
                                                             errors="replace")
         except Exception as e:                     # never crash the agent
             print(f"worksweep: dashboard render failed: {e}", file=sys.stderr)
@@ -1808,11 +1835,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.flush()
-            last = mtime_token(_queue_mtime(qpath))
+            last = mtime_token(*_queue_stamp(qpath))
             beat = time.monotonic()
             while True:
                 time.sleep(_EVENT_STAT_SECONDS)
-                token = mtime_token(_queue_mtime(qpath))
+                token = mtime_token(*_queue_stamp(qpath))
                 now = time.monotonic()
                 if token != last:
                     last = token
