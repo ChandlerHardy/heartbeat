@@ -922,9 +922,10 @@ def test_layout_is_restored_from_localstorage_before_the_first_section():
     assert 'data-layout=' in page[:page.index("<head")]     # server-side initial
     assert "localStorage.setItem" in page
     # F7: the meta refresh is gone -- it could reload mid-POST or discard a
-    # selection. A JS timer reloads instead, and skips while either is true.
+    # selection. Nothing reloads the page at all now; a JS timer polls and
+    # swaps the changed regions in place.
     assert "http-equiv=\"refresh\"" not in page
-    assert "setTimeout(tick," in _script(page).replace(" ", "")
+    assert "setTimeout(poll," in _script(page).replace(" ", "")
     # AC #35: `branches` persists exactly like the other two -- the restore
     # script must accept all three stored values, not just the original pair
     restore_src = page[restore - 400:page.index("</script>", restore)]
@@ -1491,15 +1492,18 @@ def test_bare_iid_suppression_within_a_repo():
     assert groups[0].bare_mr_refs == (4999,)
 
 
-def test_timed_reload_skips_while_a_selection_or_post_is_live():
-    """F7 (falsifying): a reload mid-POST tears an approval, and a reload with
-    boxes ticked silently discards the selection under the user's thumb."""
+def test_an_auto_refresh_is_held_while_a_selection_or_post_is_live():
+    """F7 (falsifying), unchanged in substance: an update landing mid-POST
+    tears an approval, and one landing with boxes ticked moves rows out from
+    under the user's thumb. Only the CONSEQUENCE of the guard changed -- from
+    reloading later to swapping in place, and from holding silently to holding
+    with the chip up."""
     js = _script(_page([_rec(1)])).replace(" ", "").replace("\n", "")
-    # One shared guard now covers every auto-reload path: an in-flight POST, an
-    # open confirm dialog, or any ticked checkbox.
+    # One shared guard still covers every automatic refresh path: an in-flight
+    # POST, an open confirm dialog, or any ticked checkbox.
     assert "functionbusy(){returninflight||confirming||selected().length>0;}" in js
-    assert "if(busy()){setTimeout(tick,FALLBACK_MS);return;}" in js
-    assert "location.reload();" in js
+    assert "if(inflight||(!force&&busy())){pending=true;chip(true);return;}" in js
+    assert "location.reload" not in js
 
 
 # =============================================================================
@@ -2095,20 +2099,25 @@ def test_live_poll_is_always_armed_not_gated_on_a_sync_tap():
     runner completion would not appear until the next timed reload."""
     js = _script(_page([_rec(1)])).replace(" ", "").replace("\n", "")
     assert "POLL_MS=10000" in js
-    assert "FALLBACK_MS=300000" in js
     # Armed at TOP LEVEL, not inside a handler. Matched at exactly two spaces
     # of indent so the rescheduling calls inside poll() (deeper indent) cannot
     # satisfy this on their own.
     script = _script(_page([_rec(1)]))
     assert re.search(r"^  setTimeout\(poll,POLL_MS\);$", script, re.M)
-    assert re.search(r"^  setTimeout\(tick,FALLBACK_MS\);$", script, re.M)
     assert "fetch('/mtime',{cache:'no-store'})" in js
 
 
-def test_live_poll_reloads_only_when_the_mtime_changed_and_nothing_is_busy():
+def test_live_poll_hands_the_busy_decision_to_the_swap_path():
+    """Falsifying: the poll used to weigh busy() itself and then reload. If it
+    still did, it would drop the change on the floor -- lastMtime is reassigned
+    on every response, so the poll would never look at that change again and
+    the update would be lost rather than held."""
     js = _script(_page([_rec(1)])).replace(" ", "").replace("\n", "")
-    assert "if(t&&baseMtime&&t!==baseMtime&&!busy()){location.reload();return;}" in js
-    # and it keeps polling when busy, so it resumes rather than giving up
+    assert "if(lastMtime&&t!==lastMtime){applyFragments();}" in js
+    src = _script(_page([_rec(1)]))
+    body = src[src.index("function poll(){"):src.index("\n  setTimeout(poll,POLL_MS);\n")]
+    assert "busy()" not in body
+    # and it keeps polling either way, so it resumes rather than giving up
     assert "setTimeout(poll,POLL_MS);" in js
 
 
@@ -2549,3 +2558,205 @@ def test_missing_htmx_asset_fails_at_import(tmp_path):
         _load({"htmx.min.js": "   \n"})                  # asset empty
     # control: the same loader succeeds when the asset is really there
     _load({"htmx.min.js": open(_static("htmx.min.js")).read()})
+
+
+# =============================================================================
+# htmx live updates, Phase 3 -- one fragment endpoint, five out-of-band regions
+#
+# `location.reload()` was the old refresh: it discards a selection, tears an
+# open dialog and repaints 51KB of page to change one row. GET /fragments
+# returns the five dynamic regions marked for out-of-band swap, so one round
+# trip updates the whole page atomically and in place.
+# =============================================================================
+
+_REGIONS = ("telemetry", "sync-region", "sections", "branches", "bar")
+
+
+def _region(doc, rid):
+    """Inner HTML of `<div id="rid" ...>`, matched by counting div tags.
+
+    Deliberately independent of how the composer builds the container: it
+    re-derives the boundary from the document, so the byte-comparison below is
+    a real comparison and not the composer agreeing with itself.
+    """
+    m = re.search(r'<div id="%s"[^>]*>' % re.escape(rid), doc)
+    assert m, f"no container #{rid}"
+    i = j = m.end()
+    depth = 1
+    while depth:
+        nxt = re.compile(r"<div\b|</div>").search(doc, j)
+        assert nxt, f"unbalanced #{rid}"
+        depth += 1 if nxt.group(0) == "<div" else -1
+        j = nxt.end()
+    return doc[i:j - len("</div>")]
+
+
+def test_fragments_match_page_regions():
+    """Falsifying: let the two composers drift by one byte and this goes red.
+    A fragment endpoint that renders a region differently from the page is a
+    page that changes appearance every time it updates."""
+    recs = [_rec(1), _rec(2, status="running"), _rec(3, status="done"),
+            _rec(4, executor="triage")]
+    page = _page(recs)
+    frag = dashboard.render_fragments(recs, NOW, 1_750_000_000.0)
+    for rid in _REGIONS:
+        assert _region(page, rid) == _region(frag, rid), rid
+    # and the fragment response is ONLY those five, each marked for oob swap
+    assert re.findall(r'<div id="([a-z-]+)" class="oob" hx-swap-oob="true">',
+                      frag) == list(_REGIONS)
+    assert 'hx-swap-oob' not in _markup(page)  # the page itself swaps nothing
+    assert frag.count("hx-swap-oob") == 5
+
+
+def test_fragment_targets_exist_in_every_state():
+    """Falsifying: without a container that survives the transition, approving
+    the LAST item leaves the page showing rows that no longer exist -- a
+    sharper version of the stale-page bug this build exists to kill."""
+    for label, recs in (("empty", []), ("full", [_rec(1), _rec(2)])):
+        page, frag = _page(recs), dashboard.render_fragments(recs, NOW, 1.0)
+        for rid in _REGIONS:
+            assert f'<div id="{rid}" class="oob"' in page, (label, rid)
+            assert f'<div id="{rid}" class="oob" hx-swap-oob="true">' in frag, (label, rid)
+    # the empty page's all-clear text lives INSIDE #sections, so the swap that
+    # empties the queue also replaces the rows with it
+    assert "Nothing needs you right now" in _region(_page([]), "sections")
+    assert _region(_page([]), "branches") == ""
+    assert _region(_page([]), "bar") == ""
+    # a container is a swap target, never a layout box: .head is flex and .bar
+    # is position:sticky, both of which a real wrapper would quietly change
+    assert ".oob{display:contents}" in _style(_page([])).replace(" ", "")
+
+
+def test_fragments_needs_no_csrf_header(serve_queue):
+    """Mirrors /mtime: a read that leaks only what the page already shows."""
+    s, _ = serve_queue([_rec(1)])
+    status, headers, body = s.request("GET", "/fragments", None, {})
+    assert status == 200
+    assert headers["Content-Type"] == "text/html; charset=utf-8"
+    assert b'hx-swap-oob="true"' in body
+
+
+def test_fragments_is_get_only(serve_queue):
+    s, _ = serve_queue([_rec(1)])
+    status, _, _ = s.request("POST", "/fragments", "", {"X-Worksweep": "approve"})
+    assert status == 404
+
+
+def test_fragment_render_failure_is_a_500(serve_queue, monkeypatch):
+    """The launchd agent is KeepAlive: an exception escaping the handler is a
+    restart loop. Falsifying: drop the catch and the server dies mid-suite."""
+    s, _ = serve_queue([_rec(1)])
+    monkeypatch.setattr(dashboard, "render_fragments",
+                        lambda *a, **k: (_ for _ in ()).throw(ValueError("boom")))
+    status, headers, body = s.request("GET", "/fragments")
+    assert status == 500
+    assert headers["Content-Type"] == "text/plain; charset=utf-8"
+    assert b"boom" not in body                  # never leak the traceback
+    # and the same server is still serving on the next request
+    assert s.request("GET", "/mtime")[0] == 200
+
+
+def test_actions_refresh_fragments_not_the_page():
+    """Falsifying in both halves: `location.reload` reappearing in send() fails
+    the first, and losing the fragment call fails the second. The `not in` half
+    is only sound because _script() scopes past htmx's own two reloads."""
+    page = _page([_rec(1)])
+    js = _script(page).replace(" ", "").replace("\n", "")
+    assert "location.reload" not in js
+    assert "location.reload" in page             # ...but htmx's own still is
+    assert ("if(r.status===200){inflight=false;clearSelection();"
+            "applyFragments();return;}") in js
+    assert "htmx.ajax('GET','/fragments',{target:'body',swap:'none'})" in js
+
+
+def test_deferred_swap_holds_and_drains():
+    """Falsifying, four ways. The hold stops rows shifting under a half-built
+    selection; the chip stops the hold being SILENT (the original bug); and the
+    three drain paths stop the hold being PERMANENT (the same bug, reborn).
+    Deleting any one drain path fails exactly one of these assertions."""
+    js = _script(_page([_rec(1)])).replace(" ", "").replace("\n", "")
+    # hold + visible chip
+    assert "if(inflight||(!force&&busy())){pending=true;chip(true);return;}" in js
+    assert "functionchip(on){varc=document.getElementById('pending');if(c){c.hidden=!on;}}" in js
+    # drain 1: the last checkbox came off
+    assert "if(pending&&selected().length===0){applyFragments();}" in js
+    # drain 2: the confirm dialog closed, either way
+    assert "confirming=false;if(pending){applyFragments();}" in js
+    # drain 3: the user tapped the chip -- which forces past the selection
+    # guard, because tapping it IS the request to update now
+    assert "if(e.target.closest('#pending')){applyFragments(true);return;}" in js
+
+
+def test_the_pending_chip_is_rendered_hidden_in_every_state():
+    for recs in ([], [_rec(1)]):
+        page = _page(recs)
+        chip = re.search(r'<button[^>]*id="pending"[^>]*>', page)
+        assert chip is not None
+        assert "hidden" in chip.group(0)
+        assert "queue changed" in _region(page, "sync-region")
+    css = _style(_page([])).replace(" ", "")
+    assert ".pending[hidden]{display:none}" in css
+
+
+def test_post_swap_reapplies_selection_and_filters():
+    """AC #8: a swap must not silently drop a selection the user can still see,
+    and the bar's disabled/hidden/count state must be recomputed against the
+    rows that actually arrived."""
+    js = _script(_page([_rec(1)])).replace(" ", "").replace("\n", "")
+    # captured immediately BEFORE the request, re-applied after the swap
+    assert "carried=selected();" in js
+    assert js.index("carried=selected();") < js.index("htmx.on('htmx:afterSwap'")
+    assert ("vartwins=document.querySelectorAll"
+            "('input[type=checkbox][value=\"'+carried[i]+'\"]');") in js
+    assert "applyFilter();refresh();marks();" in js
+    # and nothing is bound with addEventListener: htmx.on keeps the page's
+    # listener budget at the two delegated ones
+    assert js.count("addEventListener(") == 2
+
+
+def test_live_poll_refreshes_fragments_and_never_reloads():
+    """The 10s mtime poll is the fallback path now, so it must refresh in place
+    exactly like the SSE path does -- and keep polling forever either way."""
+    js = _script(_page([_rec(1)])).replace(" ", "").replace("\n", "")
+    assert "tick" not in js
+    assert "FALLBACK_MS" not in js
+    assert "baseMtime" not in js
+    assert "if(lastMtime&&t!==lastMtime){applyFragments();}" in js
+    assert "lastMtime=t;" in js
+    assert js.count("setTimeout(poll,POLL_MS);") == 3   # armed + both settles
+
+
+def test_last_mtime_is_reseeded_from_every_swap():
+    """Falsifying: leave it as the load-time DOM read and the poll either fires
+    on every tick forever or never fires again -- the captured token cannot
+    survive its own region being re-rendered."""
+    js = _script(_page([_rec(1)])).replace(" ", "").replace("\n", "")
+    hook = js[js.index("htmx.on('htmx:afterSwap'"):]
+    assert "vars=document.getElementById('sync');" in hook
+    assert "lastMtime=s?(s.getAttribute('data-mtime')||'').trim():lastMtime;" in hook
+
+
+def test_the_emitted_javascript_actually_parses():
+    """The one failure no string assertion in this file can see.
+
+    Every other JS test here asserts that some substring is present; a stray
+    brace would satisfy all of them and still take the entire page down, since
+    both blocks are one <script> each. Skipped rather than vendored: the repo
+    is stdlib-only by policy, so this is a local sharpener, not a dependency.
+    """
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("no node on PATH")
+    for name, source in (("head", dashboard._HEAD_SCRIPT),
+                         ("body", dashboard._BODY_SCRIPT)):
+        path = os.path.join(os.path.dirname(dashboard.__file__), f".{name}.check.js")
+        try:
+            with open(path, "w") as fh:
+                fh.write(source)
+            r = subprocess.run([node, "--check", path], capture_output=True)
+            assert r.returncode == 0, (name, r.stderr.decode())
+        finally:
+            if os.path.exists(path):
+                os.remove(path)

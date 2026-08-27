@@ -86,10 +86,6 @@ _SYNC_FALLBACK_SECONDS = 120
 # runner completion / intake approval / keep-current merge shows up within one
 # interval instead of waiting for the next timed reload.
 _POLL_SECONDS = 10
-# Belt-and-braces reload for a poll that has wedged (a fetch that never settles,
-# a suspended tab that resumes weird). Long, because the poll is the real
-# refresh path now.
-_FALLBACK_RELOAD_SECONDS = 300
 # A workstream card is named after a human-readable thing, not an iid. Long MR
 # titles are truncated so a card header stays one scannable line.
 _CARD_TITLE_LIMIT = 60
@@ -697,6 +693,27 @@ button.cnt:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
 /* A class rule outranks the UA's [hidden]{display:none}, so say it here or a
    hidden bar would still lay out. */
 .bar[hidden]{display:none}
+
+/* ---- the five out-of-band swap targets ---- */
+/* They exist only to give every dynamic region a stable id in EVERY queue
+   state, so `display:contents`: .head is a flex container whose .brand uses
+   margin-right:auto and whose .counts uses width:100% to force its own line,
+   and .bar is position:sticky. A real wrapper box would quietly change both. */
+.oob{display:contents}
+
+/* "queue changed - update pending": shown when an update arrives while a
+   selection or a dialog is live. A held update must be VISIBLE -- a silent
+   hold is the bug this whole refresh path exists to kill -- and tapping it
+   applies the update immediately. */
+.pending{
+  appearance:none;font:inherit;font-size:12px;font-weight:600;
+  padding:5px 10px;border-radius:999px;cursor:pointer;
+  border:1px solid var(--warn);background:var(--panel-2);color:var(--warn);
+}
+.pending:hover{background:var(--line-soft)}
+.pending:active{transform:translateY(1px)}
+.pending:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
+.pending[hidden]{display:none}
 .bar .btn{
   appearance:none;flex:1 1 0;min-height:52px;
   font:inherit;font-size:15px;font-weight:650;
@@ -775,14 +792,20 @@ _HTMX_JS = _read_vendored_js(_HTMX_PATH)
 _BODY_SCRIPT = """
 (function(){
   var root=document.documentElement,KEY='%(key)s';
-  var POLL_MS=%(poll)d,FALLBACK_MS=%(fallback_reload)d,SYNC_MAX_MS=%(sync_max)d;
+  var POLL_MS=%(poll)d,SYNC_MAX_MS=%(sync_max)d;
   var inflight=false,syncing=false,confirming=false;
-  // A VALUE, not an element: any element captured at load time is stale the
-  // moment its region is re-rendered. Every handler below re-queries by id.
-  var baseMtime=(function(){
+  // Script-scoped, NOT a load-time DOM read: the token is re-seeded from the
+  // freshly rendered Sync button after every swap. A value captured once dies
+  // with the region it was read from, and the poll would then either fire on
+  // every pass forever or never fire again.
+  var lastMtime=(function(){
     var s=document.getElementById('sync');
     return s?(s.getAttribute('data-mtime')||'').trim():'';
   })();
+  // An update arrived while the page was busy and is waiting to be applied.
+  var pending=false;
+  // The selection captured just before a swap, re-applied just after.
+  var carried=[];
 
   function scope(){
     return document.querySelector(root.getAttribute('data-layout')==='branches'?'.branches':'.sections');
@@ -884,35 +907,73 @@ _BODY_SCRIPT = """
     inflight=true;refresh();
     fetch(url,{method:'POST',headers:{'X-Worksweep':'approve','Content-Type':'application/json'},body:JSON.stringify(body)})
       .then(function(r){
-        if(r.status===200){location.reload();return;}
+        // The rows just acted on are no longer on offer, so the selection
+        // that submitted them is spent. Clear it BEFORE refreshing or the
+        // deferred-swap guard would hold the very update just asked for.
+        if(r.status===200){inflight=false;clearSelection();applyFragments();return;}
         inflight=false;alert('Request failed ('+r.status+')');refresh();
       })
       .catch(function(e){inflight=false;alert('Request failed: '+e);refresh();});
   }
 
-  // ---- live refresh: poll the queue mtime ALWAYS, not only after a Sync ----
-  // A runner completion, an intake approval or a keep-current merge lands
-  // within one interval instead of waiting for a timed reload.
+  function clearSelection(){
+    var b=document.querySelectorAll('input[type=checkbox]');
+    for(var i=0;i<b.length;i++){b[i].checked=false;}
+    refresh();
+  }
+
+  // ---- live refresh: swap the five dynamic regions, never reload ----------
+  // A reload discards a selection, tears an open dialog and repaints the whole
+  // document to change one row. One GET returns the five regions marked for an
+  // out-of-band swap, so the page updates atomically and in place.
+  function chip(on){
+    var c=document.getElementById('pending');
+    if(c){c.hidden=!on;}
+  }
+  function applyFragments(force){
+    // Rows shifting under a half-built selection, an open confirm dialog or an
+    // in-flight POST is exactly what the old busy() guard rightly prevented --
+    // but holding SILENTLY is the bug this build exists to kill. Hold, and say
+    // so on the chip. `force` is the chip's own tap: asking for it explicitly.
+    // An in-flight POST is never forced past; it ends in its own refresh.
+    if(inflight||(!force&&busy())){pending=true;chip(true);return;}
+    // Captured BEFORE the request: rows that come back are re-checked by
+    // value, rows that vanished simply drop out. The server re-validates every
+    // number on POST, so consent enforcement never rests on this.
+    carried=selected();
+    htmx.ajax('GET','/fragments',{target:'body',swap:'none'});
+  }
+  htmx.on('htmx:afterSwap',function(){
+    pending=false;chip(false);
+    for(var i=0;i<carried.length;i++){
+      var twins=document.querySelectorAll('input[type=checkbox][value="'+carried[i]+'"]');
+      for(var j=0;j<twins.length;j++){twins[j].checked=true;}
+    }
+    // Re-seeded from the button that just arrived, not from the one that left.
+    var s=document.getElementById('sync');
+    lastMtime=s?(s.getAttribute('data-mtime')||'').trim():lastMtime;
+    // The rows changed, so every derived piece of state is stale: which rows
+    // the active filter hides, and therefore what the bar may offer.
+    applyFilter();refresh();marks();
+  });
+
+  // ---- the 10s mtime poll: a fallback for when the event stream is not up --
   function poll(){
     fetch('/mtime',{cache:'no-store'})
       .then(function(r){return r.text();})
       .then(function(t){
         t=(t||'').trim();
-        // If the queue moved while the user is mid-action, keep polling and
-        // reload as soon as they are free -- never yank the page away.
-        if(t&&baseMtime&&t!==baseMtime&&!busy()){location.reload();return;}
+        if(t){
+          if(lastMtime&&t!==lastMtime){applyFragments();}
+          // Reassigned on EVERY response: a held update must not re-trigger
+          // on the next pass, it drains through `pending` instead.
+          lastMtime=t;
+        }
         setTimeout(poll,POLL_MS);
       })
       .catch(function(){setTimeout(poll,POLL_MS);});
   }
   setTimeout(poll,POLL_MS);
-  // Long backstop for a poll that has wedged (a fetch that never settles, a
-  // suspended tab that resumes oddly).
-  function tick(){
-    if(busy()){setTimeout(tick,FALLBACK_MS);return;}
-    location.reload();
-  }
-  setTimeout(tick,FALLBACK_MS);
 
   function approveSelected(){
     var n=selected();
@@ -927,7 +988,9 @@ _BODY_SCRIPT = """
     if(!n.length){alert('Nothing is proposed right now.');return;}
     confirming=true;
     var ok=confirm('Approve all '+n.length+' proposed items?');
+    // Drain 2 of 3: the dialog is gone either way, so a held update can land.
     confirming=false;
+    if(pending){applyFragments();}
     if(!ok){return;}
     send('/approve-all',{numbers:n});
   }
@@ -980,6 +1043,9 @@ _BODY_SCRIPT = """
     if(e.target.closest('#approve-selected')){approveSelected();return;}
     if(e.target.closest('#approve-all')){approveAll();return;}
     if(e.target.closest('#sync')){kickSweep();return;}
+    // Drain 3 of 3: tapping the chip IS the request to update now, so it
+    // forces past the selection guard the other two drains wait out.
+    if(e.target.closest('#pending')){applyFragments(true);return;}
   });
   document.addEventListener('change',function(e){
     var b=e.target;
@@ -989,12 +1055,14 @@ _BODY_SCRIPT = """
       var twins=document.querySelectorAll('input[type=checkbox][value="'+b.value+'"]');
       for(var i=0;i<twins.length;i++){twins[i].checked=b.checked;}
       refresh();
+      // Drain 1 of 3: nothing is selected any more, so a held update can land
+      // without moving a single row under the user's thumb.
+      if(pending&&selected().length===0){applyFragments();}
     }
   });
   marks();applyFilter();refresh();
 })();
 """ % {"key": _LAYOUT_STORAGE_KEY, "poll": _POLL_SECONDS * 1000,
-       "fallback_reload": _FALLBACK_RELOAD_SECONDS * 1000,
        "sync_max": _SYNC_FALLBACK_SECONDS * 1000}
 
 
@@ -1230,14 +1298,21 @@ def _telemetry_html(records: Sequence[QueueRecord],
 def _sync_html(queue_mtime: Optional[float]) -> str:
     """The header's Sync control.
 
-    Carries the mtime token the page was rendered from, so after kicking a
-    sweep the page can poll GET /mtime and reload the moment the queue actually
-    changes -- rather than guessing a duration or reloading into the same stale
-    view. Lives in the header, so it is present in all three layouts.
+    Carries the mtime token the page was rendered from, so the page can tell a
+    /mtime response apart from the state it is already showing -- rather than
+    guessing a duration or refreshing into the same view. Lives in the header,
+    so it is present in all three layouts.
+
+    The update-pending chip rides along in this region deliberately: it is the
+    one piece of chrome that must be re-rendered (and so re-hidden) by the same
+    swap that applies the update it was announcing.
     """
     return (f'<button type="button" class="btn-sync" id="sync" '
             f'data-mtime="{_e(mtime_token(queue_mtime))}" '
-            f'title="run a sweep now">Sync</button>')
+            f'title="run a sweep now">Sync</button>'
+            f'<button type="button" class="pending" id="pending" hidden '
+            f'title="apply the update now">'
+            f'queue changed \u2014 update pending</button>')
 
 
 def _bar_html(records: Sequence[QueueRecord]) -> str:
@@ -1263,6 +1338,69 @@ def _bar_html(records: Sequence[QueueRecord]) -> str:
         '</div>')
 
 
+# The five regions of the page that change when the queue changes, in
+# document order. Every one carries a stable id in EVERY queue state -- an
+# out-of-band swap needs a target that exists on both sides of the transition,
+# and the empty queue is exactly the transition that would otherwise have none.
+_REGION_IDS = ("telemetry", "sync-region", "sections", "branches", "bar")
+
+
+def _regions(records: Sequence[QueueRecord], now: str,
+             queue_mtime: Optional[float]) -> Dict[str, str]:
+    """Inner HTML of each dynamic region, keyed by container id.
+
+    The single producer for BOTH the full page and the fragment response, so
+    the two cannot drift: a fragment endpoint that renders a region differently
+    from the page is a page that changes appearance every time it updates.
+
+    Pure, like `render_page`: a function of its arguments only.
+    """
+    records = list(records)
+    sections = partition_sections(records)
+    if records:
+        groups, ungrouped = group_by_workstream(records)
+        content = _sections_html(sections, now)
+        branches = _branches_html(groups, ungrouped)
+        bar = _bar_html(records)
+    else:
+        # The all-clear lives INSIDE #sections rather than replacing it, so the
+        # swap that empties the queue also removes the rows it replaces. When
+        # this was a sibling of .sections, approving the last item left the
+        # page showing rows that no longer existed.
+        content = ('<div class="clear"><span class="clear-i">🔭</span>'
+                   'Nothing needs you right now.</div>')
+        branches = ""
+        bar = ""
+    return {"telemetry": _telemetry_html(records, sections, now, queue_mtime),
+            "sync-region": _sync_html(queue_mtime),
+            "sections": content,
+            "branches": branches,
+            "bar": bar}
+
+
+def _container(rid: str, inner: str, oob: bool = False) -> str:
+    """One region, in its stable-id container.
+
+    Emitted by the page without the swap marker and by the fragment response
+    with it, from the same call, so the container markup cannot disagree either.
+    """
+    marker = ' hx-swap-oob="true"' if oob else ""
+    return f'<div id="{_e(rid)}" class="oob"{marker}>{inner}</div>'
+
+
+def render_fragments(records: Sequence[QueueRecord], now: str,
+                     queue_mtime: Optional[float] = None) -> str:
+    """The five dynamic regions, each marked for an out-of-band swap.
+
+    One response, not five endpoints: the whole page updates in one round trip
+    and cannot tear between regions that were rendered from different reads of
+    the queue.
+    """
+    regions = _regions(records, now, queue_mtime)
+    return "".join(_container(rid, regions[rid], oob=True)
+                   for rid in _REGION_IDS) + "\n"
+
+
 def render_page(records: Sequence[QueueRecord], now: str,
                 queue_mtime: Optional[float] = None) -> str:
     """Render the whole dashboard as one self-contained HTML page.
@@ -1275,25 +1413,12 @@ def render_page(records: Sequence[QueueRecord], now: str,
     round trip. The layout is never carried in the URL (decision 12's rejected
     alternative): a pinned home-screen app must keep its stored default.
     """
-    records = list(records)
-    sections = partition_sections(records)
-    sync = _sync_html(queue_mtime)
+    regions = _regions(records, now, queue_mtime)
+    part = {rid: _container(rid, regions[rid]) for rid in _REGION_IDS}
     toggle = "".join(
         f'<button type="button" class="toggle-btn" data-set-layout="{_e(v)}" '
         f'aria-pressed="false">{_e(v.capitalize())}</button>'
         for v in ("checklist", "panels", "branches"))
-
-    if records:
-        groups, ungrouped = group_by_workstream(records)
-        content = (_sections_html(sections, now)
-                   + _branches_html(groups, ungrouped))
-        bar = _bar_html(records)
-        telemetry = _telemetry_html(records, sections, now, queue_mtime)
-    else:
-        content = ('<div class="clear"><span class="clear-i">🔭</span>'
-                   'Nothing needs you right now.</div>')
-        bar = ""
-        telemetry = _telemetry_html(records, sections, now, queue_mtime)
 
     return (
         '<!doctype html>\n'
@@ -1313,10 +1438,11 @@ def render_page(records: Sequence[QueueRecord], now: str,
         '<header class="head">'
         '<div class="brand">🔭 Worksweep</div>'
         f'<div class="toggle" role="group" aria-label="Layout">{toggle}</div>'
-        f'{sync}{telemetry}</header>\n'
-        f'{content}\n'
+        f'{part["sync-region"]}{part["telemetry"]}</header>\n'
+        f'{part["sections"]}\n'
+        f'{part["branches"]}\n'
         '</div>\n'
-        f'{bar}\n'
+        f'{part["bar"]}\n'
         f'<script>{_BODY_SCRIPT}</script>\n'
         '</body>\n</html>\n')
 
@@ -1578,6 +1704,23 @@ class DashboardHandler(BaseHTTPRequestHandler):
             # "when did the queue last change", which the page already shows.
             # The Sync flow polls this to know when a kicked sweep has landed.
             self._text(200, mtime_token(_queue_mtime(self.server.queue_path)))
+            return
+        if path == "/fragments":
+            # Same rationale as /mtime, and the same absence of a CSRF guard:
+            # a read that leaks only what the page it is refreshing already
+            # shows. This is the whole live-update path -- SSE only says
+            # "something changed", this says what it changed to.
+            qpath = self.server.queue_path
+            try:
+                body = render_fragments(load_queue(qpath), self.server.now(),
+                                        _queue_mtime(qpath)).encode(
+                                            "utf-8", errors="replace")
+            except Exception as e:             # never crash the agent
+                print(f"worksweep: dashboard fragment render failed: {e}",
+                      file=sys.stderr)
+                self._text(500, "fragment render failed")
+                return
+            self._send(200, "text/html; charset=utf-8", body)
             return
         if path != "/":
             self._text(404, "not found")
