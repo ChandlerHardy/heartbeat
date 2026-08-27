@@ -122,8 +122,12 @@ def claim(records: List[QueueRecord], number: int, now: str,
 
 
 def complete(records: List[QueueRecord], number: int, result_sha: str,
-             report_path: str, now: str, mr_iid: int = 0) -> List[QueueRecord]:
-    changes = dict(status="done", done_reason="executor-completed",
+             report_path: str, now: str, mr_iid: int = 0,
+             done_reason: str = "executor-completed") -> List[QueueRecord]:
+    """Flip `number` to done. `done_reason` says WHY it is finished -- usually
+    because the executor did the work, but "mr-merged" when the MR ended and
+    took the work with it (models.WorkItem documents the enum)."""
+    changes = dict(status="done", done_reason=done_reason,
                    result_sha=result_sha, report_path=report_path)
     if mr_iid:
         changes["mr_iid"] = mr_iid
@@ -506,10 +510,13 @@ def _run_keep_current_claim(cfg, deps: Dict[str, Callable],
         _fail_and_post(deps, cfg, number, f"{type(e).__name__}: {e}",
                        _KEEP_CURRENT)
         return 1
+    merged = bool(getattr(result, "mr_merged", False))
     updated = _apply_to_fresh(
         deps, cfg, number,
         lambda fresh: complete(fresh, number, result.result_sha, "",
-                               deps["now"]()))
+                               deps["now"](),
+                               done_reason=("mr-merged" if merged
+                                            else "executor-completed")))
     if updated is not None:
         _post(deps, cfg, _keep_current_done_message(result))
     return 0
@@ -618,10 +625,13 @@ def _run_address_feedback_claim(cfg, deps: Dict[str, Callable],
         _fail_and_post(deps, cfg, number, f"{type(e).__name__}: {e}",
                        _ADDRESS_FEEDBACK)
         return 1
+    merged = bool(getattr(result, "mr_merged", False))
     updated = _apply_to_fresh(
         deps, cfg, number,
         lambda fresh: _chain_magi_review(
-            complete(fresh, number, result.result_sha, "", deps["now"]()),
+            complete(fresh, number, result.result_sha, "", deps["now"](),
+                     done_reason=("mr-merged" if merged
+                                  else "executor-completed")),
             target.item, result, deps["now"]()))
     if updated is not None:
         from . import feedback as _feedback   # local: feedback imports runner
@@ -783,6 +793,16 @@ def _implement_done_message(result) -> str:
 
 
 def _keep_current_done_message(result) -> str:
+    if getattr(result, "mr_merged", False):
+        # Good news, and it must READ as good news. This outcome used to
+        # arrive as a ⚠️ fetch failure, and a warning for the ordinary end of
+        # an MR's life is how people learn to ignore warnings.
+        return (f"✅ !{result.iid} merged — branch gone, nothing to keep "
+                f"current")
+    return _keep_current_merge_message(result)
+
+
+def _keep_current_merge_message(result) -> str:
     """`🔄 !4020 merged master (+7 commits, scss recompiled) · dev4 verified
     200` or `... · no dev box serving branch` when nothing currently has the
     branch checked out (a done outcome, not an error -- the merge+push

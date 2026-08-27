@@ -224,7 +224,7 @@ def test_feedback_prompt_never_resolves():
     # and the tally has no room to count one: three outcomes, no fourth
     assert set(feedback.FeedbackResult.__dataclass_fields__) == {
         "iid", "waiting", "addressed", "replied", "escalated", "replies",
-        "result_sha", "already_answered"}
+        "result_sha", "already_answered", "mr_merged"}
 
 
 def _unaddressed(payload, username=ME):
@@ -1385,3 +1385,44 @@ def test_the_ancestry_check_names_the_branch_it_checked(tmp_path, worktree):
     assert len(checks) == 1
     assert "deadbee" in checks[0]
     assert f"origin/{BRANCH}" in checks[0]
+
+
+# --- the MR merged out from under the run (live: !3997, 2026-08-27) -------
+
+def test_a_merged_mr_ends_the_feedback_run_cleanly(tmp_path, worktree):
+    """Same ending as keep-current's: GitLab deletes the source branch on
+    merge, so the fetch fails on a missing ref. Threads on a merged MR are
+    nobody's move any more."""
+    class _Gone(_Subprocess):
+        def __call__(self, cmd, **kw):
+            if cmd[3:4] == ["fetch"]:
+                self.calls.append(list(cmd))
+                return _Proc(128, "", "fatal: couldn't find remote ref "
+                                      f"{BRANCH}\n")
+            return super().__call__(cmd, **kw)
+
+    sub = _Gone(worktree)
+    glab = _Glab(json.dumps({"state": "merged"}))
+    result = feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                              run_glab=glab, now=lambda: RUN_START)
+    assert result.mr_merged is True
+    assert sub.ran("claude") == []
+    assert "merged" in feedback.done_message(result)
+    assert "nobody's move" in feedback.done_message(result)
+
+
+def test_a_gone_branch_on_an_open_mr_still_fails_the_feedback_run(tmp_path,
+                                                                  worktree):
+    class _Gone(_Subprocess):
+        def __call__(self, cmd, **kw):
+            if cmd[3:4] == ["fetch"]:
+                self.calls.append(list(cmd))
+                return _Proc(128, "", "fatal: couldn't find remote ref "
+                                      f"{BRANCH}\n")
+            return super().__call__(cmd, **kw)
+
+    with pytest.raises(RunnerError) as e:
+        feedback.execute(_item(), _cfg(tmp_path), run_subprocess=_Gone(worktree),
+                         run_glab=_Glab(json.dumps({"state": "opened"})),
+                         now=lambda: RUN_START)
+    assert "couldn't find remote ref" in str(e.value)

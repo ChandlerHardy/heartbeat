@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from worksweep.collectors import (  # noqa: E402
     collect_discussions, collect_diverged_commits_count, discussions_pages,
     discussions_path, parse_issues, parse_mrs, parse_threads, parse_todos,
+    is_closed_state, mr_state, parse_mr_state,
     parse_unaddressed_count, unaddressed_threads, _project,
 )
 
@@ -472,3 +473,51 @@ def test_a_system_note_after_a_bot_note_changes_nothing():
         _note("leyang"), _note("chandler.hardy"), _note(BOT),
         _note("gitlab", system=True)]}])
     assert unaddressed_threads(raw, "chandler.hardy") == ()
+
+
+# --- MR state probe (live finding: !3997 merged, 2026-08-27) --------------
+#
+# The sweep only queries OPEN merge requests, so a merged MR's rows stop being
+# emitted and any error/needs-input/approved row for it is retained forever.
+# Answering "is this MR still open?" needs one targeted GET.
+
+def test_parse_mr_state_reads_the_state_field():
+    assert parse_mr_state(json.dumps({"state": "merged"})) == "merged"
+    assert parse_mr_state(json.dumps({"state": "opened"})) == "opened"
+    assert parse_mr_state(json.dumps({"state": "closed"})) == "closed"
+    assert parse_mr_state(json.dumps({"state": "MERGED"})) == "merged"
+
+
+def test_parse_mr_state_on_junk_is_empty_not_a_guess():
+    """"" means "we do not know", which every caller treats as "leave it
+    alone" -- closing a row on a failed probe would be worse than retaining."""
+    for junk in ("", "not json", "[]", json.dumps({}), json.dumps(None),
+                 json.dumps({"state": None}), json.dumps({"state": 7})):
+        assert parse_mr_state(junk) == "", junk
+
+
+def test_is_closed_covers_merged_and_closed_only():
+    assert is_closed_state("merged") is True
+    assert is_closed_state("closed") is True
+    assert is_closed_state("opened") is False
+    assert is_closed_state("locked") is False
+    assert is_closed_state("") is False
+
+
+def test_mr_state_asks_for_the_right_mr():
+    calls = []
+    state = mr_state(lambda args, body=None: (calls.append(args),
+                                              json.dumps({"state": "merged"}))[1],
+                     "pb-www", 3997)
+    assert state == "merged"
+    assert calls[0][0] == "api"
+    assert calls[0][1] == (f"projects/{_project('pb-www')}"
+                           f"/merge_requests/3997")
+
+
+def test_mr_state_never_raises_through_to_the_caller():
+    """A probe is a nicety, not the work. Every caller falls back to "leave it
+    alone", so a failure must read as "unknown" rather than take a run down."""
+    def boom(args, body=None):
+        raise RuntimeError("glab api timed out after 30s")
+    assert mr_state(boom, "pb-www", 3997) == ""

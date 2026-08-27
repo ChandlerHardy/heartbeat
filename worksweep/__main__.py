@@ -19,6 +19,7 @@ import datetime
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import time
@@ -434,6 +435,62 @@ def _with_unaddressed(mr, cfg: WorksweepConfig,
 
 
 PROBE_FAILED_MARKER = "(probe failed)"
+# Statuses reconcile RETAINS when an id stops being emitted. Only these can
+# strand, so only these are ever worth an MR-state probe: `proposed` is dropped
+# outright, and `done`/`running` are already settled or still live.
+_STRANDABLE = ("error", "needs-input", "approved")
+_MR_IID_RE = re.compile(r"/merge_requests/(\d+)")
+
+
+def _mr_ref(item) -> tuple:
+    """(repo, iid) for a row that refers to a merge request, else None.
+
+    Read off the row itself rather than parsed out of its id: the four id
+    shapes an MR can strand (`stale:`, `feedback:`, `magi:...@sha`,
+    `hygiene-devurl:`) have nothing in common but the MR they point at, and
+    enumerating them here would go stale the next time one is added.
+    """
+    m = _MR_IID_RE.search(item.web_url or "")
+    if not m or not item.repo:
+        return None
+    return (item.repo, int(m.group(1)))
+
+
+def _merged_mr_resolutions(records, emitted: set,
+                           probe: Callable[[str, int], str]) -> dict:
+    """{item id: "mr-merged"} for every row stranded by a finished MR.
+
+    The sweep only ever queries OPEN merge requests, so the moment one merges
+    its rows stop being emitted and anything retained sits there forever --
+    which is exactly how a keep-current row for !3997 stayed `error` after the
+    merge deleted its branch.
+
+    Bounded by construction: only retained-and-gone rows are candidates, and
+    each (repo, iid) is asked at most once, so the normal sweep does zero
+    probes. Reads only -- the caller runs this OUTSIDE the queue lock and
+    applies the result inside.
+    """
+    stranded: dict = {}
+    for r in records:
+        if r.item.status not in _STRANDABLE or r.item.id in emitted:
+            continue
+        ref = _mr_ref(r.item)
+        if ref is not None:
+            stranded.setdefault(ref, []).append(r.item.id)
+    out: dict = {}
+    for ref, ids in stranded.items():
+        try:
+            state = probe(*ref)
+        except Exception as e:
+            # Fail-safe, like the discussions probe: not knowing an MR is
+            # finished is not the same as knowing it is not.
+            print(f"worksweep: MR state probe for {ref[0]}!{ref[1]} failed: "
+                  f"{type(e).__name__}: {e}", file=sys.stderr)
+            continue
+        if collectors.is_closed_state(state):
+            for ident in ids:
+                out[ident] = "mr-merged"
+    return out
 
 
 def _retained_feedback(prior: WorkItem) -> WorkItem:
@@ -562,6 +619,13 @@ def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
                 items.append(_retained_feedback(prior_by_id[fid]))
 
         resolved = assessor.resolutions(review_mrs, cfg.username, authored)
+        # An MR that merged or closed takes every row it stranded with it.
+        # Probing happens HERE, outside the lock, because it is a read; the
+        # closures are applied by reconcile inside it.
+        state_probe = deps.get("mr_state")
+        if state_probe is not None:
+            resolved.update(_merged_mr_resolutions(records0, emitted,
+                                                   state_probe))
         # A feedback id whose signal is PROVABLY gone -- nothing unaddressed,
         # no changes requested, and the probe actually looked. This is the one
         # reason strong enough to close an `error` row instead of retaining it
@@ -694,7 +758,7 @@ def _execute_implement(item, cfg, boxes):
         item, cfg, boxes, run_subprocess=subprocess.run,
         run_ssh=lambda host, command: run_ssh(
             host, command, timeout=_SSH_SYNC_TIMEOUT_SECONDS),
-        http_get=http_status)
+        http_get=http_status, run_glab=_run_glab_api)
 
 
 def _run_glab_api(args, body=None, run_subprocess: Callable = subprocess.run):
@@ -901,6 +965,9 @@ def main(argv=None) -> int:
     # Same reasoning: one read-only GET per authored MR with unresolved
     # threads, so --dry-run runs it for real too.
     deps["discussions"] = collectors.collect_discussions
+    # One read-only GET per stranded MR, and normally none at all -- same
+    # reasoning as the probes above, so --dry-run runs it for real too.
+    deps["mr_state"] = collectors.collect_mr_state
     if not args.dry_run:
         deps["queue_lock"] = lambda: write_lock(_queue_path())
     return run_sweep(cfg, deps)

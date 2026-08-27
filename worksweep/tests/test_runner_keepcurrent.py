@@ -277,3 +277,41 @@ def test_done_message_omits_conflict_note_on_clean_merge():
     r = KeepCurrentResult(iid=4020, ahead_count=7, box_name="dev4",
                           scss_recompiled=False, result_sha="s")
     assert "auto-resolved" not in _keep_current_done_message(r)
+
+
+# --- a merged MR completes, it does not fail (live: !3997 / #209) ---------
+
+def _merged_result(iid=4020):
+    return KeepCurrentResult(iid=iid, ahead_count=0, box_name="",
+                             scss_recompiled=False, mr_merged=True)
+
+
+def test_a_merged_mr_completes_the_row_with_mr_merged(tmp_path):
+    """FALSIFYING. `done_reason="mr-merged"` has been in models.py's enum
+    since M3 with nothing on any path setting it."""
+    deps, posts, _, state = _deps([_rec(7)],
+                                  execute_keep_current=lambda i, c: _merged_result())
+    rc = run_once(_cfg(tmp_path), deps, **_locks(tmp_path))
+    assert rc == 0
+    row = state["records"][0].item
+    assert row.status == "done"
+    assert row.done_reason == "mr-merged"
+
+
+def test_the_post_reads_as_an_ending_not_a_warning(tmp_path):
+    """It is good news. A ⚠️ here trains Chandler to ignore ⚠️."""
+    deps, posts, _, _ = _deps([_rec(7)],
+                              execute_keep_current=lambda i, c: _merged_result())
+    run_once(_cfg(tmp_path), deps, **_locks(tmp_path))
+    assert not [p for p in posts if p.startswith("⚠️")]
+    done = [p for p in posts if "4020" in p]
+    assert len(done) == 1
+    assert "merged" in done[0]
+    assert "nothing to keep current" in done[0]
+
+
+def test_an_ordinary_merge_still_completes_the_ordinary_way(tmp_path):
+    deps, posts, _, state = _deps([_rec(7)])
+    run_once(_cfg(tmp_path), deps, **_locks(tmp_path))
+    assert state["records"][0].item.done_reason == "executor-completed"
+    assert [p for p in posts if p.startswith("🔄")]

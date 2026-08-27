@@ -754,3 +754,177 @@ def test_the_probe_failed_marker_is_added_once_not_stacked():
     twice = _retained_feedback(once)
     assert once.why == "1 unaddressed thread (probe failed)"
     assert twice.why == once.why
+
+
+# --- a merged MR closes its rows (live finding: !3997 / #209) -------------
+#
+# The live shape, exactly: !3997 merged, the merge deleted
+# refactor/1681-analytics-feed-data-debt, keep-current's fetch failed on the
+# missing ref, and stale:pb-www!3997 (queue #209) went `error`. The sweep only
+# queries OPEN MRs, so that id is never emitted again and _RETAIN_IF_GONE keeps
+# it forever. Nothing sets done_reason="mr-merged" -- the enum value exists in
+# models.py and no code path has ever produced it.
+
+def _row(number, ident, status="error", executor="keep-current", iid=3997,
+         kind="stale"):
+    from worksweep.models import QueueRecord, WorkItem
+    return QueueRecord(
+        number=number, first_seen="2026-08-20T00:00:00+00:00",
+        last_seen="2026-08-26T00:00:00+00:00",
+        item=WorkItem(schema_version=1, id=ident, repo="pb-www", kind=kind,
+                      executor=executor, risk="low", why="7 commits behind",
+                      web_url=f"https://gl/x/-/merge_requests/{iid}",
+                      sha=f"s{iid}", status=status,
+                      branch="refactor/1681-analytics-feed-data-debt"))
+
+
+def _states(**by_iid):
+    """An mr_state edge; records what it was asked."""
+    asked = []
+
+    def probe(repo, iid):
+        asked.append((repo, iid))
+        return by_iid.get(f"i{iid}", "opened")
+    probe.asked = asked
+    return probe
+
+
+def _sweep(posts, queue, states=None, authored=()):
+    deps = _probe_deps(posts, _gql(authored_nodes=list(authored)),
+                       discussions=lambda repo, iid: _threads("leyang"),
+                       queue=queue)
+    if states is not None:
+        deps["mr_state"] = states
+    return deps
+
+
+def test_the_stranded_keep_current_row_heals_on_the_next_sweep():
+    """FALSIFYING, from #209's exact shape: an `error` row whose id the sweep
+    no longer emits, for an MR that merged."""
+    posts = []
+    states = _states(i3997="merged")
+    run_sweep(_cfg(), _sweep(posts, [_row(209, "stale:pb-www!3997")], states))
+    row = {r.item.id: r for r in _saved(posts)}["stale:pb-www!3997"]
+    assert row.item.status == "done"
+    assert row.item.done_reason == "mr-merged"
+    assert row.number == 209                    # keeps its handle
+    assert states.asked == [("pb-www", 3997)]
+
+
+def test_every_row_for_the_merged_mr_closes_together():
+    """A merged MR strands whatever it had: the stale row, a feedback row, a
+    magi row at some sha, a hygiene row. Closing one and leaving three is not
+    a fix."""
+    posts = []
+    rows = [_row(209, "stale:pb-www!3997"),
+            _row(210, "feedback:pb-www!3997", executor="address-feedback",
+                 kind="feedback", status="needs-input"),
+            _row(211, "magi:pb-www!3997@s3997", executor="magi-review",
+                 kind="mr", status="approved"),
+            _row(212, "hygiene-devurl:pb-www!3997", executor="park",
+                 kind="mr", status="error")]
+    run_sweep(_cfg(), _sweep(posts, rows, _states(i3997="merged")))
+    saved = {r.item.id: r for r in _saved(posts)}
+    for ident in ("stale:pb-www!3997", "feedback:pb-www!3997",
+                  "magi:pb-www!3997@s3997", "hygiene-devurl:pb-www!3997"):
+        assert saved[ident].item.status == "done", ident
+        assert saved[ident].item.done_reason == "mr-merged", ident
+
+
+def test_a_closed_mr_closes_its_rows_too():
+    posts = []
+    run_sweep(_cfg(), _sweep(posts, [_row(209, "stale:pb-www!3997")],
+                             _states(i3997="closed")))
+    assert _saved(posts)[0].item.status == "done"
+
+
+def test_an_open_mr_leaves_its_rows_exactly_where_they_were():
+    """FALSIFYING the other way. An error row for an OPEN MR is a real
+    failure waiting to be retried, not litter."""
+    posts = []
+    run_sweep(_cfg(), _sweep(posts, [_row(209, "stale:pb-www!3997")],
+                             _states(i3997="opened")))
+    row = _saved(posts)[0]
+    assert row.item.status == "error"
+    assert row.item.done_reason == ""
+
+
+def test_a_failed_probe_leaves_the_row_alone():
+    """Fail-safe, mirroring the discussions probe: not knowing is not the
+    same as knowing it is finished."""
+    posts = []
+    def boom(repo, iid):
+        raise RuntimeError("glab api timed out after 30s")
+    run_sweep(_cfg(), _sweep(posts, [_row(209, "stale:pb-www!3997")], boom))
+    assert _saved(posts)[0].item.status == "error"
+
+
+def test_a_running_claim_is_never_closed_from_under_its_executor():
+    posts = []
+    run_sweep(_cfg(), _sweep(posts, [_row(209, "stale:pb-www!3997",
+                                          status="running")],
+                             _states(i3997="merged")))
+    assert _saved(posts)[0].item.status == "running"
+
+
+def test_a_done_row_is_never_probed():
+    """Already closed: harmless to probe and pointless to pay for."""
+    posts = []
+    states = _states(i3997="merged")
+    run_sweep(_cfg(), _sweep(posts, [_row(209, "stale:pb-www!3997",
+                                          status="done")], states))
+    assert states.asked == []
+
+
+def test_a_proposed_row_is_never_probed():
+    """A `proposed` row that stops being emitted is simply dropped by
+    reconcile -- it was never retained, so there is nothing to heal."""
+    posts = []
+    states = _states(i3997="merged")
+    run_sweep(_cfg(), _sweep(posts, [_row(209, "stale:pb-www!3997",
+                                          status="proposed")], states))
+    assert states.asked == []
+
+
+def test_a_row_the_sweep_still_emits_is_never_probed():
+    """The MR is plainly open -- the sweep just described it."""
+    posts = []
+    states = _states(i3997="merged")
+    run_sweep(_cfg(), _sweep(posts, [_row(12, "feedback:pb-www!3997",
+                                          executor="address-feedback",
+                                          kind="feedback", status="approved")],
+                             states, authored=[_authored()]))
+    assert states.asked == []
+
+
+def test_one_probe_per_mr_however_many_rows_it_stranded():
+    posts = []
+    states = _states(i3997="merged")
+    rows = [_row(209, "stale:pb-www!3997"),
+            _row(210, "feedback:pb-www!3997", status="needs-input"),
+            _row(211, "magi:pb-www!3997@s3997", status="approved")]
+    run_sweep(_cfg(), _sweep(posts, rows, states))
+    assert states.asked == [("pb-www", 3997)]
+
+
+def test_rows_without_an_mr_reference_are_never_probed():
+    """Todos and issues carry no MR iid -- there is nothing to ask about."""
+    posts = []
+    states = _states()
+    todo = _row(5, "todo:mentioned:https://gl/x/-/issues/9", executor="triage",
+                kind="todo")
+    from worksweep.models import QueueRecord
+    import dataclasses
+    todo = QueueRecord(number=5, first_seen=todo.first_seen,
+                       last_seen=todo.last_seen,
+                       item=dataclasses.replace(todo.item,
+                                                web_url="https://gl/x/-/issues/9"))
+    run_sweep(_cfg(), _sweep(posts, [todo], states))
+    assert states.asked == []
+
+
+def test_no_probe_dep_wired_means_no_probing_and_no_crash():
+    posts = []
+    rc = run_sweep(_cfg(), _sweep(posts, [_row(209, "stale:pb-www!3997")]))
+    assert rc == 0
+    assert _saved(posts)[0].item.status == "error"
