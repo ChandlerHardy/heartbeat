@@ -60,7 +60,6 @@ _LOOPBACK = "127.0.0.1"
 # do_OPTIONS and do not emit any Access-Control-* header, or the guard evaporates.
 _CSRF_HEADER = "X-Worksweep"
 _MAX_BODY_BYTES = 64 * 1024
-_REFRESH_SECONDS = 60
 _DONE_WINDOW_DAYS = 7
 _RECENT_DONE_LIMIT = 20
 _LAYOUT_STORAGE_KEY = "worksweep-layout"
@@ -80,8 +79,6 @@ _BIND_RETRY_SECONDS = 30
 # Every sync posts a normal Discord digest (the standard sweep contract), so
 # the throttle is what bounds channel noise, not an accident of timing.
 _SWEEP_MIN_INTERVAL_SECONDS = 60
-# Polling cadence for the page's "has the queue changed yet?" check.
-_MTIME_POLL_SECONDS = 5
 # Give up waiting and reload anyway: a sweep that errors out may never move the
 # mtime, and the user should not be left staring at a spinner.
 _SYNC_FALLBACK_SECONDS = 120
@@ -89,10 +86,20 @@ _SYNC_FALLBACK_SECONDS = 120
 # runner completion / intake approval / keep-current merge shows up within one
 # interval instead of waiting for the next timed reload.
 _POLL_SECONDS = 10
-# Belt-and-braces reload for a poll that has wedged (a fetch that never settles,
-# a suspended tab that resumes weird). Long, because the poll is the real
-# refresh path now.
-_FALLBACK_RELOAD_SECONDS = 300
+# GET /events stats the queue file itself on its own thread rather than sharing
+# a broadcaster: thread-per-connection makes per-client polling correct and
+# trivial, and at the two or three viewers this page ever has, a registry with
+# condition variables would be shared mutable state bought for nothing.
+_EVENT_STAT_SECONDS = 1.0
+# Quiet enough to be invisible, frequent enough that a client which went away
+# surfaces as a write error and its thread exits within the minute.
+_EVENT_HEARTBEAT_SECONDS = 15.0
+# Every stream costs a thread and a socket for as long as it is held, so the
+# ceiling is set in code rather than by trusting that only one person ever opens
+# tabs. Generous for the two or three real viewers; a hard stop for a loop.
+# EventSource retries on its own, so a client refused here comes back.
+_MAX_EVENT_STREAMS = 8
+_EVENT_SLOTS = threading.BoundedSemaphore(_MAX_EVENT_STREAMS)
 # A workstream card is named after a human-readable thing, not an iid. Long MR
 # titles are truncated so a card header stays one scannable line.
 _CARD_TITLE_LIMIT = 60
@@ -700,6 +707,27 @@ button.cnt:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
 /* A class rule outranks the UA's [hidden]{display:none}, so say it here or a
    hidden bar would still lay out. */
 .bar[hidden]{display:none}
+
+/* ---- the five out-of-band swap targets ---- */
+/* They exist only to give every dynamic region a stable id in EVERY queue
+   state, so `display:contents`: .head is a flex container whose .brand uses
+   margin-right:auto and whose .counts uses width:100% to force its own line,
+   and .bar is position:sticky. A real wrapper box would quietly change both. */
+.oob{display:contents}
+
+/* "queue changed - update pending": shown when an update arrives while a
+   selection or a dialog is live. A held update must be VISIBLE -- a silent
+   hold is the bug this whole refresh path exists to kill -- and tapping it
+   applies the update immediately. */
+.pending{
+  appearance:none;font:inherit;font-size:12px;font-weight:600;
+  padding:5px 10px;border-radius:999px;cursor:pointer;
+  border:1px solid var(--warn);background:var(--panel-2);color:var(--warn);
+}
+.pending:hover{background:var(--line-soft)}
+.pending:active{transform:translateY(1px)}
+.pending:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
+.pending[hidden]{display:none}
 .bar .btn{
   appearance:none;flex:1 1 0;min-height:52px;
   font:inherit;font-size:15px;font-weight:650;
@@ -744,13 +772,68 @@ if(v==='checklist'||v==='panels'||v==='branches'){d.setAttribute('data-layout',v
 try{d.setAttribute('data-layout',window.matchMedia('%(bp)s').matches?'panels':'checklist');}catch(e){}})();
 """ % {"key": _LAYOUT_STORAGE_KEY, "bp": _WIDE_BREAKPOINT}
 
+# ---- vendored htmx ---------------------------------------------------------
+# A repo file, not a CDN tag and not a `<script src>`: the page is one
+# self-contained document (AC #28), so the library rides inline like the CSS
+# and the rest of the JS do. Pinned by sha256 in the sibling `htmx.version`.
+_STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+_HTMX_PATH = os.path.join(_STATIC_DIR, "htmx.min.js")
+
+
+def _read_vendored_js(path: str) -> str:
+    """Read a vendored asset, LOUDLY.
+
+    Deliberately the one place in this module that is allowed to raise, and it
+    raises at import rather than per-request. A deploy that forgot `static/`
+    would otherwise serve a page that looks perfect and never updates -- the
+    worst failure mode for a page whose whole job is showing what changed.
+    Under KeepAlive an import that raises is a restart loop with a real
+    traceback in the .err file, which is exactly the visibility that needs.
+    """
+    with open(path, "r", encoding="utf-8") as fh:
+        source = fh.read()
+    if not source.strip():
+        raise RuntimeError(f"vendored asset is empty: {path}")
+    if "</script" in source:
+        # It is emitted inline; a closing tag inside it would end the element
+        # early and spray the remainder of the library into the document.
+        raise RuntimeError(f"vendored asset cannot be inlined safely: {path}")
+    return source
+
+
+_HTMX_JS = _read_vendored_js(_HTMX_PATH)
+
 _BODY_SCRIPT = """
 (function(){
   var root=document.documentElement,KEY='%(key)s';
-  var POLL_MS=%(poll)d,FALLBACK_MS=%(fallback_reload)d,SYNC_MAX_MS=%(sync_max)d;
+  var POLL_MS=%(poll)d,SYNC_MAX_MS=%(sync_max)d;
   var inflight=false,syncing=false,confirming=false;
-  var sync=document.getElementById('sync');
-  var baseMtime=sync?(sync.getAttribute('data-mtime')||'').trim():'';
+  // Script-scoped, NOT a load-time DOM read: the token is re-seeded from the
+  // freshly rendered Sync button after every swap. A value captured once dies
+  // with the region it was read from, and the poll would then either fire on
+  // every pass forever or never fire again.
+  var lastMtime=(function(){
+    var s=document.getElementById('sync');
+    return s?(s.getAttribute('data-mtime')||'').trim():'';
+  })();
+  // An update arrived while the page was busy and is waiting to be applied.
+  var pending=false;
+  // The 10s poll is the DEGRADED path now and is armed at most once, by the
+  // event stream failing terminally -- never by a user action, and never twice.
+  var polling=false;
+  // The selection captured just before a swap, re-applied just after.
+  var carried=[];
+  // Single-flight bookkeeping. `cycle` counts refreshes issued, `settled`
+  // counts refreshes dealt with; they differ exactly while one is in the air.
+  // Counters rather than a boolean so a LATE settle from an old request can
+  // never release the guard belonging to a newer one.
+  var cycle=0,settled=0;
+
+  // Defense in depth, set before this page can make a single request. Our
+  // fragments carry no script tags and everything we fetch is same-origin, so
+  // say so: htmx 2.0.7 ships allowScriptTags:true, and a malformed or tampered
+  // response should not be able to smuggle one past a default we do not need.
+  try{htmx.config.allowScriptTags=false;htmx.config.selfRequestsOnly=true;}catch(e){}
 
   function scope(){
     return document.querySelector(root.getAttribute('data-layout')==='branches'?'.branches':'.sections');
@@ -852,63 +935,140 @@ _BODY_SCRIPT = """
     inflight=true;refresh();
     fetch(url,{method:'POST',headers:{'X-Worksweep':'approve','Content-Type':'application/json'},body:JSON.stringify(body)})
       .then(function(r){
-        if(r.status===200){location.reload();return;}
+        // The rows just acted on are no longer on offer, so the selection
+        // that submitted them is spent. Clear it BEFORE refreshing or the
+        // deferred-swap guard would hold the very update just asked for.
+        //
+        // Wrapped, because by this point the write is DURABLE on the server. A
+        // DOM error in the follow-up would otherwise fall into the .catch below
+        // and tell the user their approval failed -- and the honest reaction to
+        // that message is to approve it again. Degrade to the poll instead and
+        // put the chip up: slower, visible, and true.
+        if(r.status===200){
+          inflight=false;
+          try{clearSelection();applyFragments();}catch(err){pending=true;chip(true);armPoll();}
+          return;
+        }
         inflight=false;alert('Request failed ('+r.status+')');refresh();
       })
       .catch(function(e){inflight=false;alert('Request failed: '+e);refresh();});
   }
 
-  // ---- live refresh: poll the queue mtime ALWAYS, not only after a Sync ----
-  // A runner completion, an intake approval or a keep-current merge lands
-  // within one interval instead of waiting for a timed reload.
+  function clearSelection(){
+    var b=document.querySelectorAll('input[type=checkbox]');
+    for(var i=0;i<b.length;i++){b[i].checked=false;}
+    refresh();
+  }
+
+  // ---- live refresh: swap the five dynamic regions, never reload ----------
+  // A reload discards a selection, tears an open dialog and repaints the whole
+  // document to change one row. One GET returns the five regions marked for an
+  // out-of-band swap, so the page updates atomically and in place.
+  function chip(on){
+    var c=document.getElementById('pending');
+    if(c){c.hidden=!on;}
+  }
+  function swapInFlight(){return cycle!==settled;}
+  // Never silent. The chip is both the notification and the retry: tapping it
+  // asks again. Without this the single-flight guard would also stay claimed,
+  // and one failed fetch would lock the page out of refreshing forever.
+  function swapFailed(){
+    if(!swapInFlight()){return;}
+    settled=cycle;pending=true;chip(true);
+  }
+  htmx.on('htmx:responseError',swapFailed);
+  htmx.on('htmx:sendError',swapFailed);
+  function applyFragments(force){
+    // Rows shifting under a half-built selection, an open confirm dialog or an
+    // in-flight POST is exactly what the old busy() guard rightly prevented --
+    // but holding SILENTLY is the bug this build exists to kill. Hold, and say
+    // so on the chip. `force` is the chip's own tap: asking for it explicitly.
+    // An in-flight POST is never forced past; it ends in its own refresh.
+    if(inflight||(!force&&busy())){pending=true;chip(true);return;}
+    // Single-flight. Two requests in the air race, and the page would settle
+    // on whichever RESPONSE landed last -- not necessarily the one that read
+    // the queue last. A burst (stream event, then a poll, then an action)
+    // could therefore leave the page showing the older of two states,
+    // permanently. Queue it instead; the swap hook drains it one round trip
+    // later, so no chip: this is not a hold the user needs to know about.
+    if(swapInFlight()){pending=true;return;}
+    var mine=++cycle;
+    // Captured BEFORE the request: rows that come back are re-checked by
+    // value, rows that vanished simply drop out. The server re-validates every
+    // number on POST, so consent enforcement never rests on this.
+    carried=selected();
+    // Settles the guard however the request ends, including the case where
+    // htmx returns a response it never turns into an event. Only ever moves
+    // FORWARD, so a late settle cannot release a newer request's guard.
+    var settle=function(){if(settled<mine){settled=mine;}};
+    htmx.ajax('GET','/fragments',{target:'body',swap:'none'}).then(settle,settle);
+  }
+  // htmx 2.0.7 fires this exactly once, on the ajax target, even for
+  // swap:'none' -- its settle info is {tasks:[],elts:[target]}. That is the
+  // contract this hook is built on. The guard on the first line is what makes
+  // being WRONG about it merely wasteful instead of silently corrupting: a
+  // second pass would re-apply a now-stale `carried` over a page the user has
+  // since touched, and drain `pending` twice.
+  htmx.on('htmx:afterSwap',function(){
+    if(!swapInFlight()){return;}settled=cycle;
+    pending=false;chip(false);
+    // The header that just arrived is server truth, and its Sync button is
+    // fresh. A `syncing` flag left over from a sweep that has since landed
+    // would keep re-disabling it for up to SYNC_MAX_MS after the fact.
+    syncing=false;
+    for(var i=0;i<carried.length;i++){
+      var twins=document.querySelectorAll('input[type=checkbox][value="'+carried[i]+'"]');
+      for(var j=0;j<twins.length;j++){twins[j].checked=true;}
+    }
+    // Re-seeded from the button that just arrived, not from the one that left.
+    var s=document.getElementById('sync');
+    lastMtime=s?(s.getAttribute('data-mtime')||'').trim():lastMtime;
+    // The rows changed, so every derived piece of state is stale: which rows
+    // the active filter hides, and therefore what the bar may offer.
+    applyFilter();refresh();marks();
+  });
+
+  // ---- the 10s mtime poll: the fallback for when the stream will not run --
+  function armPoll(){if(polling){return;}polling=true;setTimeout(poll,POLL_MS);}
   function poll(){
     fetch('/mtime',{cache:'no-store'})
       .then(function(r){return r.text();})
       .then(function(t){
         t=(t||'').trim();
-        // If the queue moved while the user is mid-action, keep polling and
-        // reload as soon as they are free -- never yank the page away.
-        if(t&&baseMtime&&t!==baseMtime&&!busy()){location.reload();return;}
+        if(t){
+          if(lastMtime&&t!==lastMtime){applyFragments();}
+          // Reassigned on EVERY response: a held update must not re-trigger
+          // on the next pass, it drains through `pending` instead.
+          lastMtime=t;
+        }
         setTimeout(poll,POLL_MS);
       })
       .catch(function(){setTimeout(poll,POLL_MS);});
   }
-  setTimeout(poll,POLL_MS);
-  // Long backstop for a poll that has wedged (a fetch that never settles, a
-  // suspended tab that resumes oddly).
-  function tick(){
-    if(busy()){setTimeout(tick,FALLBACK_MS);return;}
-    location.reload();
-  }
-  setTimeout(tick,FALLBACK_MS);
 
-  document.addEventListener('click',function(e){
-    if(!e.target||!e.target.closest){return;}
-    var t=e.target.closest('[data-set-layout]');
-    if(t){setLayout(t.getAttribute('data-set-layout'));return;}
-    var f=e.target.closest('[data-filter]');
-    if(f){toggleFilter(f.getAttribute('data-filter'));return;}
-    var d=e.target.closest('[data-dismiss]');
-    if(d&&!inflight){send('/dismiss',{number:parseInt(d.getAttribute('data-dismiss'),10)});}
-  });
-  document.addEventListener('change',function(e){
-    var b=e.target;
-    if(b&&b.type==='checkbox'&&b.hasAttribute('data-view')){
-      // the same record has a checkbox in each view: keep them in step so a
-      // selection survives a layout switch
-      var twins=document.querySelectorAll('input[type=checkbox][value="'+b.value+'"]');
-      for(var i=0;i<twins.length;i++){twins[i].checked=b.checked;}
-      refresh();
-    }
-  });
-  var sel=document.getElementById('approve-selected');
-  if(sel){sel.addEventListener('click',function(){
+  // ---- the event stream: the queue says when it changed, once, when it did --
+  // The poll asked "anything yet?" every ten seconds per open tab forever and
+  // was told "no" almost every time. One held connection replaces all of that.
+  // EventSource reconnects by itself, which covers the common case of the
+  // dashboard agent being restarted under the page.
+  (function(){
+    if(!window.EventSource){armPoll();return;}
+    var es=new EventSource('/events');
+    htmx.on(es,'queue',function(){applyFragments();});
+    // CLOSED (2) only. EventSource retries CONNECTING on its own, and arming
+    // the poll on every transient blip would leave the page with two refresh
+    // paths racing each other. This is the terminal case -- a proxy that will
+    // not stream, a browser quirk -- where the page must degrade rather than
+    // silently freeze.
+    es.onerror=function(){if(es.readyState===2){armPoll();}};
+  })();
+
+  function approveSelected(){
     var n=selected();
     if(!n.length){return;}
     send('/approve',{numbers:n});
-  });}
-  var all=document.getElementById('approve-all');
-  if(all){all.addEventListener('click',function(){
+  }
+  function approveAll(){
     // There is NO un-approve path anywhere in worksweep, and this is one tap
     // wide on a phone -- so the bulk action confirms with its blast radius,
     // counting exactly the set it is about to send.
@@ -916,22 +1076,35 @@ _BODY_SCRIPT = """
     if(!n.length){alert('Nothing is proposed right now.');return;}
     confirming=true;
     var ok=confirm('Approve all '+n.length+' proposed items?');
+    // A BELT, not a live drain: confirm() blocks this thread, so no stream
+    // event, poll or timer can run between the two lines above and `pending`
+    // cannot become true while the dialog is open. Kept because that is a
+    // property of confirm(), not of this code -- the day the dialog becomes a
+    // non-blocking one, this is the line that stops the hold being permanent.
     confirming=false;
+    if(pending){applyFragments();}
     if(!ok){return;}
     send('/approve-all',{numbers:n});
-  });}
+  }
 
   // ---- Sync: kick a sweep; the always-on poll picks up the result ----
   function syncDone(label){
     syncing=false;
+    var sync=document.getElementById('sync');
     if(!sync){return;}
     sync.textContent=label;
     setTimeout(function(){
-      if(!syncing){sync.disabled=false;sync.textContent='Sync';}
+      // Re-queried again: 3s is long enough for the header to be re-rendered.
+      var b=document.getElementById('sync');
+      if(b&&!syncing){b.disabled=false;b.textContent='Sync';}
     },3000);
   }
-  if(sync){sync.addEventListener('click',function(){
-    if(syncing||sync.disabled){return;}
+  function kickSweep(){
+    // Re-queried per click, and guarded: the button may be gone (a re-render
+    // landed between click and dispatch). Return quietly rather than throwing,
+    // and above all do not POST /sweep.
+    var sync=document.getElementById('sync');
+    if(!sync||syncing||sync.disabled){return;}
     syncing=true;sync.disabled=true;sync.textContent='syncing…';
     fetch('/sweep',{method:'POST',headers:{'X-Worksweep':'approve'}})
       .then(function(r){
@@ -945,11 +1118,54 @@ _BODY_SCRIPT = """
         syncDone('sync failed');
       })
       .catch(function(){syncDone('sync failed');});
-  });}
+  }
+
+  // ---- one delegated click listener: every control survives a re-render ----
+  document.addEventListener('click',function(e){
+    if(!e.target||!e.target.closest){return;}
+    var t=e.target.closest('[data-set-layout]');
+    if(t){setLayout(t.getAttribute('data-set-layout'));return;}
+    var f=e.target.closest('[data-filter]');
+    if(f){toggleFilter(f.getAttribute('data-filter'));return;}
+    var d=e.target.closest('[data-dismiss]');
+    if(d){
+      if(!inflight){send('/dismiss',{number:parseInt(d.getAttribute('data-dismiss'),10)});}
+      return;
+    }
+    if(e.target.closest('#approve-selected')){approveSelected();return;}
+    if(e.target.closest('#approve-all')){approveAll();return;}
+    if(e.target.closest('#sync')){kickSweep();return;}
+    // Drain 2 of 2: tapping the chip IS the request to update now, so it
+    // forces past the selection guard the other drain waits out.
+    if(e.target.closest('#pending')){applyFragments(true);return;}
+  });
+  document.addEventListener('change',function(e){
+    var b=e.target;
+    if(b&&b.type==='checkbox'&&b.hasAttribute('data-view')){
+      // the same record has a checkbox in each view: keep them in step so a
+      // selection survives a layout switch
+      var twins=document.querySelectorAll('input[type=checkbox][value="'+b.value+'"]');
+      for(var i=0;i<twins.length;i++){twins[i].checked=b.checked;}
+      refresh();
+      // A change made WHILE a refresh is in the air must survive the swap
+      // exactly as the user left it, so record it against the captured set at
+      // the moment of the click rather than reconstructing it afterwards from
+      // a DOM that has since been replaced. A DESELECTION above all:
+      // re-applying a stale capture over one would put a row the user just
+      // refused back on offer, and back into the next submitted set.
+      if(swapInFlight()){
+        var v=parseInt(b.value,10);
+        carried=carried.filter(function(x){return x!==v;});
+        if(b.checked){carried.push(v);}
+      }
+      // Drain 1 of 2: nothing is selected any more, so a held update can land
+      // without moving a single row under the user's thumb.
+      if(pending&&selected().length===0){applyFragments();}
+    }
+  });
   marks();applyFilter();refresh();
 })();
 """ % {"key": _LAYOUT_STORAGE_KEY, "poll": _POLL_SECONDS * 1000,
-       "fallback_reload": _FALLBACK_RELOAD_SECONDS * 1000,
        "sync_max": _SYNC_FALLBACK_SECONDS * 1000}
 
 
@@ -1182,17 +1398,25 @@ def _telemetry_html(records: Sequence[QueueRecord],
             f'<span class="cnt cnt-week">done this week: {week}</span></div>')
 
 
-def _sync_html(queue_mtime: Optional[float]) -> str:
+def _sync_html(queue_mtime: Optional[float],
+               queue_size: Optional[int] = None) -> str:
     """The header's Sync control.
 
-    Carries the mtime token the page was rendered from, so after kicking a
-    sweep the page can poll GET /mtime and reload the moment the queue actually
-    changes -- rather than guessing a duration or reloading into the same stale
-    view. Lives in the header, so it is present in all three layouts.
+    Carries the mtime token the page was rendered from, so the page can tell a
+    /mtime response apart from the state it is already showing -- rather than
+    guessing a duration or refreshing into the same view. Lives in the header,
+    so it is present in all three layouts.
+
+    The update-pending chip rides along in this region deliberately: it is the
+    one piece of chrome that must be re-rendered (and so re-hidden) by the same
+    swap that applies the update it was announcing.
     """
     return (f'<button type="button" class="btn-sync" id="sync" '
-            f'data-mtime="{_e(mtime_token(queue_mtime))}" '
-            f'title="run a sweep now">Sync</button>')
+            f'data-mtime="{_e(mtime_token(queue_mtime, queue_size))}" '
+            f'title="run a sweep now">Sync</button>'
+            f'<button type="button" class="pending" id="pending" hidden '
+            f'title="apply the update now">'
+            f'queue changed \u2014 update pending</button>')
 
 
 def _bar_html(records: Sequence[QueueRecord]) -> str:
@@ -1218,8 +1442,74 @@ def _bar_html(records: Sequence[QueueRecord]) -> str:
         '</div>')
 
 
+# The five regions of the page that change when the queue changes, in
+# document order. Every one carries a stable id in EVERY queue state -- an
+# out-of-band swap needs a target that exists on both sides of the transition,
+# and the empty queue is exactly the transition that would otherwise have none.
+_REGION_IDS = ("telemetry", "sync-region", "sections", "branches", "bar")
+
+
+def _regions(records: Sequence[QueueRecord], now: str,
+             queue_mtime: Optional[float],
+             queue_size: Optional[int] = None) -> Dict[str, str]:
+    """Inner HTML of each dynamic region, keyed by container id.
+
+    The single producer for BOTH the full page and the fragment response, so
+    the two cannot drift: a fragment endpoint that renders a region differently
+    from the page is a page that changes appearance every time it updates.
+
+    Pure, like `render_page`: a function of its arguments only.
+    """
+    records = list(records)
+    sections = partition_sections(records)
+    if records:
+        groups, ungrouped = group_by_workstream(records)
+        content = _sections_html(sections, now)
+        branches = _branches_html(groups, ungrouped)
+        bar = _bar_html(records)
+    else:
+        # The all-clear lives INSIDE #sections rather than replacing it, so the
+        # swap that empties the queue also removes the rows it replaces. When
+        # this was a sibling of .sections, approving the last item left the
+        # page showing rows that no longer existed.
+        content = ('<div class="clear"><span class="clear-i">🔭</span>'
+                   'Nothing needs you right now.</div>')
+        branches = ""
+        bar = ""
+    return {"telemetry": _telemetry_html(records, sections, now, queue_mtime),
+            "sync-region": _sync_html(queue_mtime, queue_size),
+            "sections": content,
+            "branches": branches,
+            "bar": bar}
+
+
+def _container(rid: str, inner: str, oob: bool = False) -> str:
+    """One region, in its stable-id container.
+
+    Emitted by the page without the swap marker and by the fragment response
+    with it, from the same call, so the container markup cannot disagree either.
+    """
+    marker = ' hx-swap-oob="true"' if oob else ""
+    return f'<div id="{_e(rid)}" class="oob"{marker}>{inner}</div>'
+
+
+def render_fragments(records: Sequence[QueueRecord], now: str,
+                     queue_mtime: Optional[float] = None,
+                     queue_size: Optional[int] = None) -> str:
+    """The five dynamic regions, each marked for an out-of-band swap.
+
+    One response, not five endpoints: the whole page updates in one round trip
+    and cannot tear between regions that were rendered from different reads of
+    the queue.
+    """
+    regions = _regions(records, now, queue_mtime, queue_size)
+    return "".join(_container(rid, regions[rid], oob=True)
+                   for rid in _REGION_IDS) + "\n"
+
+
 def render_page(records: Sequence[QueueRecord], now: str,
-                queue_mtime: Optional[float] = None) -> str:
+                queue_mtime: Optional[float] = None,
+                queue_size: Optional[int] = None) -> str:
     """Render the whole dashboard as one self-contained HTML page.
 
     Pure: a function of its arguments only. No I/O, no network, no clock -- the
@@ -1230,25 +1520,12 @@ def render_page(records: Sequence[QueueRecord], now: str,
     round trip. The layout is never carried in the URL (decision 12's rejected
     alternative): a pinned home-screen app must keep its stored default.
     """
-    records = list(records)
-    sections = partition_sections(records)
-    sync = _sync_html(queue_mtime)
+    regions = _regions(records, now, queue_mtime, queue_size)
+    part = {rid: _container(rid, regions[rid]) for rid in _REGION_IDS}
     toggle = "".join(
         f'<button type="button" class="toggle-btn" data-set-layout="{_e(v)}" '
         f'aria-pressed="false">{_e(v.capitalize())}</button>'
         for v in ("checklist", "panels", "branches"))
-
-    if records:
-        groups, ungrouped = group_by_workstream(records)
-        content = (_sections_html(sections, now)
-                   + _branches_html(groups, ungrouped))
-        bar = _bar_html(records)
-        telemetry = _telemetry_html(records, sections, now, queue_mtime)
-    else:
-        content = ('<div class="clear"><span class="clear-i">🔭</span>'
-                   'Nothing needs you right now.</div>')
-        bar = ""
-        telemetry = _telemetry_html(records, sections, now, queue_mtime)
 
     return (
         '<!doctype html>\n'
@@ -1259,15 +1536,20 @@ def render_page(records: Sequence[QueueRecord], now: str,
         '<title>Worksweep</title>\n'
         f'<style>{_CSS}</style>\n'
         f'<script>{_HEAD_SCRIPT}</script>\n'
+        # AFTER the layout-restore script: that script must sit within the
+        # first few hundred characters before <body> for AC #31's lookback, and
+        # 51KB of library in front of it would push it out of that window.
+        f'<script>{_HTMX_JS}</script>\n'
         '</head>\n<body>\n'
         '<div class="wrap">\n'
         '<header class="head">'
         '<div class="brand">🔭 Worksweep</div>'
         f'<div class="toggle" role="group" aria-label="Layout">{toggle}</div>'
-        f'{sync}{telemetry}</header>\n'
-        f'{content}\n'
+        f'{part["sync-region"]}{part["telemetry"]}</header>\n'
+        f'{part["sections"]}\n'
+        f'{part["branches"]}\n'
         '</div>\n'
-        f'{bar}\n'
+        f'{part["bar"]}\n'
         f'<script>{_BODY_SCRIPT}</script>\n'
         '</body>\n</html>\n')
 
@@ -1282,17 +1564,27 @@ _ERROR_PAGE = ('<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'
 # HTTP surface
 # =============================================================================
 
-def mtime_token(queue_mtime: Optional[float]) -> str:
-    """Stable string form of the queue mtime, for change detection.
+def mtime_token(queue_mtime: Optional[float],
+                queue_size: Optional[int] = None) -> str:
+    """Stable string form of the queue's identity, for change detection.
 
     The page embeds the token it was rendered from and polls GET /mtime for a
     different one. A string compare needs no clock maths on the client and no
     agreement about float formatting between the two ends -- only that the same
     function produced both.
+
+    The SIZE rides along because mtime alone is not a change detector on every
+    filesystem: APFS keeps nanoseconds, but HFS+ and most network filesystems
+    round to the second, and two sweeps landing inside one second is exactly
+    the busy moment the page most needs to keep up with. Size is not a hash --
+    a same-second rewrite to an identical length still hides -- but it costs
+    one field of the stat already being made and removes the common case.
     """
     if not queue_mtime:
         return "0"
-    return "%.6f" % queue_mtime
+    if queue_size is None:
+        return "%.6f" % queue_mtime
+    return "%.6f:%d" % (queue_mtime, queue_size)
 
 
 def relative_age(queue_mtime: Optional[float], now: str) -> str:
@@ -1327,6 +1619,19 @@ def _queue_mtime(path: str) -> Optional[float]:
         return os.path.getmtime(path)
     except OSError:
         return None
+
+
+def _queue_stamp(path: str) -> Tuple[Optional[float], Optional[int]]:
+    """(mtime, size) from ONE stat.
+
+    One call, not two: reading the mtime and the size separately could straddle
+    a rewrite and mint a token for a pairing that never existed on disk.
+    """
+    try:
+        st = os.stat(path)
+    except OSError:
+        return (None, None)
+    return (st.st_mtime, st.st_size)
 
 
 def _valid_numbers(payload) -> Optional[List[int]]:
@@ -1436,6 +1741,19 @@ class DashboardHandler(BaseHTTPRequestHandler):
     """
 
     server_version = "worksweep-dashboard/1"
+    # Required by GET /events: HTTP/1.0 closes the connection after every
+    # response, so a stream could never stay open. Class-wide, so every route
+    # became keep-alive at the same moment -- which is safe only because _send
+    # always sets a Content-Length, and because a refusal that skipped reading
+    # the request body now closes rather than leaving it on the wire.
+    protocol_version = "HTTP/1.1"
+    # ...which also made every connection reusable, and a reused connection
+    # with nobody on it holds a thread and a socket until the process restarts.
+    # A tab left open all weekend is not an attack, it is Tuesday.
+    # BaseHTTPRequestHandler applies this as a SOCKET timeout and turns the
+    # resulting read timeout into a close. Comfortably longer than the event
+    # stream's 15s heartbeat, so a live stream is never the thing it reaps.
+    timeout = 65
 
     def _log_line(self, fmt, args) -> str:
         """Render a log line with control bytes stripped.
@@ -1461,6 +1779,24 @@ class DashboardHandler(BaseHTTPRequestHandler):
         # BaseHTTPRequestHandler routes malformed-request errors here and would
         # otherwise echo the raw request line to stderr unsanitised.
         sys.stderr.write(self._log_line(fmt, args) + "\n")
+
+    def handle_one_request(self):
+        """As the base class, minus the traceback for a client going away.
+
+        Keep-alive means the read for a NEXT request always happens, so a
+        closed tab or a phone leaving the tailnet arrives here as a
+        ConnectionResetError -- which socketserver turns into a full traceback
+        in the .err file. A client disappearing is the ordinary end of a
+        connection, not a server failure, and .err staying meaningful for real
+        failures is the whole reason access logs go to stdout.
+
+        The base class already handles the read TIMEOUT (one sanitised line);
+        this adds only the reset family, and closes rather than swallowing.
+        """
+        try:
+            super().handle_one_request()
+        except ConnectionError:
+            self.close_connection = True
 
     # -- plumbing --------------------------------------------------------
     def _send(self, code: int, ctype: str, body: bytes,
@@ -1488,6 +1824,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self._send(code, "text/plain; charset=utf-8",
                    message.encode("utf-8"))
 
+    def _reject(self, code: int, message: str) -> None:
+        """A refusal issued WITHOUT reading the request body.
+
+        Under HTTP/1.1 the connection is reused, so an unread body would be
+        parsed as the next request line: a CSRF rejection would be followed by
+        a mystery 400 on a socket the browser believed was clean. Closing is
+        the correct answer to "I am not going to read what you sent".
+
+        Every refusal goes through here, including the ones issued AFTER the
+        body was read. A refusal is the one moment the two ends most disagree
+        about what was actually sent, which makes it the worst possible moment
+        to keep the socket and hope.
+        """
+        self._send(code, "text/plain; charset=utf-8", message.encode("utf-8"),
+                   headers={"Connection": "close"})
+
     def _path(self) -> str:
         return urllib.parse.urlsplit(self.path).path
 
@@ -1510,6 +1862,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return True
 
     def _body_bytes(self) -> Optional[bytes]:
+        """The request body, or None for anything this server will not read.
+
+        None means "refuse and close", never "empty body".
+        """
+        if (self.headers.get("Transfer-Encoding") or "").strip():
+            # We read exactly Content-Length bytes, so a chunked request would
+            # read ZERO and leave its whole body on a connection HTTP/1.1 says
+            # is reusable -- where it becomes the next request line. Our own
+            # page never sends chunked, so refuse it rather than half-implement
+            # a framing we have no use for.
+            return None
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except (TypeError, ValueError):
@@ -1528,7 +1891,27 @@ class DashboardHandler(BaseHTTPRequestHandler):
             # Read-only and side-effect free, so no CSRF guard: it leaks only
             # "when did the queue last change", which the page already shows.
             # The Sync flow polls this to know when a kicked sweep has landed.
-            self._text(200, mtime_token(_queue_mtime(self.server.queue_path)))
+            self._text(200, mtime_token(*_queue_stamp(self.server.queue_path)))
+            return
+        if path == "/fragments":
+            # Same rationale as /mtime, and the same absence of a CSRF guard:
+            # a read that leaks only what the page it is refreshing already
+            # shows. This is the whole live-update path -- SSE only says
+            # "something changed", this says what it changed to.
+            qpath = self.server.queue_path
+            try:
+                body = render_fragments(load_queue(qpath), self.server.now(),
+                                        *_queue_stamp(qpath)).encode(
+                                            "utf-8", errors="replace")
+            except Exception as e:             # never crash the agent
+                print(f"worksweep: dashboard fragment render failed: {e}",
+                      file=sys.stderr)
+                self._text(500, "fragment render failed")
+                return
+            self._send(200, "text/html; charset=utf-8", body)
+            return
+        if path == "/events":
+            self._events()
             return
         if path != "/":
             self._text(404, "not found")
@@ -1536,25 +1919,109 @@ class DashboardHandler(BaseHTTPRequestHandler):
         qpath = self.server.queue_path
         try:
             body = render_page(load_queue(qpath), self.server.now(),
-                               _queue_mtime(qpath)).encode("utf-8",
+                               *_queue_stamp(qpath)).encode("utf-8",
                                                             errors="replace")
         except Exception as e:                     # never crash the agent
             print(f"worksweep: dashboard render failed: {e}", file=sys.stderr)
             body = _ERROR_PAGE.encode("utf-8")
         self._send(200, "text/html; charset=utf-8", body)
 
+    def _events(self) -> None:
+        """Server-sent events: one frame whenever queue.json's mtime moves.
+
+        Holds NO lock, deliberately and permanently. This connection stays open
+        for hours; the write side takes _WRITE_LOCK and the queue file lock for
+        the shortest possible window and must never end up queued behind a
+        reader that never finishes. All this route ever does is stat a path.
+
+        Bypasses _send, which is body-first with a fixed Content-Length -- the
+        one thing a stream by definition cannot supply.
+
+        Like every other handler it may not raise: the only way out is a failed
+        write to a client that went away, and that is the intended exit.
+        """
+        qpath = self.server.queue_path
+        # Bound to a local: the slot released at the end must be the very
+        # object the slot was taken from, whatever the module global says by
+        # then. BoundedSemaphore.release() RAISES if it over-releases, and this
+        # one runs in a `finally` where nothing is allowed to.
+        slots = _EVENT_SLOTS
+        if not slots.acquire(blocking=False):
+            # A well-framed refusal, not a dropped connection: the pool being
+            # full is a temporary condition and EventSource will come back.
+            self._text(503, "too many event streams")
+            return
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            # No Content-Length is possible, so the connection cannot be
+            # reused; say so rather than leaving a keep-alive client guessing.
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.flush()
+
+            def emit(payload: str) -> None:
+                self.wfile.write(payload.encode("utf-8"))
+                self.wfile.flush()
+
+            last = mtime_token(*_queue_stamp(qpath))
+            # Announce the CURRENT token immediately, ahead of the loop.
+            #
+            # Without this, `last` is seeded from the file as it is right now
+            # and everything that changed while this client was NOT connected
+            # is never announced. EventSource reconnects by itself after an
+            # agent restart or a tailnet blip, so that window is routine -- and
+            # swallowing it is the silent-stale bug this whole build exists to
+            # kill, reappearing at the worst possible moment. It also closes
+            # the smaller gap between a page being rendered and its stream
+            # opening. Immediately, not inside the loop, or every page load
+            # would be one stat interval behind for no reason.
+            #
+            # Announcing a token the client already holds costs one 3KB GET,
+            # because the refresh it triggers is idempotent. Missing a change
+            # costs a page that is quietly wrong until somebody touches it.
+            #
+            # "0" is the absence of a queue file, which is not a change:
+            # announcing it would make every page opened before the first sweep
+            # flash the all-clear at itself.
+            if last != "0":
+                emit(f"event: queue\ndata: {last}\n\n")
+            beat = time.monotonic()
+            while True:
+                time.sleep(_EVENT_STAT_SECONDS)
+                token = mtime_token(*_queue_stamp(qpath))
+                now = time.monotonic()
+                if token != last:
+                    last = token
+                    emit(f"event: queue\ndata: {token}\n\n")
+                    beat = now
+                elif now - beat >= _EVENT_HEARTBEAT_SECONDS:
+                    # Invisible to EventSource, but it is still a WRITE: a
+                    # client that vanished fails here and this thread ends,
+                    # instead of spinning on a socket nobody is reading.
+                    emit(": heartbeat\n\n")
+                    beat = now
+        except Exception:
+            # Almost always the client going away, which is the normal end of
+            # a stream and not worth a log line.
+            return
+        finally:
+            slots.release()
+
     def do_POST(self) -> None:                                 # noqa: N802
         path = self._path()
         if path not in ("/approve", "/approve-all", "/sweep", "/dismiss"):
-            self._text(404, "not found")
+            self._reject(404, "not found")
             return
         if not self._csrf_ok():
-            self._text(403, "forbidden")
+            self._reject(403, "forbidden")
             return
 
         raw = self._body_bytes()
         if raw is None:
-            self._text(400, "bad request")
+            self._reject(400, "bad request")
             return
 
         if path == "/sweep":
@@ -1575,13 +2042,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         try:
             payload = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
-            self._text(400, "bad request")
+            self._reject(400, "bad request")
             return
 
         if path == "/dismiss":
             number = _valid_number(payload)
             if number is None:
-                self._text(400, "bad request")
+                self._reject(400, "bad request")
                 return
             try:
                 self._dismiss(number, _valid_actor(payload))
@@ -1592,7 +2059,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         numbers = _valid_numbers(payload)
         if numbers is None:
-            self._text(400, "bad request")
+            self._reject(400, "bad request")
             return
 
         try:
