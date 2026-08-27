@@ -2832,10 +2832,15 @@ def test_events_emits_on_mtime_change(serve_queue):
     Deliberately run at the REAL 1s cadence against AC1's 2s budget, not a
     monkeypatched one -- the budget is the thing being tested."""
     s, qpath = serve_queue([_rec(1)])
+    st = os.stat(qpath)
     with s.stream() as r:
         head = r.headers()
         assert head.splitlines()[0].startswith("HTTP/1.1 200")
         assert "Content-Type: text/event-stream" in head
+        # every stream opens by announcing where the queue stands (see
+        # test_events_announces_the_current_token_on_connect)
+        assert r.frame(timeout=2).splitlines()[1] == "data: " + \
+            dashboard.mtime_token(st.st_mtime, st.st_size)
         os.utime(qpath, (1_800_000_000, 1_800_000_000))
         lines = r.frame(timeout=2).splitlines()
     assert lines[0] == "event: queue"
@@ -2853,6 +2858,7 @@ def test_events_sends_heartbeat_comments(serve_queue, monkeypatch):
     s, _ = serve_queue([_rec(1)])
     with s.stream() as r:
         r.headers()
+        assert r.frame(timeout=3).startswith("event: queue")   # the connect one
         assert r.frame(timeout=3) == ": heartbeat"
         assert r.frame(timeout=3) == ": heartbeat"
 
@@ -3018,3 +3024,130 @@ def test_the_page_and_the_mtime_route_mint_the_same_token(serve_queue):
     # lastMtime with a value the poll can compare against
     frag = s.request("GET", "/fragments")[2].decode()
     assert f'data-mtime="{served}"' in frag
+
+
+def test_events_announces_the_current_token_on_connect(serve_queue):
+    """Falsifying: without this, a stream seeds `last` from the file as it is
+    NOW, so nothing that happened before the connection opened is ever
+    announced. It also has to be IMMEDIATE -- inside the loop it would be one
+    stat interval late on every single page load."""
+    s, qpath = serve_queue([_rec(1)])
+    st = os.stat(qpath)
+    with s.stream() as r:
+        r.headers()
+        lines = r.frame(timeout=0.8).splitlines()   # well inside one stat pass
+    assert lines == ["event: queue",
+                     "data: " + dashboard.mtime_token(st.st_mtime, st.st_size)]
+
+
+def test_a_change_made_while_the_stream_was_down_is_announced_on_reconnect():
+    """THE reconnect gap, and the reason this is a blocker: EventSource
+    reconnects by itself after an agent restart or a tailnet blip, and every
+    change that landed in that window used to be swallowed -- silent-stale,
+    reborn, precisely when it matters most."""
+    import tempfile
+    d = tempfile.mkdtemp()
+    qpath = os.path.join(d, "queue.json")
+    save_queue(qpath, [_rec(1)])
+    s = _Server(qpath)
+    try:
+        with s.stream() as r:
+            r.headers()
+            first = r.frame(timeout=2)
+        # the stream is now closed; the queue moves while nobody is listening
+        save_queue(qpath, [_rec(1), _rec(2), _rec(3)])
+        with s.stream() as r:
+            r.headers()
+            second = r.frame(timeout=2)
+        assert second.startswith("event: queue")
+        assert second != first, "the reconnect announced a stale token"
+        st = os.stat(qpath)
+        assert second.splitlines()[1] == "data: " + dashboard.mtime_token(
+            st.st_mtime, st.st_size)
+    finally:
+        s.close()
+
+
+def test_events_says_nothing_on_connect_when_there_is_no_queue_file(tmp_path,
+                                                                    monkeypatch):
+    """Falsifying: announcing the "0" token would make every page that opened
+    before the first sweep flash the all-clear at itself for no reason. No
+    queue file is not a change, it is an absence."""
+    monkeypatch.setattr(dashboard, "_EVENT_STAT_SECONDS", 0.01)
+    monkeypatch.setattr(dashboard, "_EVENT_HEARTBEAT_SECONDS", 0.05)
+    s = _Server(os.path.join(str(tmp_path), "never-swept.json"))
+    try:
+        with s.stream() as r:
+            r.headers()
+            assert r.frame(timeout=3) == ": heartbeat"
+    finally:
+        s.close()
+
+
+def test_events_caps_concurrent_streams(serve_queue, monkeypatch):
+    """Bounded by code, not by trusting that only Chandler ever opens tabs.
+    Every stream costs a thread and a socket for as long as it is held; without
+    a cap, a tab-opening loop is a trivial resource exhaustion on the agent."""
+    monkeypatch.setattr(dashboard, "_MAX_EVENT_STREAMS", 2)
+    monkeypatch.setattr(dashboard, "_EVENT_SLOTS", threading.BoundedSemaphore(2))
+    # so a dropped client is noticed (and its slot freed) in milliseconds
+    monkeypatch.setattr(dashboard, "_EVENT_STAT_SECONDS", 0.01)
+    monkeypatch.setattr(dashboard, "_EVENT_HEARTBEAT_SECONDS", 0.02)
+    s, _ = serve_queue([_rec(1)])
+    with s.stream() as a, s.stream() as b:
+        a.headers()
+        b.headers()
+        status, headers, _ = s.request("GET", "/events")
+        assert status == 503
+        assert "Content-Length" in headers        # still a well-framed refusal
+        # the rest of the dashboard is entirely unaffected by a full stream pool
+        assert s.request("GET", "/")[0] == 200
+        assert s.request("GET", "/fragments")[0] == 200
+    # ...and a slot is released the moment a stream ends, so the cap bounds
+    # CONCURRENCY and is never a lifetime budget
+    deadline = time.monotonic() + 5
+    while True:
+        with s.stream() as c:
+            head = c.headers()
+        if head.splitlines()[0].startswith("HTTP/1.1 200"):
+            break
+        assert time.monotonic() < deadline, "a stream slot was never released"
+        time.sleep(0.05)
+
+
+def test_a_stream_releases_the_slot_it_actually_took(monkeypatch, tmp_path):
+    """Falsifying: release the module global instead of the object acquired
+    from, and a pool swapped underneath a live stream over-releases -- which
+    BoundedSemaphore raises on, inside a `finally`, in a handler where nothing
+    is allowed to raise. Exactly the shape a test double creates."""
+    fn = next(n for n in ast.walk(ast.parse(_dashboard_src()))
+              if isinstance(n, ast.FunctionDef) and n.name == "_events")
+    releases = [n for n in ast.walk(fn)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "release"]
+    assert len(releases) == 1
+    assert isinstance(releases[0].func.value, ast.Name)
+    assert releases[0].func.value.id != "_EVENT_SLOTS", (
+        "released the global, not the object the slot was taken from")
+    # and it behaves: a pool swapped mid-stream does not blow up the handler
+    monkeypatch.setattr(dashboard, "_EVENT_SLOTS", threading.BoundedSemaphore(1))
+    monkeypatch.setattr(dashboard, "_EVENT_STAT_SECONDS", 0.01)
+    monkeypatch.setattr(dashboard, "_EVENT_HEARTBEAT_SECONDS", 0.02)
+    qpath = os.path.join(str(tmp_path), "queue.json")
+    save_queue(qpath, [_rec(1)])
+    s = _Server(qpath)
+    try:
+        with s.stream() as r:
+            r.headers()
+            monkeypatch.setattr(dashboard, "_EVENT_SLOTS",
+                                threading.BoundedSemaphore(1))
+        deadline = time.monotonic() + 5
+        while True:
+            with s.stream() as c:
+                head = c.headers()
+            if head.splitlines()[0].startswith("HTTP/1.1 200"):
+                break
+            assert time.monotonic() < deadline, "the original slot never came back"
+            time.sleep(0.05)
+    finally:
+        s.close()

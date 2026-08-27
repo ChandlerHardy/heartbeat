@@ -94,6 +94,12 @@ _EVENT_STAT_SECONDS = 1.0
 # Quiet enough to be invisible, frequent enough that a client which went away
 # surfaces as a write error and its thread exits within the minute.
 _EVENT_HEARTBEAT_SECONDS = 15.0
+# Every stream costs a thread and a socket for as long as it is held, so the
+# ceiling is set in code rather than by trusting that only one person ever opens
+# tabs. Generous for the two or three real viewers; a hard stop for a loop.
+# EventSource retries on its own, so a client refused here comes back.
+_MAX_EVENT_STREAMS = 8
+_EVENT_SLOTS = threading.BoundedSemaphore(_MAX_EVENT_STREAMS)
 # A workstream card is named after a human-readable thing, not an iid. Long MR
 # titles are truncated so a card header stays one scannable line.
 _CARD_TITLE_LIMIT = 60
@@ -1825,6 +1831,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
         write to a client that went away, and that is the intended exit.
         """
         qpath = self.server.queue_path
+        # Bound to a local: the slot released at the end must be the very
+        # object the slot was taken from, whatever the module global says by
+        # then. BoundedSemaphore.release() RAISES if it over-releases, and this
+        # one runs in a `finally` where nothing is allowed to.
+        slots = _EVENT_SLOTS
+        if not slots.acquire(blocking=False):
+            # A well-framed refusal, not a dropped connection: the pool being
+            # full is a temporary condition and EventSource will come back.
+            self._text(503, "too many event streams")
+            return
         try:
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -1835,7 +1851,33 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.flush()
+
+            def emit(payload: str) -> None:
+                self.wfile.write(payload.encode("utf-8"))
+                self.wfile.flush()
+
             last = mtime_token(*_queue_stamp(qpath))
+            # Announce the CURRENT token immediately, ahead of the loop.
+            #
+            # Without this, `last` is seeded from the file as it is right now
+            # and everything that changed while this client was NOT connected
+            # is never announced. EventSource reconnects by itself after an
+            # agent restart or a tailnet blip, so that window is routine -- and
+            # swallowing it is the silent-stale bug this whole build exists to
+            # kill, reappearing at the worst possible moment. It also closes
+            # the smaller gap between a page being rendered and its stream
+            # opening. Immediately, not inside the loop, or every page load
+            # would be one stat interval behind for no reason.
+            #
+            # Announcing a token the client already holds costs one 3KB GET,
+            # because the refresh it triggers is idempotent. Missing a change
+            # costs a page that is quietly wrong until somebody touches it.
+            #
+            # "0" is the absence of a queue file, which is not a change:
+            # announcing it would make every page opened before the first sweep
+            # flash the all-clear at itself.
+            if last != "0":
+                emit(f"event: queue\ndata: {last}\n\n")
             beat = time.monotonic()
             while True:
                 time.sleep(_EVENT_STAT_SECONDS)
@@ -1843,21 +1885,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 now = time.monotonic()
                 if token != last:
                     last = token
-                    self.wfile.write(
-                        f"event: queue\ndata: {token}\n\n".encode("utf-8"))
-                    self.wfile.flush()
+                    emit(f"event: queue\ndata: {token}\n\n")
                     beat = now
                 elif now - beat >= _EVENT_HEARTBEAT_SECONDS:
                     # Invisible to EventSource, but it is still a WRITE: a
                     # client that vanished fails here and this thread ends,
                     # instead of spinning on a socket nobody is reading.
-                    self.wfile.write(b": heartbeat\n\n")
-                    self.wfile.flush()
+                    emit(": heartbeat\n\n")
                     beat = now
         except Exception:
             # Almost always the client going away, which is the normal end of
             # a stream and not worth a log line.
             return
+        finally:
+            slots.release()
 
     def do_POST(self) -> None:                                 # noqa: N802
         path = self._path()
