@@ -1678,6 +1678,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
     # always sets a Content-Length, and because a refusal that skipped reading
     # the request body now closes rather than leaving it on the wire.
     protocol_version = "HTTP/1.1"
+    # ...which also made every connection reusable, and a reused connection
+    # with nobody on it holds a thread and a socket until the process restarts.
+    # A tab left open all weekend is not an attack, it is Tuesday.
+    # BaseHTTPRequestHandler applies this as a SOCKET timeout and turns the
+    # resulting read timeout into a close. Comfortably longer than the event
+    # stream's 15s heartbeat, so a live stream is never the thing it reaps.
+    timeout = 65
 
     def _log_line(self, fmt, args) -> str:
         """Render a log line with control bytes stripped.
@@ -1737,6 +1744,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
         parsed as the next request line: a CSRF rejection would be followed by
         a mystery 400 on a socket the browser believed was clean. Closing is
         the correct answer to "I am not going to read what you sent".
+
+        Every refusal goes through here, including the ones issued AFTER the
+        body was read. A refusal is the one moment the two ends most disagree
+        about what was actually sent, which makes it the worst possible moment
+        to keep the socket and hope.
         """
         self._send(code, "text/plain; charset=utf-8", message.encode("utf-8"),
                    headers={"Connection": "close"})
@@ -1763,6 +1775,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
         return True
 
     def _body_bytes(self) -> Optional[bytes]:
+        """The request body, or None for anything this server will not read.
+
+        None means "refuse and close", never "empty body".
+        """
+        if (self.headers.get("Transfer-Encoding") or "").strip():
+            # We read exactly Content-Length bytes, so a chunked request would
+            # read ZERO and leave its whole body on a connection HTTP/1.1 says
+            # is reusable -- where it becomes the next request line. Our own
+            # page never sends chunked, so refuse it rather than half-implement
+            # a framing we have no use for.
+            return None
         try:
             length = int(self.headers.get("Content-Length") or 0)
         except (TypeError, ValueError):
@@ -1932,13 +1955,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
         try:
             payload = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
-            self._text(400, "bad request")
+            self._reject(400, "bad request")
             return
 
         if path == "/dismiss":
             number = _valid_number(payload)
             if number is None:
-                self._text(400, "bad request")
+                self._reject(400, "bad request")
                 return
             try:
                 self._dismiss(number, _valid_actor(payload))
@@ -1949,7 +1972,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         numbers = _valid_numbers(payload)
         if numbers is None:
-            self._text(400, "bad request")
+            self._reject(400, "bad request")
             return
 
         try:

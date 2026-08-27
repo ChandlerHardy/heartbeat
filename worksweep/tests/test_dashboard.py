@@ -3151,3 +3151,153 @@ def test_a_stream_releases_the_slot_it_actually_took(monkeypatch, tmp_path):
             time.sleep(0.05)
     finally:
         s.close()
+
+
+def test_an_idle_keep_alive_connection_is_reaped(tmp_path, monkeypatch):
+    """Finding 2. HTTP/1.1 made every connection reusable, and a reused
+    connection with nobody on it holds a thread and a socket until the process
+    restarts. A browser tab left open all weekend is not an attack, it is
+    Tuesday. stdlib's handle_one_request turns the read timeout into a close."""
+    assert dashboard.DashboardHandler.timeout == 65
+    monkeypatch.setattr(dashboard.DashboardHandler, "timeout", 0.2)
+    qpath = os.path.join(str(tmp_path), "queue.json")
+    save_queue(qpath, [_rec(1)])
+    s = _Server(qpath)
+    try:
+        before = set(threading.enumerate())
+        sock = socket.create_connection((s.host, s.port), timeout=5)
+        try:
+            sock.sendall(f"GET /mtime HTTP/1.1\r\nHost: {s.host}:{s.port}\r\n\r\n"
+                         .encode())
+            r = _Reader(sock)
+            head = r.headers()
+            assert head.splitlines()[0].startswith("HTTP/1.1 200")
+            assert "Connection: close" not in head      # genuinely keep-alive
+            spawned = [t for t in threading.enumerate() if t not in before]
+            assert spawned, "no thread served the request"
+            # now go idle and say nothing at all
+            sock.settimeout(5)
+            rest = b""
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break                              # the server hung up
+                rest += chunk
+        finally:
+            sock.close()
+        for t in spawned:
+            t.join(timeout=5)
+            assert not t.is_alive(), t.name
+    finally:
+        s.close()
+
+
+def test_an_open_stream_outlives_the_idle_timeout(serve_queue, monkeypatch):
+    """The other half of finding 2, and the risk in it: the handler timeout is
+    a SOCKET timeout, so setting it carelessly would cut every event stream at
+    65s. It does not, because the stream writes far more often than that -- and
+    this proves it with the ratio preserved, not just the numbers shrunk."""
+    # the production relationship, asserted before it is scaled down
+    assert (dashboard.DashboardHandler.timeout
+            > dashboard._EVENT_HEARTBEAT_SECONDS * 2)
+    monkeypatch.setattr(dashboard.DashboardHandler, "timeout", 0.4)
+    monkeypatch.setattr(dashboard, "_EVENT_STAT_SECONDS", 0.01)
+    monkeypatch.setattr(dashboard, "_EVENT_HEARTBEAT_SECONDS", 0.05)
+    s, _ = serve_queue([_rec(1)])
+    with s.stream() as r:
+        r.headers()
+        assert r.frame(timeout=2).startswith("event: queue")
+        # comfortably past the timeout, several heartbeat intervals in
+        for _ in range(6):
+            assert r.frame(timeout=2) == ": heartbeat"
+
+
+def test_a_chunked_post_is_refused_rather_than_desyncing(serve_queue):
+    """Finding 3. _body_bytes reads exactly Content-Length bytes, so a chunked
+    request reads ZERO and leaves the entire body on the wire -- which, on a
+    connection HTTP/1.1 says is reusable, becomes the next request line. This
+    server has no reason to accept chunked from its own page, so it refuses it
+    and closes rather than half-understanding it."""
+    s, _ = serve_queue([_rec(1)])
+    body = b"1a\r\n{\"numbers\": [1], \"a\": 1}\r\n0\r\n\r\n"
+    sock = socket.create_connection((s.host, s.port), timeout=5)
+    try:
+        sock.sendall(
+            f"POST /approve HTTP/1.1\r\nHost: {s.host}:{s.port}\r\n"
+            "X-Worksweep: approve\r\nContent-Type: application/json\r\n"
+            "Transfer-Encoding: chunked\r\n\r\n".encode() + body)
+        head = _Reader(sock).headers()
+    finally:
+        sock.close()
+    assert "400" in head.splitlines()[0], head.splitlines()[0]
+    assert "Connection: close" in head
+    # and the half-read request approved exactly nothing
+    frag = s.request("GET", "/fragments")[2].decode()
+    assert 'data-st="proposed"' in frag
+    assert 'data-st="approved"' not in frag
+
+
+@pytest.mark.parametrize("body,label", [
+    (b"not json at all", "unparseable"),
+    (b'{"numbers": "one"}', "bad numbers envelope"),
+    (b'{"nope": 1}', "wrong envelope"),
+])
+def test_every_400_closes_the_connection(serve_queue, body, label):
+    """Finding 3, the general case: a refusal is the one moment the server and
+    the client most disagree about what was sent, so it is the worst possible
+    moment to keep the socket and guess. Every 400 closes."""
+    s, _ = serve_queue([_rec(1)])
+    sock = socket.create_connection((s.host, s.port), timeout=5)
+    try:
+        sock.sendall(
+            f"POST /approve HTTP/1.1\r\nHost: {s.host}:{s.port}\r\n"
+            "X-Worksweep: approve\r\nContent-Type: application/json\r\n"
+            f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
+        head = _Reader(sock).headers()
+    finally:
+        sock.close()
+    assert "400" in head.splitlines()[0], (label, head.splitlines()[0])
+    assert "Connection: close" in head, label
+    assert "Content-Length:" in head, label
+
+
+def test_a_dismiss_with_a_bad_number_also_closes(serve_queue):
+    s, _ = serve_queue([_rec(1, executor="triage")])
+    sock = socket.create_connection((s.host, s.port), timeout=5)
+    body = b'{"number": true}'                 # bool is not an int, per _valid_number
+    try:
+        sock.sendall(
+            f"POST /dismiss HTTP/1.1\r\nHost: {s.host}:{s.port}\r\n"
+            "X-Worksweep: approve\r\nContent-Type: application/json\r\n"
+            f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
+        head = _Reader(sock).headers()
+    finally:
+        sock.close()
+    assert "400" in head.splitlines()[0]
+    assert "Connection: close" in head
+
+
+def test_a_chunked_sweep_is_refused_and_kicks_nothing(serve_queue):
+    """The sharp edge of finding 3, and the reason the Transfer-Encoding check
+    is not merely belt to _reject's braces: /sweep takes NO body, so a chunked
+    POST would read zero bytes, look perfectly valid, kick a real sweep, and
+    leave its body on the wire to be read as the next request line."""
+    kicks = []
+    s, _ = serve_queue([_rec(1)], sweep=lambda: kicks.append(1))
+    body = b"4\r\nnoop\r\n0\r\n\r\n"
+    sock = socket.create_connection((s.host, s.port), timeout=5)
+    try:
+        sock.sendall(
+            f"POST /sweep HTTP/1.1\r\nHost: {s.host}:{s.port}\r\n"
+            "X-Worksweep: approve\r\nTransfer-Encoding: chunked\r\n\r\n"
+            .encode() + body)
+        head = _Reader(sock).headers()
+    finally:
+        sock.close()
+    assert "400" in head.splitlines()[0], head.splitlines()[0]
+    assert "Connection: close" in head
+    assert kicks == [], "a chunked request kicked a real sweep"
+    # the ordinary Content-Length sweep still works, so this refuses the
+    # framing and not the route
+    assert s.sweep()[0] == 202
+    assert kicks == [1]
