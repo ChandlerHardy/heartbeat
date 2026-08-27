@@ -741,6 +741,37 @@ if(v==='checklist'||v==='panels'||v==='branches'){d.setAttribute('data-layout',v
 try{d.setAttribute('data-layout',window.matchMedia('%(bp)s').matches?'panels':'checklist');}catch(e){}})();
 """ % {"key": _LAYOUT_STORAGE_KEY, "bp": _WIDE_BREAKPOINT}
 
+# ---- vendored htmx ---------------------------------------------------------
+# A repo file, not a CDN tag and not a `<script src>`: the page is one
+# self-contained document (AC #28), so the library rides inline like the CSS
+# and the rest of the JS do. Pinned by sha256 in the sibling `htmx.version`.
+_STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+_HTMX_PATH = os.path.join(_STATIC_DIR, "htmx.min.js")
+
+
+def _read_vendored_js(path: str) -> str:
+    """Read a vendored asset, LOUDLY.
+
+    Deliberately the one place in this module that is allowed to raise, and it
+    raises at import rather than per-request. A deploy that forgot `static/`
+    would otherwise serve a page that looks perfect and never updates -- the
+    worst failure mode for a page whose whole job is showing what changed.
+    Under KeepAlive an import that raises is a restart loop with a real
+    traceback in the .err file, which is exactly the visibility that needs.
+    """
+    with open(path, "r", encoding="utf-8") as fh:
+        source = fh.read()
+    if not source.strip():
+        raise RuntimeError(f"vendored asset is empty: {path}")
+    if "</script" in source:
+        # It is emitted inline; a closing tag inside it would end the element
+        # early and spray the remainder of the library into the document.
+        raise RuntimeError(f"vendored asset cannot be inlined safely: {path}")
+    return source
+
+
+_HTMX_JS = _read_vendored_js(_HTMX_PATH)
+
 _BODY_SCRIPT = """
 (function(){
   var root=document.documentElement,KEY='%(key)s';
@@ -1273,6 +1304,10 @@ def render_page(records: Sequence[QueueRecord], now: str,
         '<title>Worksweep</title>\n'
         f'<style>{_CSS}</style>\n'
         f'<script>{_HEAD_SCRIPT}</script>\n'
+        # AFTER the layout-restore script: that script must sit within the
+        # first few hundred characters before <body> for AC #31's lookback, and
+        # 51KB of library in front of it would push it out of that window.
+        f'<script>{_HTMX_JS}</script>\n'
         '</head>\n<body>\n'
         '<div class="wrap">\n'
         '<header class="head">'

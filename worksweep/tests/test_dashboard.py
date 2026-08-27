@@ -39,6 +39,30 @@ def _style(page):
     return m.group(1)
 
 
+def _script(page):
+    """The page's OWN body script -- never htmx's.
+
+    51KB of vendored htmx is inlined in <head>, and its source contains
+    `pushState`, `location.search`, `location.href` and `location.reload`. A
+    whole-page `"location.reload" not in page` assertion would therefore be a
+    permanent false positive, so every JS-source assertion in this file runs
+    against this slice instead. Our script is always the last one on the page.
+    """
+    i = page.rindex("<script>")
+    j = page.index("</script>", i)
+    return page[i + len("<script>"):j]
+
+
+def _markup(page):
+    """The page with every <script> block removed.
+
+    For assertions about what the DOM does or does not contain. htmx's inlined
+    source is 51KB of minified English-ish identifiers, so a bare
+    `"Auto" not in page` would match `-URI-AutoEncoded` and fail forever.
+    """
+    return re.sub(r"<script>.*?</script>", "", page, flags=re.S)
+
+
 def _rule(css, selector):
     """Declaration body of the first rule whose selector list contains `selector`."""
     for sel, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
@@ -328,7 +352,7 @@ def test_empty_queue_renders_the_all_clear_page(serve_queue):
     assert "Nothing needs you right now" in page
     assert "<table" not in page
     for name in ("Needs you", "In progress", "Auto", "Recently done", "Errors"):
-        assert name not in page
+        assert name not in _markup(page)
     s, _ = serve_queue([])
     status, _, body = s.request("GET", "/")
     assert status == 200
@@ -842,7 +866,7 @@ def test_approve_all_confirms_with_the_count_of_the_set_it_sends():
                if 'data-blanket="1"' in t and 'data-view="sections"' in t]
     assert sorted(blanket) == [1, 2]
     # and the button sends that set, not a server-side notion of "all"
-    assert "send('/approve-all',{numbers:n})" in page.replace(" ", "")
+    assert "send('/approve-all',{numbers:n})" in _script(page).replace(" ", "")
 
 
 def test_desktop_media_query_declares_a_panel_grid_with_gap():
@@ -900,7 +924,7 @@ def test_layout_is_restored_from_localstorage_before_the_first_section():
     # F7: the meta refresh is gone -- it could reload mid-POST or discard a
     # selection. A JS timer reloads instead, and skips while either is true.
     assert "http-equiv=\"refresh\"" not in page
-    assert "setTimeout(tick," in page.replace(" ", "")
+    assert "setTimeout(tick," in _script(page).replace(" ", "")
     # AC #35: `branches` persists exactly like the other two -- the restore
     # script must accept all three stored values, not just the original pair
     restore_src = page[restore - 400:page.index("</script>", restore)]
@@ -911,9 +935,10 @@ def test_layout_is_restored_from_localstorage_before_the_first_section():
 def test_layout_state_never_rides_in_the_url():
     """AC #32."""
     page = _page([_rec(1)])
-    assert "pushState" not in page
-    assert "location.search" not in page
-    assert "location.href" not in page
+    js = _script(page)
+    assert "pushState" not in js
+    assert "location.search" not in js
+    assert "location.href" not in js
     for tag in re.findall(r"<a[^>]*>", page):
         assert "layout" not in tag
 
@@ -1391,7 +1416,7 @@ def test_refresh_re_enables_both_buttons():
     """F7: send() disables both for the round trip, so a FAILED post must not
     leave the page permanently inert."""
     page = _page([_rec(1)])
-    js = page.replace(" ", "").replace("\n", "")
+    js = _script(page).replace(" ", "").replace("\n", "")
     assert "go.disabled=inflight||n===0" in js
     assert "all.disabled=inflight||blanket().length===0" in js
     # every failure path clears the in-flight flag and refreshes
@@ -1469,7 +1494,7 @@ def test_bare_iid_suppression_within_a_repo():
 def test_timed_reload_skips_while_a_selection_or_post_is_live():
     """F7 (falsifying): a reload mid-POST tears an approval, and a reload with
     boxes ticked silently discards the selection under the user's thumb."""
-    js = _page([_rec(1)]).replace(" ", "").replace("\n", "")
+    js = _script(_page([_rec(1)])).replace(" ", "").replace("\n", "")
     # One shared guard now covers every auto-reload path: an in-flight POST, an
     # open confirm dialog, or any ticked checkbox.
     assert "functionbusy(){returninflight||confirming||selected().length>0;}" in js
@@ -1762,7 +1787,7 @@ def test_sync_button_carries_the_rendered_mtime():
 def test_sync_posts_to_sweep_and_leaves_the_reload_to_the_live_poll():
     """Addendum 3: Sync no longer owns a private poll -- the always-on one
     reloads when the sweep lands, so there is one refresh path, not two."""
-    js = _page([_rec(1)]).replace(" ", "").replace("\n", "")
+    js = _script(_page([_rec(1)])).replace(" ", "").replace("\n", "")
     assert "fetch('/sweep',{method:'POST',headers:{'X-Worksweep':'approve'}})" in js
     assert ("varsync=document.getElementById('sync');"
             "if(!sync||syncing||sync.disabled){return;}"
@@ -2044,7 +2069,7 @@ def test_done_this_week_is_informational_not_a_filter():
 
 def test_filter_toggle_logic_is_emitted():
     """Falsifying: strip the toggle and the pills become inert decoration."""
-    js = _page([_rec(1)]).replace(" ", "").replace("\n", "")
+    js = _script(_page([_rec(1)])).replace(" ", "").replace("\n", "")
     # exactly one active at a time, and tapping the active one clears it
     assert ("root.setAttribute('data-filter',"
             "(root.getAttribute('data-filter')||'')===v?'':v);") in js
@@ -2058,7 +2083,7 @@ def test_filter_toggle_logic_is_emitted():
 
 
 def test_dismiss_button_is_wired_in_the_page():
-    js = _page([_rec(1, executor="triage")]).replace(" ", "").replace("\n", "")
+    js = _script(_page([_rec(1, executor="triage")])).replace(" ", "").replace("\n", "")
     assert "vard=e.target.closest('[data-dismiss]');" in js
     assert "send('/dismiss',{number:parseInt(d.getAttribute('data-dismiss'),10)})" in js
 
@@ -2068,21 +2093,20 @@ def test_dismiss_button_is_wired_in_the_page():
 def test_live_poll_is_always_armed_not_gated_on_a_sync_tap():
     """Addendum 3 (falsifying): if the poll only started after a Sync tap, a
     runner completion would not appear until the next timed reload."""
-    js = _page([_rec(1)]).replace(" ", "").replace("\n", "")
+    js = _script(_page([_rec(1)])).replace(" ", "").replace("\n", "")
     assert "POLL_MS=10000" in js
     assert "FALLBACK_MS=300000" in js
     # Armed at TOP LEVEL, not inside a handler. Matched at exactly two spaces
     # of indent so the rescheduling calls inside poll() (deeper indent) cannot
     # satisfy this on their own.
-    body = _page([_rec(1)])
-    script = body[body.rindex("<script>"):]
+    script = _script(_page([_rec(1)]))
     assert re.search(r"^  setTimeout\(poll,POLL_MS\);$", script, re.M)
     assert re.search(r"^  setTimeout\(tick,FALLBACK_MS\);$", script, re.M)
     assert "fetch('/mtime',{cache:'no-store'})" in js
 
 
 def test_live_poll_reloads_only_when_the_mtime_changed_and_nothing_is_busy():
-    js = _page([_rec(1)]).replace(" ", "").replace("\n", "")
+    js = _script(_page([_rec(1)])).replace(" ", "").replace("\n", "")
     assert "if(t&&baseMtime&&t!==baseMtime&&!busy()){location.reload();return;}" in js
     # and it keeps polling when busy, so it resumes rather than giving up
     assert "setTimeout(poll,POLL_MS);" in js
@@ -2192,7 +2216,7 @@ def test_hidden_bar_is_actually_removed_from_layout():
 def test_bar_visibility_is_recomputed_on_every_filter_and_view_change():
     """Falsifying: drop the recompute and the bar stays up under a `done`
     filter even though every visible row lost its checkbox."""
-    js = _page([_rec(1)]).replace(" ", "").replace("\n", "")
+    js = _script(_page([_rec(1)])).replace(" ", "").replace("\n", "")
     assert "varbar=document.querySelector('.bar');" in js
     assert "if(bar){bar.hidden=boxes('input[type=checkbox]').length===0;}" in js
     # refresh() is the single place it happens, and both change paths end there
@@ -2205,7 +2229,7 @@ def test_only_visible_rows_count_as_selectable():
     """A row filtered out by a status pill is not on offer: it must not be
     counted, submitted, or keep the bar up. This is also what stops a stranded
     invisible selection wedging the live-poll guard."""
-    js = _page([_rec(1)]).replace(" ", "").replace("\n", "")
+    js = _script(_page([_rec(1)])).replace(" ", "").replace("\n", "")
     assert "varrow=b.closest?b.closest('.row'):null;" in js
     assert "return!row||row.style.display!=='none';" in js
     # selected(), blanket() and the bar count all go through boxes()
@@ -2391,7 +2415,7 @@ def test_a_hostile_dismiss_actor_is_ignored_like_an_approve_one(serve_queue):
 
 def test_all_click_handlers_are_delegated():
     """Falsifying: re-introduce any direct binding and the count goes to 3."""
-    js = _page([_rec(1)]).replace(" ", "").replace("\n", "")
+    js = _script(_page([_rec(1)])).replace(" ", "").replace("\n", "")
     assert js.count("addEventListener(") == 2
     assert "document.addEventListener('click'," in js
     assert "document.addEventListener('change'," in js
@@ -2406,7 +2430,7 @@ def test_all_click_handlers_are_delegated():
 def test_sync_done_requeries_the_button():
     """Falsifying: close over the button at load time and a swapped page can
     never un-spin it -- the Sync control stays 'syncing…' forever."""
-    js = _page([_rec(1)]).replace(" ", "").replace("\n", "")
+    js = _script(_page([_rec(1)])).replace(" ", "").replace("\n", "")
     body = js[js.index("functionsyncDone(label){"):]
     body = body[:body.index("functionkickSweep(")]
     assert "document.getElementById('sync')" in body
@@ -2418,7 +2442,7 @@ def test_sync_done_requeries_the_button():
 def test_a_sync_click_without_the_button_is_a_no_op():
     """Falsifying: drop the guard and a click delegated after the button has
     been swapped away throws and POSTs nothing but a console error."""
-    js = _page([_rec(1)]).replace(" ", "").replace("\n", "")
+    js = _script(_page([_rec(1)])).replace(" ", "").replace("\n", "")
     assert "if(!sync||syncing||sync.disabled){return;}" in js
     guard = js.index("if(!sync||syncing||sync.disabled){return;}")
     assert guard < js.index("fetch('/sweep'")
@@ -2431,3 +2455,97 @@ def test_dead_refresh_constants_are_gone():
     assert not hasattr(dashboard, "_MTIME_POLL_SECONDS")
     # the live cadences that ARE real stay
     assert dashboard._POLL_SECONDS == 10
+
+
+# =============================================================================
+# htmx live updates, Phase 2 -- the vendored library is inlined, not referenced
+#
+# A CDN tag would be a second network dependency for a page whose whole point
+# is being one file; a same-origin `<script src>` would be a second deploy
+# surface. The library is a repo file, read once at import and emitted inline,
+# which keeps `test_page_is_self_contained` true verbatim.
+# =============================================================================
+
+_HTMX_SHA256 = "60231ae6ba9db3825eb15a261122d5f55921c4d53b66bf637dc18b4ee27c79f9"
+
+
+def _static(name):
+    return os.path.join(os.path.dirname(os.path.abspath(dashboard.__file__)),
+                        "static", name)
+
+
+def test_vendored_htmx_integrity():
+    """Falsifying: flip one byte of either file and this fails. A vendored
+    dependency nobody can verify is just a large unreviewed diff."""
+    import hashlib
+    digest = hashlib.sha256(open(_static("htmx.min.js"), "rb").read()).hexdigest()
+    pin = dict(line.split(None, 1) for line in
+               open(_static("htmx.version")).read().splitlines() if line.strip())
+    assert pin["sha256"] == _HTMX_SHA256
+    assert digest == pin["sha256"]
+    assert pin["htmx.org"] == "2.0.7"
+
+
+def test_htmx_is_inlined_not_referenced():
+    page = _page([_rec(1)])
+    src = open(_static("htmx.min.js")).read()
+    assert src in page                                  # byte-for-byte, inline
+    assert 'src="/static/' not in page
+    assert "htmx.min.js" not in page
+    # and it can never break out of the <script> element that carries it
+    assert "</script" not in src
+
+
+def test_htmx_is_emitted_after_the_layout_restore_script():
+    """AC #31 is a 400-character lookback around `localStorage.getItem`;
+    emitting 51KB of htmx ahead of it would push the restore script's own
+    source out of that window and the test would pass for the wrong reason."""
+    page = _page([_rec(1)])
+    assert page.index("localStorage.getItem") < page.index("htmx")
+    assert page.index("htmx") < page.index("<body")     # still before paint
+    head = page[:page.index("</head>")]
+    assert head.count("<script>") == 2
+
+
+def test_js_assertions_are_scoped_below_htmx():
+    """Falsifying in BOTH directions: it fails if htmx is not really inlined,
+    and it fails if `_script()` stops scoping. Every `not in` assertion about
+    our own JS depends on this -- htmx's source contains `pushState`,
+    `location.search`, `location.href` and `location.reload` of its own."""
+    page = _page([_rec(1)])
+    for token in ("pushState", "location.search", "location.href"):
+        assert token in page, token                     # htmx really is there
+        assert token not in _script(page), token        # and we scope past it
+    assert _script(page).endswith("})();\n")
+    assert "<script" not in _script(page)
+
+
+def test_missing_htmx_asset_fails_at_import(tmp_path):
+    """Falsifying: degrade to a warning and a deploy that forgot `static/`
+    serves a page whose live updates silently do nothing -- the worst possible
+    failure for a page whose job is showing you what changed. KeepAlive turns
+    a raised import into a visible restart loop in the .err file."""
+    import importlib.util
+
+    def _load(static_files):
+        pkg = tmp_path / str(len(list(tmp_path.iterdir())))
+        (pkg / "static").mkdir(parents=True)
+        for name, body in static_files.items():
+            (pkg / "static" / name).write_text(body)
+        mod_path = pkg / "dashboard.py"
+        mod_path.write_text(open(dashboard.__file__).read())
+        name = "worksweep.dashboard_asset_probe"
+        spec = importlib.util.spec_from_file_location(name, str(mod_path))
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules[name] = mod          # dataclasses resolve via sys.modules
+        try:
+            spec.loader.exec_module(mod)
+        finally:
+            sys.modules.pop(name, None)
+
+    with pytest.raises(FileNotFoundError):
+        _load({})                                        # asset missing
+    with pytest.raises(RuntimeError):
+        _load({"htmx.min.js": "   \n"})                  # asset empty
+    # control: the same loader succeeds when the asset is really there
+    _load({"htmx.min.js": open(_static("htmx.min.js")).read()})
