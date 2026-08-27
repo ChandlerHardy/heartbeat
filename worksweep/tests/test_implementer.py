@@ -819,7 +819,8 @@ def test_the_advisory_magi_invocation_no_longer_suppresses_rebuttal(tmp_path):
     advisory = [c for c, _ in edges.calls
                 if c[0] == "claude" and "--advisory" in " ".join(c)]
     assert len(advisory) == 1
-    assert advisory[0][2] == "/magi:magi-review !42 --advisory --draft-findings"
+    assert advisory[0][2] == "/magi:magi-review !42 --advisory"
+    assert "--draft-findings" not in advisory[0][2]
     assert "--no-rebuttal" not in " ".join(advisory[0])
 
 

@@ -374,3 +374,36 @@ def test_the_timeout_message_names_the_magi_budget(tmp_path):
     with pytest.raises(RunnerError) as e:
         execute(_approved().item, _cfg(tmp_path), run_subprocess=fake_run)
     assert str(MAGI_TIMEOUT_SECONDS) in str(e.value)
+
+def _approved_own_mr(number=1):
+    """A magi row on an AUTHORED MR -- assess_own_mr and the post-feedback
+    chain both emit kind="mr" (only assess_review_request emits
+    kind="review_request"), so this fixture stands for both sources."""
+    return QueueRecord(
+        number=number, first_seen=NOW, last_seen=NOW,
+        item=WorkItem(schema_version=1, id=f"magi:pb-www!{number}@s1",
+                      repo="pb-www", kind="mr",
+                      executor="magi-review", risk="low", why="",
+                      web_url="https://gl/x/-/merge_requests/4020",
+                      sha="s1", status="approved"))
+
+
+def test_an_authored_mr_review_never_stages_drafts(tmp_path):
+    """Chandler, 2026-08-26: "we don't review our own MRs, we just fix the
+    problems" -- a magi run on an authored MR (kind="mr": assessed OR
+    post-feedback-chained) produces the report ONLY. `--draft-findings`
+    would stage self-addressed review comments on our own MR."""
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append((tuple(cmd), kw.get("cwd")))
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    (tmp_path / "pb-www").mkdir()
+    (tmp_path / "pb-www" / ".magi").mkdir()
+    (tmp_path / "pb-www" / ".magi" / "tribunal-report-mr-4020-2026-08-07.md"
+     ).write_text("## Verdict\nSHIP\n")
+    execute(_approved_own_mr().item, _cfg(tmp_path), run_subprocess=fake_run)
+    prompt = calls[1][0][2]
+    assert prompt == "/magi:magi-review !4020"
+    assert "--draft-findings" not in prompt

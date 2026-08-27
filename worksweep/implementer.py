@@ -4,7 +4,8 @@ One approved assigned issue in, one Draft MR out:
 
     slot pick -> branch -> `claude -p "/rubric:do #<iid>"` -> verify commits
     -> push -> sync the claimed dev box -> Draft MR (with the dev URL)
-    -> `/magi:magi-review !<mr> --advisory --draft-findings` (advisory + pending drafts, never auto-fixes)
+    -> `/magi:magi-review !<mr> --advisory` (advisory report only -- our own MR, so no
+       draft comments: findings feed fixes, not self-review)
 
 Everything that touches the world is injected (`run_subprocess`, `run_ssh`,
 `http_get`) so the test suite never shells out, never sshs, and never opens a
@@ -645,7 +646,7 @@ def _magi_advisory(checkout: str, cfg, mr_iid: int,
             # `--no-rebuttal` removed with magi 0.2.4 (see runner.execute):
             # the rebuttal round is mechanical now and the flag is gone.
             [cfg.claude_bin, "-p",
-             f"/magi:magi-review !{mr_iid} --advisory --draft-findings"],
+             f"/magi:magi-review !{mr_iid} --advisory"],
             run_subprocess, cwd=checkout, timeout=_magi_timeout(cfg))
         if proc.returncode != 0:
             # f-023: nested same-type quotes inside an f-string are a 3.12+

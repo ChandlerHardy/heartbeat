@@ -300,12 +300,18 @@ def execute(item: WorkItem, cfg,
     if fetch.returncode != 0:
         raise RunnerError(f"git fetch failed: {(fetch.stderr or '').strip()[-300:]}")
     try:
+        # `--draft-findings` stages pending review comments -- a channel to
+        # OTHER authors, so it applies only to review-requested MRs
+        # (kind="review_request"). On an AUTHORED MR (kind="mr": assessed or
+        # post-feedback-chained) the findings' consumer is us -- the report
+        # alone is the output, and the fixes happen in a fix round (Chandler,
+        # 2026-08-26: "we don't review our own MRs, we just fix the
+        # problems"). `--no-rebuttal` is gone as of magi 0.2.4 -- the rebuttal
+        # round is performed mechanically now, and passing a flag it no longer
+        # defines is an unknown-argument error, not a no-op.
+        drafts = " --draft-findings" if item.kind == "review_request" else ""
         proc = run_subprocess(
-            # unattended: stage Warnings as pending drafts, never publish.
-            # `--no-rebuttal` is gone as of magi 0.2.4 -- the rebuttal round is
-            # performed mechanically now, and passing a flag it no longer
-            # defines is an unknown-argument error, not a no-op.
-            [cfg.claude_bin, "-p", f"/magi:magi-review !{iid} --draft-findings"],
+            [cfg.claude_bin, "-p", f"/magi:magi-review !{iid}{drafts}"],
             cwd=checkout, capture_output=True, text=True,
             stdin=subprocess.DEVNULL,  # claude -p blocks/exits 1 waiting on a non-TTY stdin
             timeout=timeout)
