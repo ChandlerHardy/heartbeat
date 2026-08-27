@@ -69,6 +69,16 @@ _CSS_ARTIFACT_RE = re.compile(
     r"^www/home/(css/style\.css(\.map)?|dealer/[^/]+/style\.css(\.map)?)$")
 
 
+# How git reports a branch that no longer exists on the remote. Matched
+# narrowly: any OTHER fetch failure (DNS, auth, a wedged remote) says nothing
+# about the merge request and must stay the loud error it always was.
+_NO_REMOTE_REF_RE = re.compile(r"couldn't find remote ref", re.I)
+
+
+def branch_is_gone(stderr: str) -> bool:
+    return bool(_NO_REMOTE_REF_RE.search(stderr or ""))
+
+
 def safe_conflicts(files: Sequence[str]) -> bool:
     """True when every conflicted file is in a merge-master Step 1b
     auto-resolvable class. Empty list -> False (a failed merge with no
@@ -87,6 +97,7 @@ class KeepCurrentResult:
     result_sha: str = ""   # branch HEAD after merge (+ scss commit) and push
     dev_url: str = ""      # the synced box's url, "" when box_name == ""
     conflicts_resolved: tuple = ()  # files claude auto-resolved, () = clean merge
+    mr_merged: bool = False   # the MR finished and took its branch with it
 
 
 def iid_of(item: WorkItem) -> int:
@@ -103,7 +114,8 @@ def execute(item: WorkItem, cfg, boxes: Sequence[dict],
             run_subprocess: Callable = subprocess.run,
             run_ssh_probe: Callable[[str, str], str] = None,
             run_ssh: Callable[[str, str], str] = None,
-            http_get: Callable[[str], int] = None) -> KeepCurrentResult:
+            http_get: Callable[[str], int] = None,
+            run_glab: Callable = None) -> KeepCurrentResult:
     """Bring one stale authored MR's branch current with master. See the
     module docstring for the two-outcome contract."""
     checkout = checkouts.worktree_for(cfg, item.repo, "keep-current",
@@ -118,7 +130,8 @@ def execute(item: WorkItem, cfg, boxes: Sequence[dict],
                           f"(WorkItem.branch was not set by assess_stale)")
     try:
         return _execute_in(item, cfg, boxes, checkout, iid, branch,
-                           run_subprocess, run_ssh_probe, run_ssh, http_get)
+                           run_subprocess, run_ssh_probe, run_ssh, http_get,
+                           run_glab)
     finally:
         # This worktree is permanent, so holding the branch after the merge
         # blocks any LATER executor that wants it in a different worktree.
@@ -132,7 +145,8 @@ def execute(item: WorkItem, cfg, boxes: Sequence[dict],
 def _execute_in(item: WorkItem, cfg, boxes: Sequence[dict], checkout: str,
                 iid: int, branch: str, run_subprocess: Callable,
                 run_ssh_probe: Callable, run_ssh: Callable,
-                http_get: Callable) -> KeepCurrentResult:
+                http_get: Callable,
+                run_glab: Callable = None) -> KeepCurrentResult:
 
     # review fix I4: this worktree is reused run over run -- a prior claim
     # that timed out mid-merge, or crashed mid-compile, can leave it with a
@@ -142,8 +156,21 @@ def _execute_in(item: WorkItem, cfg, boxes: Sequence[dict], checkout: str,
     # branch.
     _preflight_clean(run_subprocess, checkout)
 
-    _git(run_subprocess, checkout, ["fetch", "origin", "master", branch],
-        timeout=_FETCH_TIMEOUT)
+    fetch = _run(["git", "-C", checkout, "fetch", "origin", "master", branch],
+                 run_subprocess, timeout=_FETCH_TIMEOUT)
+    if fetch.returncode != 0:
+        out = f"{fetch.stderr or ''}{fetch.stdout or ''}"
+        # A branch that is simply GONE is the ordinary end of an MR's life:
+        # GitLab deletes the source branch on merge. Reported as a fetch
+        # failure it looked identical to a broken remote, so the row went
+        # `error` and -- since the sweep only queries OPEN MRs -- stayed there
+        # forever (!3997 / #209). Ask before assuming.
+        if branch_is_gone(out) and run_glab is not None:
+            from .collectors import is_closed_state, mr_state
+            if is_closed_state(mr_state(run_glab, item.repo, iid)):
+                return KeepCurrentResult(iid=iid, ahead_count=0, box_name="",
+                                         scss_recompiled=False, mr_merged=True)
+        raise RunnerError(f"git fetch failed: {_tail(out)}")
     checkouts.checkout_branch(cfg, checkout, branch, f"origin/{branch}",
                               run_subprocess)
     pre = _git(run_subprocess, checkout, ["rev-parse", "HEAD"]).strip()

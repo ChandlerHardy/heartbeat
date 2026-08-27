@@ -620,3 +620,122 @@ def test_a_failing_detach_never_masks_the_merge_result(tmp_path):
                      run_ssh_probe=edges.ssh, run_ssh=edges.ssh,
                      http_get=edges.http)
     assert result.iid == 4020
+
+
+# --- the branch is gone because the MR merged (live: !3997, 2026-08-27) ----
+#
+# The merge deleted refactor/1681-analytics-feed-data-debt, so the very first
+# git call failed with "couldn't find remote ref" and the row went `error`.
+# That is a correct diagnosis of a fetch and a wrong one of the situation:
+# there is nothing left to keep current, and nothing went wrong.
+
+_NO_REF = ("fatal: couldn't find remote ref "
+           "refactor/1681-analytics-feed-data-debt\n")
+
+
+class _GoneBranch(_Edges):
+    """Fetch fails the way a deleted branch actually fails."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.fetch_stderr = kw.get("fetch_stderr", _NO_REF)
+
+    def run(self, cmd, **kw):
+        c = list(cmd)
+        if c[:2] == ["git", "-C"] and c[3:4] == ["fetch"]:
+            self.calls.append((c, kw))
+            return subprocess.CompletedProcess(c, 128, stdout="",
+                                               stderr=self.fetch_stderr)
+        return super().run(cmd, **kw)
+
+
+def _glab_state(state="merged", raises=None):
+    calls = []
+
+    def run_glab(args, body=None):
+        calls.append(list(args))
+        if raises is not None:
+            raise raises
+        import json as _json
+        return _json.dumps({"state": state})
+    run_glab.calls = calls
+    return run_glab
+
+
+def _run_gone(tmp_path, edges=None, glab=None):
+    root = tmp_path / "pb-www"
+    root.mkdir(exist_ok=True)
+    edges = edges or _GoneBranch()
+    edges.checkout = str(_worktree(tmp_path))
+    return execute(_item(), _cfg(tmp_path), _BOXES,
+                   run_subprocess=edges.run, run_ssh_probe=edges.ssh,
+                   run_ssh=edges.ssh, http_get=edges.http,
+                   run_glab=glab or _glab_state("merged")), edges
+
+
+def test_a_merged_mr_with_a_deleted_branch_is_a_finished_item(tmp_path):
+    """FALSIFYING. This is #209: the fetch failure was reported as a failure
+    when the MR had simply merged."""
+    glab = _glab_state("merged")
+    result, _ = _run_gone(tmp_path, glab=glab)
+    assert result.mr_merged is True
+    assert result.iid == 4020
+    assert glab.calls[0][1].endswith("/merge_requests/4020")
+
+
+def test_a_closed_mr_with_a_deleted_branch_is_finished_too(tmp_path):
+    result, _ = _run_gone(tmp_path, glab=_glab_state("closed"))
+    assert result.mr_merged is True
+
+
+def test_a_deleted_branch_on_an_OPEN_mr_is_still_a_loud_error(tmp_path):
+    """The important half. A branch that vanished from under an open MR is a
+    real problem, and answering it with a cheerful completion would bury it."""
+    with pytest.raises(RunnerError) as e:
+        _run_gone(tmp_path, glab=_glab_state("opened"))
+    assert "couldn't find remote ref" in str(e.value)
+
+
+def test_a_failed_state_probe_keeps_the_original_error(tmp_path):
+    """Fail-safe: not knowing the MR merged leaves the fetch failure exactly
+    as loud as it was."""
+    with pytest.raises(RunnerError) as e:
+        _run_gone(tmp_path, glab=_glab_state(raises=RuntimeError("glab down")))
+    assert "couldn't find remote ref" in str(e.value)
+
+
+def test_an_unrelated_fetch_failure_is_never_treated_as_a_merge(tmp_path):
+    """Only the missing-ref shape asks the question. A network failure is not
+    evidence of anything about the MR."""
+    edges = _GoneBranch(fetch_stderr="fatal: unable to access: Could not "
+                                     "resolve host: gitlab.com\n")
+    probe = _glab_state("merged")
+    with pytest.raises(RunnerError) as e:
+        _run_gone(tmp_path, edges=edges, glab=probe)
+    assert "Could not resolve host" in str(e.value)
+    assert probe.calls == []                  # never even asked
+
+
+def test_the_merged_shortcut_does_no_git_work_and_no_box_sync(tmp_path):
+    result, edges = _run_gone(tmp_path)
+    assert result.ahead_count == 0
+    assert result.box_name == ""
+    assert edges.ssh_calls == []
+    # no merge, no push, no branch switch. The `checkout --detach` from the
+    # worktree-release fix still runs -- that is cleanup, not work.
+    later = [c for c, _ in edges.calls
+             if c[3:4] in (["merge"], ["push"])
+             or (c[3:4] == ["checkout"] and "--detach" not in c)]
+    assert later == []
+
+
+def test_without_a_glab_edge_the_fetch_failure_stands(tmp_path):
+    """Unwired probe must not silently become "assume merged"."""
+    root = tmp_path / "pb-www"
+    root.mkdir(exist_ok=True)
+    edges = _GoneBranch()
+    edges.checkout = str(_worktree(tmp_path))
+    with pytest.raises(RunnerError):
+        execute(_item(), _cfg(tmp_path), _BOXES, run_subprocess=edges.run,
+                run_ssh_probe=edges.ssh, run_ssh=edges.ssh,
+                http_get=edges.http)

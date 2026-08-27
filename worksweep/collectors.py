@@ -295,6 +295,57 @@ def parse_unaddressed_count(raw_json, username: str) -> int:
     return len(unaddressed_threads(raw_json, username))
 
 
+# --- is this MR still open? ------------------------------------------------
+#
+# The sweep only ever queries OPEN merge requests, so the moment one merges its
+# rows stop being emitted -- and anything retained (error, needs-input,
+# approved) is stranded with no path back. That is how a keep-current row for
+# !3997 sat in `error` forever after the merge deleted its branch. Answering
+# the question takes one targeted GET.
+_CLOSED_STATES = ("merged", "closed")
+
+
+def parse_mr_state(raw_json: str) -> str:
+    """The MR's `state`, lower-cased. "" when the payload is unusable.
+
+    "" means "we do not know", and every caller treats that as "leave it
+    alone": closing a row on a failed probe is a worse failure than retaining
+    one, because a retained row is visible and a wrongly-closed one is not.
+    """
+    try:
+        data = json.loads(raw_json)
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    state = data.get("state")
+    return state.lower() if isinstance(state, str) else ""
+
+
+def is_closed_state(state: str) -> bool:
+    """Whether this state means the MR is finished with. `locked` is not:
+    it is an open MR somebody paused, and its work still stands."""
+    return (state or "").lower() in _CLOSED_STATES
+
+
+def mr_state(run_glab: Callable, repo: str, iid: int) -> str:
+    """One MR's state through an injected glab edge. Never raises -- a probe
+    is a nicety, not the work, so a failure reads as "unknown"."""
+    try:
+        raw = run_glab(["api", f"projects/{_project(repo)}"
+                               f"/merge_requests/{int(iid)}"])
+    except Exception as e:
+        print(f"worksweep: MR state probe for {repo}!{iid} failed: "
+              f"{type(e).__name__}: {e}", file=sys.stderr)
+        return ""
+    return parse_mr_state(raw)
+
+
+def collect_mr_state(repo: str, iid: int) -> str:
+    """Shell edge for the sweep: the same probe over `_run_glab`."""
+    return mr_state(lambda args, body=None: _run_glab(args), repo, iid)
+
+
 def collect_discussions(repo: str, iid: int) -> tuple:
     """Shell edge: every page of an MR's discussions, returned RAW.
 

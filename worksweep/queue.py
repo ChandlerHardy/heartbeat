@@ -55,7 +55,12 @@ _WHY_SENSITIVE = ("address-feedback",)
 # Bookkeeping worksweep appends to a why-string. Never part of the ask.
 _PROBE_FAILED_MARKER = "(probe failed)"
 # Resolution reasons strong enough to close an already-`error` row rather than
-# retain it. Deliberately narrow: only "the signal is provably gone".
+# retain it. Deliberately narrow: each one means "the work provably no longer
+# exists" -- the signal cleared on its own, or the MR merged/closed and took
+# the whole question with it. `error` is in _TERMINAL, so without this the
+# generic branch below skips it and the row is retained forever: that is how a
+# keep-current row for !3997 sat in `error` after its branch was deleted by
+# the merge.
 #
 # `needs-input` needs no entry here and must not gain one: it is NOT in
 # _TERMINAL, so the ordinary resolution branch below already closes it. That
@@ -64,7 +69,7 @@ _PROBE_FAILED_MARKER = "(probe failed)"
 # something nobody can act on, and would otherwise sit on the dashboard
 # forever. Adding `needs-input` to _TERMINAL would silently re-strand it,
 # which is what test_a_parked_question_closes_when_its_signal_clears guards.
-_CLOSES_AN_ERROR = ("signal-cleared",)
+_CLOSES_AN_ERROR = ("signal-cleared", "mr-merged")
 _COMPACT_AFTER_DAYS = 90
 
 

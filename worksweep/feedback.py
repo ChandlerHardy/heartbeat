@@ -75,7 +75,9 @@ from dataclasses import dataclass
 from typing import Callable, List, Sequence
 
 from . import checkouts, collectors
-from .keepcurrent import _git, _preflight_clean, _run, iid_of
+from . import keepcurrent
+from .keepcurrent import (_git, _preflight_clean, _run,
+                          iid_of)
 from .models import ReviewThread, WorkItem
 from .runner import NeedsInputError, RunnerError
 
@@ -155,6 +157,7 @@ class FeedbackResult:
     replies: tuple = ()            # what was actually said, in his name
     result_sha: str = ""           # origin/<branch> as this run left it
     already_answered: bool = False  # nothing was waiting by the time we ran
+    mr_merged: bool = False        # the MR finished and took its branch away
 
 
 def _fetch_threads(run_glab: Callable, repo: str, iid: int) -> tuple:
@@ -316,8 +319,17 @@ def _execute_in(item: WorkItem, cfg, checkout: str, iid: int, branch: str,
     report_path = os.path.join(checkout, _REPORT_NAME)
     _forget(report_path)
 
-    _git(run_subprocess, checkout, ["fetch", "origin", branch],
-         timeout=_FETCH_TIMEOUT)
+    fetch = _run(["git", "-C", checkout, "fetch", "origin", branch],
+                 run_subprocess, timeout=_FETCH_TIMEOUT)
+    if fetch.returncode != 0:
+        out = f"{fetch.stderr or ''}{fetch.stdout or ''}"
+        # Same ending as keep-current's: GitLab deletes the source branch on
+        # merge, so a gone branch is the MR finishing, not a broken remote.
+        # Threads on a merged MR are nobody's move any more.
+        if keepcurrent.branch_is_gone(out) and collectors.is_closed_state(
+                collectors.mr_state(run_glab, item.repo, iid)):
+            return FeedbackResult(iid=iid, mr_merged=True)
+        raise RunnerError(f"git fetch failed: {_tail(out)}")
     checkouts.checkout_branch(cfg, checkout, branch, f"origin/{branch}",
                               run_subprocess)
     pre_refs = _ls_remote(run_subprocess, checkout)
@@ -747,6 +759,10 @@ def done_message(result: FeedbackResult) -> str:
     is not a thing this executor can do. Chandler auditing the actual words,
     on his phone, the moment they go out, IS the review step.
     """
+    if result.mr_merged:
+        # An ending, not a failure. This used to surface as a ⚠️ fetch error.
+        return (f"\u2705 !{result.iid} merged \u2014 branch gone, its threads "
+                f"are nobody's move now")
     msg = f"\U0001f4ac !{result.iid} \u2014 {tally(result)}"
     for line in _capped(result.replies):
         msg += f"\nsaid: {line}"
