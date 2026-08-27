@@ -2583,7 +2583,13 @@ def test_js_assertions_are_scoped_below_htmx():
         assert token in page, token                     # htmx really is there
         assert token not in _script(page), token        # and we scope past it
     assert _script(page).endswith("})();\n")
+    # Our own block must never contain the literal opening tag -- not because
+    # HTML minds (only `</script` closes an element) but because _script()
+    # finds the LAST one, so a stray mention in a comment would silently scope
+    # every JS assertion in this file to a fragment of itself.
     assert "<script" not in _script(page)
+    assert "<script" not in dashboard._BODY_SCRIPT
+    assert "<script" not in dashboard._HEAD_SCRIPT
 
 
 def test_missing_htmx_asset_fails_at_import(tmp_path):
@@ -2721,23 +2727,29 @@ def test_actions_refresh_fragments_not_the_page():
     js = _script(page).replace(" ", "").replace("\n", "")
     assert "location.reload" not in js
     assert "location.reload" in page             # ...but htmx's own still is
-    assert ("if(r.status===200){inflight=false;clearSelection();"
-            "applyFragments();return;}") in js
+    assert ("if(r.status===200){inflight=false;"
+            "try{clearSelection();applyFragments();}") in js
     assert "htmx.ajax('GET','/fragments',{target:'body',swap:'none'})" in js
 
 
 def test_deferred_swap_holds_and_drains():
     """Falsifying, four ways. The hold stops rows shifting under a half-built
     selection; the chip stops the hold being SILENT (the original bug); and the
-    three drain paths stop the hold being PERMANENT (the same bug, reborn).
-    Deleting any one drain path fails exactly one of these assertions."""
+    drain paths stop the hold being PERMANENT (the same bug, reborn). Deleting
+    any one fails exactly one of these assertions.
+
+    Two of the three drains are live. The confirm-close one is a belt:
+    confirm() blocks the JS thread, so nothing can set `pending` while the
+    dialog is open. It is pinned anyway because that is a property of
+    confirm(), not of our code -- swap in a non-blocking dialog and it becomes
+    the only thing standing between a held update and a permanent hold."""
     js = _script(_page([_rec(1)])).replace(" ", "").replace("\n", "")
     # hold + visible chip
     assert "if(inflight||(!force&&busy())){pending=true;chip(true);return;}" in js
     assert "functionchip(on){varc=document.getElementById('pending');if(c){c.hidden=!on;}}" in js
     # drain 1: the last checkbox came off
     assert "if(pending&&selected().length===0){applyFragments();}" in js
-    # drain 2: the confirm dialog closed, either way
+    # drain 2 (belt): the confirm dialog closed, either way
     assert "confirming=false;if(pending){applyFragments();}" in js
     # drain 3: the user tapped the chip -- which forces past the selection
     # guard, because tapping it IS the request to update now
@@ -2962,7 +2974,8 @@ def test_sse_error_falls_back_to_fragment_poll():
     # poll on every transient blip would give the page two refresh paths at once
     assert "es.onerror=function(){if(es.readyState===2){armPoll();}};" in js
     assert "if(!window.EventSource){armPoll();return;}" in js
-    assert js.count("armPoll();") == 2           # exactly those two, nowhere else
+    # the two transport-failure arms, plus the durable-approve degradation
+    assert js.count("armPoll();") == 3
     assert "location.reload" not in js
     assert "location.reload" in page             # ...still htmx's own
     assert js.count("addEventListener(") == 2    # htmx.on keeps the budget
@@ -3301,3 +3314,115 @@ def test_a_chunked_sweep_is_refused_and_kicks_nothing(serve_queue):
     # framing and not the route
     assert s.sweep()[0] == 202
     assert kicks == [1]
+
+
+def test_refreshes_are_single_flight():
+    """Finding 6. Two /fragments requests in the air at once race, and the page
+    settles on whichever RESPONSE lands last -- which is not necessarily the
+    one that read the queue last. A burst (stream event, then a poll, then an
+    action) would leave the page showing the older of two states, permanently."""
+    js = _script(_page([_rec(1)])).replace(" ", "").replace("\n", "")
+    assert "functionswapInFlight(){returncycle!==settled;}" in js
+    assert "if(swapInFlight()){pending=true;return;}" in js
+    # the guard is claimed BEFORE the request goes out, or it guards nothing
+    i = js.index("if(swapInFlight()){pending=true;return;}")
+    assert i < js.index("htmx.ajax('GET','/fragments'")
+    assert "varmine=++cycle;" in js
+    # settled can only ever move FORWARD to the cycle that finished, so a late
+    # settle from an old request cannot release a newer one's guard
+    assert "if(settled<mine){settled=mine;}" in js
+
+
+def test_the_after_swap_hook_applies_once_per_refresh():
+    """Finding 7. The vendored htmx 2.0.7 source fires afterSwap exactly once,
+    on the ajax target, even for swap:'none' -- settleInfo is {tasks:[],
+    elts:[target]}. That stays the primary contract. This guard is what makes
+    being WRONG about it merely wasteful instead of silently corrupting: a
+    second application would re-apply a stale `carried` over a page the user
+    has since touched, and double-drain `pending`."""
+    js = _script(_page([_rec(1)])).replace(" ", "").replace("\n", "")
+    hook = js[js.index("htmx.on('htmx:afterSwap',function(){"):]
+    assert hook.startswith("htmx.on('htmx:afterSwap',function(){"
+                           "if(!swapInFlight()){return;}settled=cycle;"), hook[:120]
+
+
+def test_a_failed_refresh_is_visible_and_retryable():
+    """Finding 5. A refresh that never lands used to leave the page silently
+    stale AND wedge the single-flight guard shut. Now it puts the chip up,
+    which is both the notification and the retry."""
+    js = _script(_page([_rec(1)])).replace(" ", "").replace("\n", "")
+    assert ("functionswapFailed(){if(!swapInFlight()){return;}"
+            "settled=cycle;pending=true;chip(true);}") in js
+    assert "htmx.on('htmx:responseError',swapFailed);" in js
+    assert "htmx.on('htmx:sendError',swapFailed);" in js
+    # and the promise settles the guard whatever happens, so a response htmx
+    # never turns into an event cannot lock the page out of refreshing forever
+    assert ".then(settle,settle);" in js
+
+
+def test_a_swap_reconciles_the_sync_button_state():
+    """Finding 4. `syncing` is client-side memory of a sweep that was kicked.
+    The swapped-in header is server truth and its button is fresh, so a stale
+    flag would keep re-disabling it and leave Sync dead for up to SYNC_MAX_MS
+    -- 80 seconds after the sweep it was waiting for already landed."""
+    js = _script(_page([_rec(1)])).replace(" ", "").replace("\n", "")
+    hook = js[js.index("htmx.on('htmx:afterSwap',function(){"):]
+    hook = hook[:hook.index("});")]
+    assert "syncing=false;" in hook
+
+
+def test_an_uncheck_during_a_refresh_is_never_reverted():
+    """Finding 14 (security). `carried` is captured before the request and
+    re-applied after the swap. A box the user unticks WHILE that request is in
+    the air would be silently re-ticked by the re-apply -- putting a row the
+    user explicitly refused back on offer, and back into the next submitted
+    set. An explicit deselection must win over a stale capture."""
+    js = _script(_page([_rec(1)])).replace(" ", "").replace("\n", "")
+    # Asserted INSIDE the delegated change handler -- at the moment of the
+    # click, not reconstructed afterwards from a DOM that has since been
+    # swapped -- and as one contiguous block, so a dead `if(false)` around it
+    # cannot pass by matching the single-flight guard in applyFragments().
+    change = js[js.index("document.addEventListener('change',"):]
+    assert ("if(swapInFlight()){"
+            "varv=parseInt(b.value,10);"
+            "carried=carried.filter(function(x){returnx!==v;});"
+            "if(b.checked){carried.push(v);}"
+            "}") in change
+
+
+def test_a_durable_approve_never_reports_itself_as_failed():
+    """Finding 8. send()'s catch covers the whole promise chain, so a DOM error
+    in the post-200 follow-up would surface as "Request failed" for an approval
+    that is already durable on disk -- and the honest reaction to that message
+    is to approve it again."""
+    js = _script(_page([_rec(1)])).replace(" ", "").replace("\n", "")
+    assert ("try{clearSelection();applyFragments();}"
+            "catch(err){pending=true;chip(true);armPoll();}") in js
+    i = js.index("try{clearSelection();applyFragments();}")
+    assert i < js.index(".catch(function(e){inflight=false;alert('Requestfailed:'")
+
+
+def test_htmx_is_configured_shut_before_it_is_used():
+    """Finding 12, defense in depth. Our fragments carry no <script> and every
+    request this page makes is same-origin; saying so means a malformed or
+    tampered response cannot smuggle one past htmx's defaults, which allow both.
+    Verified against the vendored source: 2.0.7 ships allowScriptTags:true and
+    selfRequestsOnly:true, so one of these is a change and one is a pin."""
+    js = _script(_page([_rec(1)])).replace(" ", "").replace("\n", "")
+    assert "htmx.config.allowScriptTags=false;" in js
+    assert "htmx.config.selfRequestsOnly=true;" in js
+    # set before the first request this page could ever make
+    assert js.index("htmx.config.allowScriptTags") < js.index("htmx.ajax(")
+    assert js.index("htmx.config.allowScriptTags") < js.index("newEventSource(")
+    src = open(_static("htmx.min.js")).read()
+    assert "allowScriptTags:true" in src        # the default we are overriding
+    assert "selfRequestsOnly:true" in src       # the default we are pinning
+
+
+def test_the_vendored_pin_records_a_second_source():
+    """A sha256 you can only check against the CDN you fetched from proves
+    nothing about that CDN. Two independent CDNs agreeing does."""
+    pin = open(_static("htmx.version")).read()
+    assert "cdn.jsdelivr.net" in pin
+    assert "unpkg.com" in pin
+    assert _HTMX_SHA256 in pin

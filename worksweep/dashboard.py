@@ -823,6 +823,17 @@ _BODY_SCRIPT = """
   var polling=false;
   // The selection captured just before a swap, re-applied just after.
   var carried=[];
+  // Single-flight bookkeeping. `cycle` counts refreshes issued, `settled`
+  // counts refreshes dealt with; they differ exactly while one is in the air.
+  // Counters rather than a boolean so a LATE settle from an old request can
+  // never release the guard belonging to a newer one.
+  var cycle=0,settled=0;
+
+  // Defense in depth, set before this page can make a single request. Our
+  // fragments carry no script tags and everything we fetch is same-origin, so
+  // say so: htmx 2.0.7 ships allowScriptTags:true, and a malformed or tampered
+  // response should not be able to smuggle one past a default we do not need.
+  try{htmx.config.allowScriptTags=false;htmx.config.selfRequestsOnly=true;}catch(e){}
 
   function scope(){
     return document.querySelector(root.getAttribute('data-layout')==='branches'?'.branches':'.sections');
@@ -927,7 +938,17 @@ _BODY_SCRIPT = """
         // The rows just acted on are no longer on offer, so the selection
         // that submitted them is spent. Clear it BEFORE refreshing or the
         // deferred-swap guard would hold the very update just asked for.
-        if(r.status===200){inflight=false;clearSelection();applyFragments();return;}
+        //
+        // Wrapped, because by this point the write is DURABLE on the server. A
+        // DOM error in the follow-up would otherwise fall into the .catch below
+        // and tell the user their approval failed -- and the honest reaction to
+        // that message is to approve it again. Degrade to the poll instead and
+        // put the chip up: slower, visible, and true.
+        if(r.status===200){
+          inflight=false;
+          try{clearSelection();applyFragments();}catch(err){pending=true;chip(true);armPoll();}
+          return;
+        }
         inflight=false;alert('Request failed ('+r.status+')');refresh();
       })
       .catch(function(e){inflight=false;alert('Request failed: '+e);refresh();});
@@ -947,6 +968,16 @@ _BODY_SCRIPT = """
     var c=document.getElementById('pending');
     if(c){c.hidden=!on;}
   }
+  function swapInFlight(){return cycle!==settled;}
+  // Never silent. The chip is both the notification and the retry: tapping it
+  // asks again. Without this the single-flight guard would also stay claimed,
+  // and one failed fetch would lock the page out of refreshing forever.
+  function swapFailed(){
+    if(!swapInFlight()){return;}
+    settled=cycle;pending=true;chip(true);
+  }
+  htmx.on('htmx:responseError',swapFailed);
+  htmx.on('htmx:sendError',swapFailed);
   function applyFragments(force){
     // Rows shifting under a half-built selection, an open confirm dialog or an
     // in-flight POST is exactly what the old busy() guard rightly prevented --
@@ -954,14 +985,37 @@ _BODY_SCRIPT = """
     // so on the chip. `force` is the chip's own tap: asking for it explicitly.
     // An in-flight POST is never forced past; it ends in its own refresh.
     if(inflight||(!force&&busy())){pending=true;chip(true);return;}
+    // Single-flight. Two requests in the air race, and the page would settle
+    // on whichever RESPONSE landed last -- not necessarily the one that read
+    // the queue last. A burst (stream event, then a poll, then an action)
+    // could therefore leave the page showing the older of two states,
+    // permanently. Queue it instead; the swap hook drains it one round trip
+    // later, so no chip: this is not a hold the user needs to know about.
+    if(swapInFlight()){pending=true;return;}
+    var mine=++cycle;
     // Captured BEFORE the request: rows that come back are re-checked by
     // value, rows that vanished simply drop out. The server re-validates every
     // number on POST, so consent enforcement never rests on this.
     carried=selected();
-    htmx.ajax('GET','/fragments',{target:'body',swap:'none'});
+    // Settles the guard however the request ends, including the case where
+    // htmx returns a response it never turns into an event. Only ever moves
+    // FORWARD, so a late settle cannot release a newer request's guard.
+    var settle=function(){if(settled<mine){settled=mine;}};
+    htmx.ajax('GET','/fragments',{target:'body',swap:'none'}).then(settle,settle);
   }
+  // htmx 2.0.7 fires this exactly once, on the ajax target, even for
+  // swap:'none' -- its settle info is {tasks:[],elts:[target]}. That is the
+  // contract this hook is built on. The guard on the first line is what makes
+  // being WRONG about it merely wasteful instead of silently corrupting: a
+  // second pass would re-apply a now-stale `carried` over a page the user has
+  // since touched, and drain `pending` twice.
   htmx.on('htmx:afterSwap',function(){
+    if(!swapInFlight()){return;}settled=cycle;
     pending=false;chip(false);
+    // The header that just arrived is server truth, and its Sync button is
+    // fresh. A `syncing` flag left over from a sweep that has since landed
+    // would keep re-disabling it for up to SYNC_MAX_MS after the fact.
+    syncing=false;
     for(var i=0;i<carried.length;i++){
       var twins=document.querySelectorAll('input[type=checkbox][value="'+carried[i]+'"]');
       for(var j=0;j<twins.length;j++){twins[j].checked=true;}
@@ -1022,7 +1076,11 @@ _BODY_SCRIPT = """
     if(!n.length){alert('Nothing is proposed right now.');return;}
     confirming=true;
     var ok=confirm('Approve all '+n.length+' proposed items?');
-    // Drain 2 of 3: the dialog is gone either way, so a held update can land.
+    // A BELT, not a live drain: confirm() blocks this thread, so no stream
+    // event, poll or timer can run between the two lines above and `pending`
+    // cannot become true while the dialog is open. Kept because that is a
+    // property of confirm(), not of this code -- the day the dialog becomes a
+    // non-blocking one, this is the line that stops the hold being permanent.
     confirming=false;
     if(pending){applyFragments();}
     if(!ok){return;}
@@ -1077,8 +1135,8 @@ _BODY_SCRIPT = """
     if(e.target.closest('#approve-selected')){approveSelected();return;}
     if(e.target.closest('#approve-all')){approveAll();return;}
     if(e.target.closest('#sync')){kickSweep();return;}
-    // Drain 3 of 3: tapping the chip IS the request to update now, so it
-    // forces past the selection guard the other two drains wait out.
+    // Drain 2 of 2: tapping the chip IS the request to update now, so it
+    // forces past the selection guard the other drain waits out.
     if(e.target.closest('#pending')){applyFragments(true);return;}
   });
   document.addEventListener('change',function(e){
@@ -1089,7 +1147,18 @@ _BODY_SCRIPT = """
       var twins=document.querySelectorAll('input[type=checkbox][value="'+b.value+'"]');
       for(var i=0;i<twins.length;i++){twins[i].checked=b.checked;}
       refresh();
-      // Drain 1 of 3: nothing is selected any more, so a held update can land
+      // A change made WHILE a refresh is in the air must survive the swap
+      // exactly as the user left it, so record it against the captured set at
+      // the moment of the click rather than reconstructing it afterwards from
+      // a DOM that has since been replaced. A DESELECTION above all:
+      // re-applying a stale capture over one would put a row the user just
+      // refused back on offer, and back into the next submitted set.
+      if(swapInFlight()){
+        var v=parseInt(b.value,10);
+        carried=carried.filter(function(x){return x!==v;});
+        if(b.checked){carried.push(v);}
+      }
+      // Drain 1 of 2: nothing is selected any more, so a held update can land
       // without moving a single row under the user's thumb.
       if(pending&&selected().length===0){applyFragments();}
     }
