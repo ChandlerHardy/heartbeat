@@ -327,3 +327,94 @@ def test_the_run_actually_receives_the_gate(tmp_path):
     prompt = [c for c, _ in edges.calls if c[0] == "claude"][0][2]
     assert "phplib/local/DB/" in prompt
     assert "Leif" in prompt
+
+
+# --- the gate ENFORCED, not just asked for (2026-08-28) -------------------
+#
+# The prompt tells the run to halt before creating an MR on Leif's domain.
+# This is what happens when it does not: the MR already exists, so the only
+# honest outcome is a loud failure naming what has to be unwound.
+
+class _Touched(_Edges):
+    """_Edges whose branch diff reports whatever the test says it changed."""
+
+    def __init__(self, changed=(), diff_rc=0, **kw):
+        super().__init__(**kw)
+        self.changed = list(changed)
+        self.diff_rc = diff_rc
+        self.diff_calls = []
+
+    def run(self, cmd, **kw):
+        c = list(cmd)
+        if c[3:4] == ["diff"] and "--name-only" in c:
+            self.diff_calls.append(c)
+            return subprocess.CompletedProcess(
+                c, self.diff_rc,
+                stdout="\n".join(self.changed) + "\n",
+                stderr="fatal: bad revision 'origin/master'\n")
+        return super().run(cmd, **kw)
+
+
+def test_a_gated_file_in_the_branch_fails_the_run(tmp_path):
+    """FALSIFYING. Without this the pipeline accepts the state file, confirms
+    the Draft, and reports a completed implementation that skipped the gate."""
+    edges = _Touched(changed=["www/home/php/x.php", "phplib/local/DB/Mongo.php"])
+    with pytest.raises(RunnerError) as e:
+        _run(tmp_path, edges=edges)
+    assert "phplib/local/DB/Mongo.php" in str(e.value)
+    assert "domain gate" in str(e.value)
+    assert "Close it and loop Leif in" in str(e.value)
+
+
+def test_the_gate_failure_is_greppable_and_not_a_generic_error(tmp_path):
+    """Its own reason string: this is the one failure Chandler must act on
+    differently from every other ⚠️ -- there is an MR to go close."""
+    from worksweep.implementer import DOMAIN_GATE_VIOLATION
+    edges = _Touched(changed=["db/migrations/x.sql"])
+    with pytest.raises(RunnerError) as e:
+        _run(tmp_path, edges=edges)
+    assert DOMAIN_GATE_VIOLATION in str(e.value)
+
+
+def test_the_diff_is_taken_against_the_merge_base(tmp_path):
+    """Against master's tip, an unrelated master-side Mongo change would fail
+    a perfectly innocent branch."""
+    edges = _Touched(changed=["www/home/php/x.php"])
+    _run(tmp_path, edges=edges)
+    assert edges.diff_calls, "no diff was taken at all"
+    assert "origin/master...HEAD" in edges.diff_calls[0]
+
+
+def test_an_ungated_branch_completes_normally(tmp_path):
+    result, edges = _run(tmp_path, edges=_Touched(
+        changed=["www/home/php/x.php", "phplib/local/Analytics.php"]))
+    assert result.mr_iid == 4099
+
+
+def test_a_test_only_mongo_change_is_allowed_through(tmp_path):
+    """The exclusion has to hold end to end, or "add a test for this" becomes
+    an ask the executor structurally cannot satisfy."""
+    result, _ = _run(tmp_path, edges=_Touched(
+        changed=["test/phpunit/mongo/MongoDuplicateKeyTest.php"]))
+    assert result.mr_iid == 4099
+
+
+def test_the_gate_is_checked_before_the_state_file_is_accepted(tmp_path):
+    """Order matters: reporting "no state file" for a gated run would send
+    Chandler looking for the wrong problem."""
+    edges = _Touched(changed=["phplib/local/DB/Mongo.php"], write_state=None)
+    with pytest.raises(RunnerError) as e:
+        _run(tmp_path, edges=edges)
+    assert "domain gate" in str(e.value)
+    assert "no state file" not in str(e.value)
+
+
+def test_an_unreadable_diff_fails_rather_than_passing(tmp_path):
+    """Not knowing what the branch touched is not the same as knowing it is
+    clean. This check is the only thing between a schema change and an
+    accepted MR, so it fails closed."""
+    from worksweep.implementer import DOMAIN_GATE_VIOLATION
+    with pytest.raises(RunnerError) as e:
+        _run(tmp_path, edges=_Touched(changed=[], diff_rc=128))
+    assert DOMAIN_GATE_VIOLATION in str(e.value)
+    assert "could not diff" in str(e.value)

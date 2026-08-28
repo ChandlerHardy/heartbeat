@@ -36,7 +36,8 @@ from typing import Callable, FrozenSet, List, Optional, Sequence
 
 from . import checkouts, devslots
 from .devslots import DevBox
-from .models import MergeRequest, WorkItem, domain_gate_text
+from .models import (DOMAIN_GATE_OWNER, MergeRequest, WorkItem,
+                     domain_gate_text, touches_domain_gate)
 from .runner import NeedsInputError, RunnerError, extract_verdict, find_report
 
 # `/rubric:do` (via the plan-author agent) stops rather than guessing; these
@@ -45,6 +46,10 @@ HALT_MARKERS = ("HALT_INSUFFICIENT_CONTEXT", "HALT_SPEC_AMBIGUITY")
 _QUESTION_PREFIX = "QUESTION:"
 HALT_EXCERPT_MAX = 700
 _HALT_EXCERPT_LINES = 8
+
+# Own reason string: this is the one failure whose remedy differs from
+# every other ⚠️ -- there is an MR to go close.
+DOMAIN_GATE_VIOLATION = "MR created despite the domain gate"
 
 _TIER_FREE = "free"
 _TIER_HANDED_OFF = "handed_off"
@@ -531,6 +536,13 @@ def _execute_pipeline(cfg, iid: int, slot: DevBox, checkout: str,
         raise RunnerError(f"{cfg.pipeline_command} #{iid} exited "
                           f"{proc.returncode}: {_tail(transcript)}")
 
+    # The prompt ASKS the run to halt before creating an MR on Leif's domain
+    # (see _PIPELINE_CONSTRAINTS). This is the check. It runs BEFORE the state
+    # file is read, so a gated run reports the gate rather than whatever else
+    # happens to be wrong -- otherwise Chandler goes looking for a missing
+    # state file when the real problem is an MR that needs closing.
+    _enforce_domain_gate(checkout, run_subprocess)
+
     state_path, state = _find_pipeline_state(checkout, iid)
     if state is None:
         raise RunnerError(f"pipeline run for #{iid} left no state file under "
@@ -596,6 +608,35 @@ def _forget_pipeline_state(checkout: str, iid: int) -> None:
             os.remove(os.path.join(root, name, "state.md"))
         except OSError:
             pass
+
+
+def _enforce_domain_gate(checkout: str, run_subprocess: Callable) -> None:
+    """Refuse a branch that touched Leif's domain, loudly.
+
+    The MR already exists by the time this runs -- that is the whole problem,
+    and why this is a failure rather than a note. The error names the files so
+    Chandler knows exactly what to unwind, and carries its own reason string
+    because this is the one ⚠️ with a different remedy from all the others:
+    there is an MR out there to go close.
+
+    Three-dot diff: against origin/master's TIP, an unrelated master-side
+    Mongo change would fail a perfectly innocent branch. `...` compares
+    against the merge-base, which is the branch's own work.
+    """
+    diff = _run(["git", "-C", checkout, "diff", "--name-only",
+                 "origin/master...HEAD"], run_subprocess, timeout=_GIT_TIMEOUT)
+    if diff.returncode != 0:
+        # Not knowing is not the same as knowing it is clean.
+        out = f"{diff.stderr or ''}{diff.stdout or ''}"
+        raise RunnerError(f"{DOMAIN_GATE_VIOLATION}: could not diff the branch "
+                          f"to check it: {_tail(out, 5)}")
+    gated = touches_domain_gate((diff.stdout or "").splitlines())
+    if gated:
+        raise RunnerError(
+            f"{DOMAIN_GATE_VIOLATION}: the run opened an MR touching "
+            f"{', '.join(gated)} — {DOMAIN_GATE_OWNER} signs off on that "
+            f"domain BEFORE an MR exists, so this one skipped the gate. "
+            f"Close it and loop {DOMAIN_GATE_OWNER} in.")
 
 
 def _find_pipeline_state(checkout: str, iid: int) -> tuple:
