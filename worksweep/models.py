@@ -23,7 +23,13 @@ _DEV_URL_RE = re.compile(
 # live in ONE place. Two hand-maintained lists would drift the first time a
 # path is added, and the drift would be silent on both sides.
 DOMAIN_GATE_OWNER = "Leif"
-DOMAIN_GATE_PATHS = ("phplib/local/DB/", "phplib/local/*Mongo*", "db/")
+DOMAIN_GATE_PATHS = ("phplib/local/DB/", "phplib/local/*Mongo*", "db/",
+                     # Verified against the real pb-www tree (2026-08-28):
+                     # the numbered Mongo data-migration/backfill scripts live
+                     # here and sat outside every other pattern. A data
+                     # migration is squarely the owner's turf -- arguably more
+                     # so than a code change, since it rewrites live data.
+                     "maintenance/mongodb/**", "maintenance/*mongo*")
 # The exact reason string the feedback executor records, so the Discord
 # escalation line says which gate stopped it rather than just "escalated".
 DOMAIN_GATE_REASON = "touches DB/Mongo domain — Leif gate"
@@ -59,15 +65,22 @@ def touches_domain_gate(paths) -> tuple:
             path = path[2:]
         if not path or path in out:
             continue
-        parts = [c.lower() for c in path.split("/")]
+        lowered = path.lower()
+        parts = lowered.split("/")
         if _TEST_COMPONENTS.intersection(parts):
             continue
-        if path.lower().endswith(_GATED_SUFFIXES):
+        if lowered.endswith(_GATED_SUFFIXES):
             out.append(path)
             continue
+        # Case-insensitive on purpose. The patterns themselves are mixed case
+        # (`*Mongo*` for PHP classes, `*mongo*` for shell scripts), and a
+        # matcher whose answer depends on which one a file happens to resemble
+        # is one that fails quietly the first time somebody names a file
+        # differently than the pattern author expected.
         for pattern in DOMAIN_GATE_PATHS:
-            hit = (path.startswith(pattern) if pattern.endswith("/")
-                   else fnmatch.fnmatch(path, pattern))
+            low_pattern = pattern.lower()
+            hit = (lowered.startswith(low_pattern) if pattern.endswith("/")
+                   else fnmatch.fnmatch(lowered, low_pattern))
             if hit:
                 out.append(path)
                 break

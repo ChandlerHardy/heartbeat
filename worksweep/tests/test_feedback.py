@@ -1656,10 +1656,12 @@ def test_the_gated_path_list_is_pinned_to_the_team_rule():
     """The other gate tests iterate over DOMAIN_GATE_PATHS, so they prove
     "whatever is in the constant reaches both prompts" and nothing about what
     is IN it -- shrinking the list passed all of them. This pins the actual
-    rule: `\\DB\\Mongo`, the DB layer, and migrations."""
+    rule: `\\DB\\Mongo`, the DB layer, migrations, and the Mongo maintenance
+    scripts."""
     from worksweep.models import DOMAIN_GATE_PATHS, DOMAIN_GATE_OWNER
     assert DOMAIN_GATE_PATHS == ("phplib/local/DB/", "phplib/local/*Mongo*",
-                                 "db/")
+                                 "db/", "maintenance/mongodb/**",
+                                 "maintenance/*mongo*")
     assert DOMAIN_GATE_OWNER == "Leif"
 
 

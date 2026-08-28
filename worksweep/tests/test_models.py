@@ -137,3 +137,50 @@ def test_leading_slashes_and_whitespace_do_not_hide_a_gated_file():
         "phplib/local/DB/Mongo.php",)
     assert touches_domain_gate(["./db/migrations/x.sql"]) == (
         "db/migrations/x.sql",)
+
+
+def test_mongo_maintenance_scripts_are_gated():
+    """Verified against the real pb-www tree (2026-08-28): the numbered Mongo
+    data-migration/backfill scripts live under maintenance/mongodb/ and sat
+    outside every gated path. A data migration is squarely the domain-owner's
+    turf -- arguably more so than a code change, since it rewrites live data."""
+    from worksweep.models import touches_domain_gate
+    for path in ("maintenance/mongodb/0008-pop-animal-missing-inv.js",
+                 "maintenance/mongodb/0009-x.js",
+                 "maintenance/mongodb/lib/helper.js",
+                 "maintenance/mongodb-pull",
+                 "maintenance/mongo-restore.sh"):
+        assert touches_domain_gate([path]) == (path,), path
+
+
+def test_other_maintenance_scripts_are_not_gated():
+    """The gate is the Mongo domain, not the maintenance directory."""
+    from worksweep.models import touches_domain_gate
+    for path in ("maintenance/compile-css",
+                 "maintenance/clear-cache.sh",
+                 "maintenance/deploy/rsync.sh"):
+        assert touches_domain_gate([path]) == (), path
+
+
+def test_a_nested_mongo_class_is_gated():
+    """fnmatch's `*` crosses `/`, so the existing phplib glob already reaches
+    the nested API classes -- pinned so a switch to a non-crossing matcher
+    cannot silently narrow the gate."""
+    from worksweep.models import touches_domain_gate
+    path = "phplib/local/Api/V1/Shared/MongoReadQuery.php"
+    assert touches_domain_gate([path]) == (path,)
+
+
+def test_the_gate_does_not_care_about_case():
+    """The patterns are mixed case by necessity -- `*Mongo*` for PHP classes,
+    `*mongo*` for shell scripts. A matcher whose answer depends on which one a
+    file happens to resemble fails quietly the first time somebody names a
+    file differently than the pattern author expected."""
+    from worksweep.models import touches_domain_gate
+    for path in ("phplib/local/mongo_helper.php",
+                 "maintenance/MongoDB/0009-x.js",
+                 "maintenance/MONGO-restore.sh",
+                 "DB/schema.SQL"):
+        assert touches_domain_gate([path]) == (path,), path
+    # and it still does not over-reach on the prefix pattern
+    assert touches_domain_gate(["phplib/local/DBAL.php"]) == ()
