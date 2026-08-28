@@ -79,14 +79,23 @@ class _Glab:
     fake describes a before/after pair.
     """
 
-    def __init__(self, *rounds):
+    def __init__(self, *rounds, reviewers=(), state="opened"):
         self.rounds = [r if isinstance(r, tuple) else (r,)
                        for r in (rounds or ("[]",))]
         self.calls, self.round, self._started = [], 0, False
+        self.reviewers, self.mr_reads, self.state = list(reviewers), 0, state
 
     def __call__(self, args, body=None):
         self.calls.append((list(args), body))
         path = args[1]
+        if "/discussions" not in path:
+            # the plain MR read (reviewer list) -- not a discussions round
+            # ONE payload: the executor reads reviewers from it, and the
+            # merged-MR shortcut reads `state` from the same endpoint.
+            self.mr_reads += 1
+            return json.dumps({"state": self.state,
+                               "reviewers": [{"username": r}
+                                             for r in self.reviewers]})
         page = int(path.rsplit("page=", 1)[1]) if "page=" in path else 1
         if page == 1:
             if self._started:
@@ -223,8 +232,8 @@ def test_feedback_prompt_never_resolves():
     assert "resolved=" not in src
     # and the tally has no room to count one: three outcomes, no fourth
     assert set(feedback.FeedbackResult.__dataclass_fields__) == {
-        "iid", "waiting", "addressed", "replied", "escalated", "replies",
-        "result_sha", "already_answered", "mr_merged"}
+        "iid", "waiting", "addressed", "replied", "noted", "escalated",
+        "replies", "result_sha", "already_answered", "mr_merged"}
 
 
 def _unaddressed(payload, username=ME):
@@ -295,8 +304,8 @@ def test_feedback_refetches_threads_at_run_time(tmp_path, worktree):
                  _payload(_thread("t1", last=ME), _thread("t2", last=ME)))
     feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
                      run_glab=glab, now=lambda: RUN_START)
-    paths = [a[1] for a in [c[0] for c in glab.calls]]
-    assert all("merge_requests/3997/discussions" in p for p in paths)
+    paths = [c[0][1] for c in glab.calls if "/discussions" in c[0][1]]
+    assert paths and all("merge_requests/3997/discussions" in p for p in paths)
     assert glab.rounds_read == 2         # once before the run, once to verify
     # t2 was already answered at run time, so it never reached the prompt
     prompt = [c for c in sub.calls if c[0] == "claude"][0][2]
@@ -401,7 +410,7 @@ def test_feedback_zero_unaddressed_at_run_time_is_a_normal_result(tmp_path,
     assert (result.addressed, result.replied, result.escalated) == (0, 0, ())
     assert sub.ran("claude") == []
     assert feedback.tally(result) == (
-        "0 addressed, 0 replied, 0 escalated — threads already answered")
+        "0 addressed, 0 replied, 0 noted, 0 escalated — threads already answered")
 
 
 # --- AC #18: the timeout comes from cfg -------------------------------------
@@ -455,10 +464,10 @@ def test_a_mixed_run_reports_an_honest_tally(tmp_path, worktree):
     assert (result.addressed, result.replied) == (2, 1)
     assert len(result.escalated) == 1
     assert feedback.tally(result) == (
-        "4 waiting: 2 addressed, 1 replied, 1 escalated")
+        "4 waiting: 2 addressed, 1 replied, 0 noted, 1 escalated")
     msg = feedback.done_message(result)
     assert msg.startswith("💬 !3997")
-    assert "2 addressed, 1 replied, 1 escalated" in msg
+    assert "2 addressed, 1 replied, 0 noted, 1 escalated" in msg
     assert "wants a schema change" in msg          # actionable from a phone
     assert "leyang" in msg
 
@@ -553,7 +562,7 @@ def test_a_thread_listed_twice_is_counted_once(tmp_path, worktree):
                               run_glab=_Glab(before, after), now=lambda: RUN_START)
     assert (result.addressed, result.replied, len(result.escalated)) == (1, 1, 0)
     assert feedback.tally(result) == (
-        "2 waiting: 1 addressed, 1 replied, 0 escalated")
+        "2 waiting: 1 addressed, 1 replied, 0 noted, 0 escalated")
 
 
 # --- pagination at run time (fix-mode round 2, blocker 6) ------------------
@@ -571,7 +580,8 @@ def test_the_run_time_refetch_pages_too(tmp_path, worktree):
                               run_glab=glab, now=lambda: RUN_START)
     assert result.already_answered is False
     assert result.replied == 1
-    pages = [c[0][1].rsplit("page=", 1)[1] for c in glab.calls]
+    pages = [c[0][1].rsplit("page=", 1)[1] for c in glab.calls
+             if "/discussions" in c[0][1]]
     assert pages == ["1", "2", "1", "2"]
 
 
@@ -838,7 +848,7 @@ def test_every_waiting_thread_is_accounted_for(tmp_path, worktree):
     assert len(result.escalated) == 2
     assert all("unaccounted by the run" in e for e in result.escalated)
     assert feedback.tally(result) == (
-        "3 waiting: 0 addressed, 1 replied, 2 escalated")
+        "3 waiting: 0 addressed, 1 replied, 0 noted, 2 escalated")
 
 
 def test_an_unknown_thread_ref_is_counted_not_dropped(tmp_path, worktree):
@@ -867,7 +877,7 @@ def test_the_tally_names_its_denominator(tmp_path, worktree):
                   [_waiting("t1"), _waiting("t2")],
                   [_answered("t1"), _answered("t2")])
     assert feedback.tally(result) == (
-        "2 waiting: 0 addressed, 2 replied, 0 escalated")
+        "2 waiting: 0 addressed, 2 replied, 0 noted, 0 escalated")
     assert feedback.done_message(result).startswith("💬 !3997 — 2 waiting:")
 
 
@@ -885,7 +895,7 @@ def test_the_done_message_caps_how_many_lines_it_renders():
     assert msg.count("needs you: ") == feedback._MAX_POSTED_LINES + 1
     assert msg.count("said: ") == feedback._MAX_POSTED_LINES + 1
     assert msg.count(f"and {20 - feedback._MAX_POSTED_LINES} more") == 2
-    assert "20 waiting: 0 addressed, 1 replied, 20 escalated" in msg
+    assert "20 waiting: 0 addressed, 1 replied, 0 noted, 20 escalated" in msg
 
 
 def test_a_short_run_renders_every_line():
@@ -1402,7 +1412,7 @@ def test_a_merged_mr_ends_the_feedback_run_cleanly(tmp_path, worktree):
             return super().__call__(cmd, **kw)
 
     sub = _Gone(worktree)
-    glab = _Glab(json.dumps({"state": "merged"}))
+    glab = _Glab(state="merged")
     result = feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
                               run_glab=glab, now=lambda: RUN_START)
     assert result.mr_merged is True
@@ -1423,6 +1433,160 @@ def test_a_gone_branch_on_an_open_mr_still_fails_the_feedback_run(tmp_path,
 
     with pytest.raises(RunnerError) as e:
         feedback.execute(_item(), _cfg(tmp_path), run_subprocess=_Gone(worktree),
-                         run_glab=_Glab(json.dumps({"state": "opened"})),
+                         run_glab=_Glab(state="opened"),
                          now=lambda: RUN_START)
     assert "couldn't find remote ref" in str(e.value)
+
+
+# --- plain reviewer notes at run time (live: !4084, 2026-08-28) -----------
+
+REVIEWER = "dasilvaja"
+
+
+def _plain(tid, *authors):
+    """A standalone MR note -- no resolvable notes, so no resolve button."""
+    return {"id": tid, "individual_note": True,
+            "notes": [_tnote(a, f"{a}: two things before merge-ready",
+                             resolvable=False) for a in authors]}
+
+
+def _GlabMR(*rounds, reviewers=(REVIEWER,)):
+    """_Glab with a reviewer listed -- the plain-note shape needs one."""
+    return _Glab(*rounds, reviewers=reviewers)
+
+
+def test_the_run_sees_a_plain_reviewer_note(tmp_path, worktree):
+    """FALSIFYING at the executor: the sweep can propose the row, but if the
+    run-time re-fetch drops the plain note the run finds nothing waiting."""
+    sub = _Subprocess(worktree, report=_report(replied=["t1"]))
+    answered = {"id": "t1", "individual_note": True, "notes": [
+        _tnote(REVIEWER, "two things", resolvable=False),
+        _tnote(ME, "addressed in deadbee", resolvable=False,
+               created_at=DURING_RUN)]}
+    glab = _GlabMR(_payload(_plain("t1", REVIEWER)), _payload(answered))
+    result = feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                              run_glab=glab, now=lambda: RUN_START)
+    assert result.waiting == 1
+    assert result.replied == 1
+    assert glab.mr_reads == 1                # one read for the reviewer list
+
+
+def test_a_plain_note_from_a_non_reviewer_never_reaches_the_run(tmp_path,
+                                                                worktree):
+    sub = _Subprocess(worktree)
+    glab = _GlabMR(_payload(_plain("t1", "some-observer")))
+    result = feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                              run_glab=glab, now=lambda: RUN_START)
+    assert result.already_answered is True
+    assert sub.ran("claude") == []
+
+
+def test_a_failed_reviewer_read_narrows_rather_than_crashes(tmp_path,
+                                                            worktree):
+    """A read we could not do must not widen the thread set -- and must not
+    take the run down either."""
+    class _NoMR(_Glab):
+        def __call__(self, args, body=None):
+            if "/discussions" not in (args[1] if len(args) > 1 else ""):
+                raise RuntimeError("glab down")
+            return super().__call__(args, body)
+
+    sub = _Subprocess(worktree)
+    glab = _NoMR(_payload(_plain("t1", REVIEWER)), reviewers=(REVIEWER,))
+    result = feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                              run_glab=glab, now=lambda: RUN_START)
+    assert result.already_answered is True
+
+
+# --- `noted`: a thread with nothing to do ---------------------------------
+#
+# A plain note cannot be resolved, so a reviewer's trailing "thanks!" after our
+# reply is the last word forever. Replying to it would be noise; escalating it
+# would park the row `needs-input` on an acknowledgment.
+
+def test_an_acknowledgment_is_noted_not_replied_to(tmp_path, worktree):
+    sub = _Subprocess(worktree, report={
+        "addressed": [], "replied": [], "escalated": [],
+        "noted": [{"thread": "t1", "reason": "bare acknowledgment"}]})
+    thanks = _plain("t1", REVIEWER)
+    glab = _GlabMR(_payload(thanks), _payload(thanks))
+    result = feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                              run_glab=glab, now=lambda: RUN_START)
+    assert result.noted == 1
+    assert (result.addressed, result.replied, result.escalated) == (0, 0, ())
+    assert feedback.tally(result) == (
+        "1 waiting: 0 addressed, 0 replied, 1 noted, 0 escalated")
+
+
+def test_a_noted_thread_needs_no_reply_posted(tmp_path, worktree):
+    """The whole point: nothing is said back. The reply verification must not
+    demand a note that deliberately was not written."""
+    sub = _Subprocess(worktree, report={
+        "addressed": [], "replied": [], "escalated": [],
+        "noted": [{"thread": "t1", "reason": "no actionable ask"}]})
+    thanks = _plain("t1", REVIEWER)
+    glab = _GlabMR(_payload(thanks), _payload(thanks))
+    result = feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                              run_glab=glab, now=lambda: RUN_START)
+    assert result.noted == 1
+
+
+def test_a_run_that_only_noted_things_completes_rather_than_asking(tmp_path,
+                                                                   worktree):
+    """FALSIFYING for the shape choice: as an `escalate` this would raise
+    NeedsInputError and park the row on a question about "thanks!"."""
+    sub = _Subprocess(worktree, report={
+        "addressed": [], "replied": [], "escalated": [],
+        "noted": [{"thread": "t1", "reason": "bare acknowledgment"}]})
+    thanks = _plain("t1", REVIEWER)
+    result = feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                              run_glab=_GlabMR(_payload(thanks),
+                                               _payload(thanks)),
+                              now=lambda: RUN_START)
+    assert result.noted == 1                 # no NeedsInputError raised
+
+
+def test_a_noted_thread_counts_as_accounted_for(tmp_path, worktree):
+    """It must not ALSO come back as "unaccounted by the run"."""
+    sub = _Subprocess(worktree, report={
+        "addressed": [], "replied": [], "escalated": [],
+        "noted": [{"thread": "t1", "reason": "ack"}]})
+    thanks = _plain("t1", REVIEWER)
+    result = feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                              run_glab=_GlabMR(_payload(thanks),
+                                               _payload(thanks)),
+                              now=lambda: RUN_START)
+    assert result.escalated == ()
+
+
+def test_a_noted_thread_it_was_never_given_is_rejected(tmp_path, worktree):
+    sub = _Subprocess(worktree, report={
+        "addressed": [], "replied": [], "escalated": [],
+        "noted": [{"thread": "t-ghost", "reason": "ack"}]})
+    thanks = _plain("t1", REVIEWER)
+    with pytest.raises(RunnerError) as e:
+        feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                         run_glab=_GlabMR(_payload(thanks), _payload(thanks)),
+                         now=lambda: RUN_START)
+    assert "t-ghost" in str(e.value)
+
+
+def test_the_done_message_names_the_noted_count(tmp_path, worktree):
+    result = feedback.FeedbackResult(iid=3997, waiting=2, replied=1, noted=1)
+    assert "1 noted" in feedback.done_message(result)
+
+
+def test_the_prompt_teaches_the_fourth_outcome():
+    prompt = feedback.render_prompt(
+        "pb-www", 3997, BRANCH, _unaddressed(_payload(_thread("t1"))))
+    assert "NOTHING-TO-DO" in prompt
+    assert "no actionable ask" in prompt
+    assert "NEVER reply to a bare acknowledgment" in prompt
+    assert '"noted"' in prompt
+
+
+def test_the_prompt_explains_replying_to_a_plain_note():
+    prompt = feedback.render_prompt(
+        "pb-www", 3997, BRANCH, _unaddressed(_payload(_thread("t1"))))
+    assert "individual_note" in prompt or "plain MR note" in prompt
+    assert "/discussions/<thread-id>/notes" in prompt
