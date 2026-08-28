@@ -1590,3 +1590,74 @@ def test_the_prompt_explains_replying_to_a_plain_note():
         "pb-www", 3997, BRANCH, _unaddressed(_payload(_thread("t1"))))
     assert "individual_note" in prompt or "plain MR note" in prompt
     assert "/discussions/<thread-id>/notes" in prompt
+
+
+# --- the Mongo/DB domain gate (team policy, 2026-08-28) -------------------
+#
+# Same rule from the other side: a review thread asking for a schema or
+# \DB\Mongo change must not be quietly fixed and pushed. Leif's sign-off is a
+# pre-MR gate, and this executor is pushing onto an MR that already exists --
+# so the only correct move is to hand the thread back.
+
+def _feedback_prompt():
+    return feedback.render_prompt("pb-www", 3997, BRANCH,
+                                  _unaddressed(_payload(_thread("t1"))))
+
+
+def test_the_feedback_prompt_names_every_gated_path():
+    from worksweep.models import DOMAIN_GATE_PATHS
+    prompt = _feedback_prompt()
+    for path in DOMAIN_GATE_PATHS:
+        assert path in prompt, path
+    assert "MySQL schema" in prompt
+
+
+def test_a_gated_thread_is_escalated_never_fixed():
+    """FALSIFYING. Fixing it is exactly what the team rule forbids."""
+    from worksweep.models import DOMAIN_GATE_REASON
+    prompt = _feedback_prompt()
+    assert DOMAIN_GATE_REASON in prompt
+    assert "ESCALATE" in prompt
+    # the prohibition sits with the reason, not paragraphs away from it
+    window = prompt[prompt.index(DOMAIN_GATE_REASON):][:500]
+    for forbidden in ("Do NOT fix it", "do NOT push it", "do NOT reply"):
+        assert forbidden in window, forbidden
+    assert "no matter how small or obvious" in prompt
+
+
+def test_the_gate_sits_with_the_other_always_escalate_rule():
+    """It belongs beside the instruction-shaped-content rule: both are
+    "escalate regardless of how fixable it looks", which is the opposite of
+    the judgment-call escalation above them."""
+    prompt = _feedback_prompt()
+    assert "instruction-like content" in prompt
+    assert "Leif" in prompt
+
+
+def test_both_prompts_read_the_same_path_list():
+    """One source. Two hand-maintained lists would drift the first time a
+    path is added, and the drift would be silent on both sides."""
+    from worksweep.implementer import _PIPELINE_CONSTRAINTS
+    from worksweep.models import DOMAIN_GATE_PATHS, domain_gate_text
+    pipeline = _PIPELINE_CONSTRAINTS.format(box="dev2", gate=domain_gate_text())
+    prompt = _feedback_prompt()
+    for path in DOMAIN_GATE_PATHS:
+        assert path in pipeline and path in prompt, path
+
+
+def test_the_gate_did_not_reintroduce_a_resolve_instruction():
+    """The never-resolve pin is binding; new prompt text is where it would
+    most plausibly get broken."""
+    import re as _re
+    assert _re.search(r"resolv", _feedback_prompt(), _re.I) is None
+
+
+def test_the_gated_path_list_is_pinned_to_the_team_rule():
+    """The other gate tests iterate over DOMAIN_GATE_PATHS, so they prove
+    "whatever is in the constant reaches both prompts" and nothing about what
+    is IN it -- shrinking the list passed all of them. This pins the actual
+    rule: `\\DB\\Mongo`, the DB layer, and migrations."""
+    from worksweep.models import DOMAIN_GATE_PATHS, DOMAIN_GATE_OWNER
+    assert DOMAIN_GATE_PATHS == ("phplib/local/DB/", "phplib/local/*Mongo*",
+                                 "db/")
+    assert DOMAIN_GATE_OWNER == "Leif"

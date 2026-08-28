@@ -276,3 +276,54 @@ def test_a_healthy_box_still_completes_normally(tmp_path):
     result, edges = _run(tmp_path, edges=_Edges(http_status=200))
     assert result.mr_iid == 4099
     assert edges.http_calls == [_box().url]
+
+
+# --- the Mongo/DB domain gate (team policy, 2026-08-28) -------------------
+#
+# LeifPedersen owns the Mongo domain, and the new rule is that schema and
+# \DB\Mongo changes get his sign-off BEFORE an MR exists. An unattended run
+# that opens a Draft MR touching those paths has already skipped the gate --
+# the review has to happen pre-MR or it is not the gate the team agreed.
+
+def _constraints():
+    from worksweep.implementer import _PIPELINE_CONSTRAINTS
+    from worksweep.models import domain_gate_text
+    return _PIPELINE_CONSTRAINTS.format(box="dev2", gate=domain_gate_text())
+
+
+def test_the_pipeline_prompt_names_every_gated_path():
+    from worksweep.models import DOMAIN_GATE_PATHS
+    text = _constraints()
+    for path in DOMAIN_GATE_PATHS:
+        assert path in text, path
+    assert "MySQL schema" in text
+
+
+def test_the_pipeline_prompt_halts_rather_than_opening_an_mr():
+    """FALSIFYING. The whole point is that no MR exists yet when Leif looks."""
+    from worksweep.implementer import HALT_MARKERS
+    text = _constraints()
+    assert any(m in text for m in HALT_MARKERS)
+    assert "Leif" in text
+    assert "do NOT create the MR" in text or "not create the MR" in text
+
+
+def test_the_gate_is_an_explicit_exception_to_never_stop_for_input():
+    """The same prompt says "Chandler is away: never stop for input". Without
+    an explicit carve-out the two instructions contradict, and the louder,
+    earlier one wins -- which is the one that opens the MR."""
+    text = _constraints()
+    assert "never stop for input" in text
+    stop = text.index("never stop for input")
+    gate = text.index("Leif")
+    assert gate > stop                      # the exception comes after the rule
+    assert "one exception" in text or "except" in text.lower()
+
+
+def test_the_run_actually_receives_the_gate(tmp_path):
+    """Pinned through the production path, not just the constant: a prompt
+    built without the gate would pass every assertion above and still ship."""
+    _, edges = _run(tmp_path)
+    prompt = [c for c, _ in edges.calls if c[0] == "claude"][0][2]
+    assert "phplib/local/DB/" in prompt
+    assert "Leif" in prompt
