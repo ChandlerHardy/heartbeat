@@ -110,7 +110,8 @@ def test_a_finished_run_completes_done_and_posts_the_tally(tmp_path):
 
     done = [p for p in posts if p.startswith("💬")]
     assert len(done) == 1
-    assert "!3997 — 4 waiting: 2 addressed, 1 replied, 1 escalated" in done[0]
+    assert ("!3997 — 4 waiting: 2 addressed, 1 replied, 0 noted, "
+            "1 escalated") in done[0]
     assert "said: t1: addressed in deadbee" in done[0]
     assert "needs you: leyang: “should this be cached?” — product call" in done[0]
     assert not [p for p in posts if p.startswith("⚠️")]
@@ -127,7 +128,7 @@ def test_the_reviewer_getting_there_first_is_done_not_an_error(tmp_path):
     assert rc == 0
     assert state["records"][0].item.status == "done"
     done = [p for p in posts if p.startswith("💬")]
-    assert done == ["💬 !3997 — 0 addressed, 0 replied, "
+    assert done == ["💬 !3997 — 0 addressed, 0 replied, 0 noted, "
                     "0 escalated — threads already answered"]
     assert not [p for p in posts if p.startswith("⚠️")]
 

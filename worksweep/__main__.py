@@ -421,7 +421,16 @@ def _with_unaddressed(mr, cfg: WorksweepConfig,
     first, so a stale `✅ 12` would approve something else entirely), and it
     must not claim the signal is CLEAR when it simply could not look.
     """
-    if mr.unresolved_count <= 0 or assessor.is_handed_off(mr, cfg.username):
+    # Two preconditions, either of which can produce work, so the gate is the
+    # union rather than the old resolvable-only half:
+    #   * unresolved threads  -> a resolvable thread may be waiting on us;
+    #   * listed reviewers    -> a plain MR note from one of them is review
+    #     feedback (!4084), and it creates NO resolvable discussion at all, so
+    #     `unresolved_count` is 0 and the old gate skipped it entirely.
+    # With neither, nothing this probe could find would qualify.
+    if not (mr.unresolved_count > 0 or mr.reviewers):
+        return mr, True
+    if assessor.is_handed_off(mr, cfg.username):
         return mr, True
     try:
         raw = discussions(mr.repo, mr.iid)
@@ -431,7 +440,7 @@ def _with_unaddressed(mr, cfg: WorksweepConfig,
         return mr, False
     return dataclasses.replace(
         mr, unaddressed_count=collectors.parse_unaddressed_count(
-            raw, cfg.username)), True
+            raw, cfg.username, mr.reviewers)), True
 
 
 PROBE_FAILED_MARKER = "(probe failed)"

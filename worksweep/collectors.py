@@ -266,33 +266,84 @@ def parse_threads(raw_json) -> tuple:
     return tuple(out)
 
 
-def unaddressed_threads(raw_json, username: str) -> tuple:
+def unaddressed_threads(raw_json, username: str, reviewers=()) -> tuple:
     """The threads on this MR that are waiting on `username`.
 
-    Unaddressed iff resolvable, NOT resolved, and the last non-system note is
-    somebody else's. The three exclusions each drop a thread that is genuinely
-    not Chandler's move:
+    TWO shapes count, because GitLab review feedback arrives in two and only
+    one of them has a resolve button.
 
-    * not resolvable -- an ordinary comment thread, nothing to answer;
-    * resolved -- the owner already closed it;
-    * my own reply is the last word -- the ball is in the reviewer's court,
-      and this is the whole class the old `unresolved_count` signal nagged
-      about forever.
+    A RESOLVABLE thread is unaddressed when it is not resolved and the last
+    non-system note is somebody else's. The exclusions each drop something
+    that is genuinely not Chandler's move: a resolved thread (the owner closed
+    it) and one where his own reply is the last word (the ball is in the
+    reviewer's court -- the whole class the old `unresolved_count` signal
+    nagged about forever).
+
+    A NON-RESOLVABLE discussion -- a plain MR note, no diff anchor -- is
+    unaddressed when its last non-system note is from somebody on `reviewers`.
+    That restriction is the whole difference: plain notes carry chatter from
+    anyone, and only a listed reviewer's note is review feedback. Without this
+    shape, dasilvaja's "Two things before this is merge-ready: ..." on !4084
+    was invisible to both feedback arms -- not resolvable, and he had left his
+    reviewer state `unreviewed` so `changes_requested` was false too.
+
+    `reviewers` defaults to empty, which reproduces the old resolvable-only
+    behaviour exactly for any caller that has none to offer.
 
     "Last non-system note" also skips access-token bots (see _is_bot): an
-    integration answering on the thread is not a reviewer waiting on Chandler,
-    and treating it as one parked a row on pure noise (!4082).
+    integration answering is not a reviewer waiting on Chandler, and treating
+    it as one parked a row on pure noise (!4082).
 
     A thread with no such note at all (`last_author == ""` -- nothing but
     system notes, bot chatter, or both) is nobody's question and is excluded.
     """
-    return tuple(t for t in parse_threads(raw_json)
-                 if t.resolvable and not t.resolved
-                 and t.last_author and t.last_author != username)
+    listed = frozenset(r for r in (reviewers or ()) if r)
+    out = []
+    for t in parse_threads(raw_json):
+        if not t.last_author or t.last_author == username:
+            continue
+        if t.resolvable:
+            if not t.resolved:
+                out.append(t)
+        elif t.last_author in listed:
+            out.append(t)
+    return tuple(out)
 
 
-def parse_unaddressed_count(raw_json, username: str) -> int:
-    return len(unaddressed_threads(raw_json, username))
+def parse_unaddressed_count(raw_json, username: str, reviewers=()) -> int:
+    return len(unaddressed_threads(raw_json, username, reviewers))
+
+
+def parse_mr_reviewers(raw_json: str) -> tuple:
+    """The MR's listed reviewer usernames. () when the payload is unusable --
+    which reads downstream as "no plain note can qualify", the safe direction.
+    """
+    try:
+        data = json.loads(raw_json)
+    except (TypeError, ValueError):
+        return ()
+    if not isinstance(data, dict):
+        return ()
+    out = []
+    for r in (data.get("reviewers") or []):
+        name = (r or {}).get("username") if isinstance(r, dict) else None
+        if isinstance(name, str) and name:
+            out.append(name)
+    return tuple(out)
+
+
+def mr_reviewers(run_glab: Callable, repo: str, iid: int) -> tuple:
+    """One MR's listed reviewers through an injected glab edge. Never raises:
+    the executor re-reads these at run time, and a failed read must narrow the
+    thread set rather than take the run down."""
+    try:
+        raw = run_glab(["api", f"projects/{_project(repo)}"
+                               f"/merge_requests/{int(iid)}"])
+    except Exception as e:
+        print(f"worksweep: reviewer probe for {repo}!{iid} failed: "
+              f"{type(e).__name__}: {e}", file=sys.stderr)
+        return ()
+    return parse_mr_reviewers(raw)
 
 
 # --- is this MR still open? ------------------------------------------------

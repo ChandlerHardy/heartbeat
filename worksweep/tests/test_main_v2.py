@@ -928,3 +928,87 @@ def test_no_probe_dep_wired_means_no_probing_and_no_crash():
     rc = run_sweep(_cfg(), _sweep(posts, [_row(209, "stale:pb-www!3997")]))
     assert rc == 0
     assert _saved(posts)[0].item.status == "error"
+
+
+# --- the sweep sees plain reviewer notes (live: !4084, 2026-08-28) --------
+
+def _plain_note(author="dasilvaja", tid="t1"):
+    return json.dumps([{"id": tid, "individual_note": True, "notes": [
+        {"body": "Two things before this is merge-ready: ...",
+         "system": False, "resolvable": False, "resolved": False,
+         "author": {"username": author}}]}])
+
+
+def _reviewed(iid=3997, reviewers=("dasilvaja",), unresolved=0):
+    """An authored MR with reviewers listed and NO resolvable threads --
+    !4084's shape: reviewer state `unreviewed`, so changes_requested is false."""
+    node = _authored(iid=iid, unresolved=unresolved)
+    node["reviewers"] = {"nodes": [
+        {"username": r, "mergeRequestInteraction": {"reviewState": "UNREVIEWED"}}
+        for r in reviewers]}
+    return node
+
+
+def test_a_plain_reviewer_note_makes_the_arm_fire():
+    """FALSIFYING: !4084 exactly. Neither arm fired, so a reviewer's blocking
+    ask sat invisible on the dashboard."""
+    posts = []
+    run_sweep(_cfg(), _probe_deps(
+        posts, _gql(authored_nodes=[_reviewed()]),
+        discussions=lambda repo, iid: _plain_note()))
+    item = _saved_items(posts)["feedback:pb-www!3997"]
+    assert item.executor == "address-feedback"
+    assert item.why == "1 unaddressed thread"
+
+
+def test_an_mr_with_no_resolvable_threads_is_still_probed():
+    """The old gate skipped any MR with unresolved_count == 0 -- which is
+    every MR whose only feedback is a plain note."""
+    calls = []
+    posts = []
+    run_sweep(_cfg(), _probe_deps(
+        posts, _gql(authored_nodes=[_reviewed(unresolved=0)]),
+        discussions=lambda repo, iid: (calls.append(iid), _plain_note())[1]))
+    assert calls == [3997]
+
+
+def test_an_mr_with_no_reviewers_is_still_not_probed():
+    """The gate stays a real gate: with nobody listed, no plain note can
+    qualify and there is nothing to ask about."""
+    calls = []
+    posts = []
+    run_sweep(_cfg(), _probe_deps(
+        posts, _gql(authored_nodes=[_reviewed(reviewers=(), unresolved=0)]),
+        discussions=lambda repo, iid: (calls.append(iid), "[]")[1]))
+    assert calls == []
+
+
+def test_a_non_reviewers_plain_note_still_emits_nothing():
+    posts = []
+    run_sweep(_cfg(), _probe_deps(
+        posts, _gql(authored_nodes=[_reviewed()]),
+        discussions=lambda repo, iid: _plain_note(author="some-observer")))
+    assert "feedback:pb-www!3997" not in _saved_items(posts)
+
+
+def test_our_reply_under_the_plain_note_emits_nothing():
+    posts = []
+    answered = json.dumps([{"id": "t1", "individual_note": True, "notes": [
+        {"body": "two things", "system": False, "resolvable": False,
+         "resolved": False, "author": {"username": "dasilvaja"}},
+        {"body": "both done", "system": False, "resolvable": False,
+         "resolved": False, "author": {"username": "me"}}]}])
+    run_sweep(_cfg(), _probe_deps(
+        posts, _gql(authored_nodes=[_reviewed()]),
+        discussions=lambda repo, iid: answered))
+    assert "feedback:pb-www!3997" not in _saved_items(posts)
+
+
+def test_the_reviewers_come_from_the_mr_the_sweep_already_read():
+    """No extra query: the GraphQL sweep already carries the reviewer list."""
+    posts = []
+    run_sweep(_cfg(), _probe_deps(
+        posts, _gql(authored_nodes=[_reviewed(reviewers=("leyang",))]),
+        discussions=lambda repo, iid: _plain_note(author="dasilvaja")))
+    # dasilvaja is not a listed reviewer on THIS MR
+    assert "feedback:pb-www!3997" not in _saved_items(posts)

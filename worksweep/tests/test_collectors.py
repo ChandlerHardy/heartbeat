@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 from worksweep.collectors import (  # noqa: E402
     collect_discussions, collect_diverged_commits_count, discussions_pages,
     discussions_path, parse_issues, parse_mrs, parse_threads, parse_todos,
-    is_closed_state, mr_state, parse_mr_state,
+    is_closed_state, mr_reviewers, mr_state, parse_mr_state,
     parse_unaddressed_count, unaddressed_threads, _project,
 )
 
@@ -521,3 +521,110 @@ def test_mr_state_never_raises_through_to_the_caller():
     def boom(args, body=None):
         raise RuntimeError("glab api timed out after 30s")
     assert mr_state(boom, "pb-www", 3997) == ""
+
+
+# --- plain reviewer notes (live blind spot: !4084, 2026-08-28) ------------
+#
+# dasilvaja posted "Two things before this is merge-ready: ..." as a plain MR
+# note -- resolvable: false, no diff anchor -- and left his reviewer state
+# `unreviewed`. The predicate required a resolvable thread and changes_requested
+# was false, so NEITHER feedback arm fired and the ask was invisible.
+
+REVIEWERS = ("dasilvaja", "leyang")
+
+
+def _plain(tid, *authors, individual=True):
+    """A standalone MR note: a discussion with no resolvable notes."""
+    return {"id": tid, "individual_note": individual,
+            "notes": [_note(a, f"{a} said something", resolvable=False)
+                      for a in authors]}
+
+
+def test_a_reviewers_plain_note_is_unaddressed():
+    """FALSIFYING: this is !4084. A listed reviewer's note is review feedback
+    whether or not GitLab gave it a resolve button."""
+    raw = json.dumps([_plain("t1", "dasilvaja")])
+    got = unaddressed_threads(raw, "chandler.hardy", REVIEWERS)
+    assert tuple(t.id for t in got) == ("t1",)
+
+
+def test_our_reply_under_a_plain_note_settles_it():
+    raw = json.dumps([_plain("t1", "dasilvaja", "chandler.hardy")])
+    assert unaddressed_threads(raw, "chandler.hardy", REVIEWERS) == ()
+
+
+def test_a_non_reviewers_plain_note_is_ignored():
+    """Plain notes carry chatter from anyone -- a passer-by's comment is not
+    an ask, and treating it as one turns the dashboard into the MR feed."""
+    raw = json.dumps([_plain("t1", "some-observer")])
+    assert unaddressed_threads(raw, "chandler.hardy", REVIEWERS) == ()
+
+
+def test_a_bots_plain_note_is_ignored_even_from_a_reviewer_slot():
+    raw = json.dumps([_plain("t1", BOT)])
+    assert unaddressed_threads(raw, "chandler.hardy", REVIEWERS + (BOT,)) == ()
+
+
+def test_a_reviewer_speaking_after_a_bot_under_a_plain_note_counts():
+    raw = json.dumps([_plain("t1", "chandler.hardy", "dasilvaja", BOT)])
+    assert tuple(t.id for t in unaddressed_threads(
+        raw, "chandler.hardy", REVIEWERS)) == ("t1",)
+
+
+def test_with_no_reviewers_listed_no_plain_note_can_qualify():
+    raw = json.dumps([_plain("t1", "dasilvaja")])
+    assert unaddressed_threads(raw, "chandler.hardy", ()) == ()
+
+
+def test_resolvable_threads_keep_the_old_rule_exactly():
+    """Unchanged: on a resolvable thread ANY non-us human counts, reviewer or
+    not. The reviewer restriction buys signal on plain notes only."""
+    raw = json.dumps([_thread("t1", "some-observer")])
+    assert tuple(t.id for t in unaddressed_threads(
+        raw, "chandler.hardy", ())) == ("t1",)
+
+
+def test_the_reviewers_argument_is_optional():
+    """Every existing caller passes two arguments; they must keep working and
+    keep getting exactly the old resolvable-only answer."""
+    raw = json.dumps([_thread("t1", "leyang"), _plain("t2", "dasilvaja")])
+    assert tuple(t.id for t in unaddressed_threads(
+        raw, "chandler.hardy")) == ("t1",)
+
+
+def test_the_count_helper_takes_reviewers_too():
+    raw = json.dumps([_thread("t1", "leyang"), _plain("t2", "dasilvaja")])
+    assert parse_unaddressed_count(raw, "chandler.hardy", REVIEWERS) == 2
+    assert parse_unaddressed_count(raw, "chandler.hardy") == 1
+
+
+def test_an_individual_note_keeps_a_usable_discussion_id():
+    """Replying converts a standalone note into a discussion, and the id in
+    this payload is already the discussion id the reply endpoint wants."""
+    raw = json.dumps([_plain("8f3c1a2b4d5e6f70", "dasilvaja")])
+    t = parse_threads(raw)[0]
+    assert t.id == "8f3c1a2b4d5e6f70"
+    assert t.resolvable is False
+
+
+def test_mr_reviewers_reads_the_listed_usernames():
+    calls = []
+    got = mr_reviewers(
+        lambda args, body=None: (calls.append(args), json.dumps(
+            {"reviewers": [{"username": "dasilvaja"}, {"username": "leyang"}]}))[1],
+        "pb-www", 4084)
+    assert got == ("dasilvaja", "leyang")
+    assert calls[0][1].endswith("/merge_requests/4084")
+
+
+def test_mr_reviewers_on_junk_is_empty_not_a_guess():
+    for junk in ("", "not json", "[]", json.dumps({}),
+                 json.dumps({"reviewers": None}),
+                 json.dumps({"reviewers": [{"name": "no username"}]})):
+        assert mr_reviewers(lambda a, body=None: junk, "pb-www", 1) == (), junk
+
+
+def test_mr_reviewers_never_raises():
+    def boom(args, body=None):
+        raise RuntimeError("glab down")
+    assert mr_reviewers(boom, "pb-www", 1) == ()
