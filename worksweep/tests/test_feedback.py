@@ -1656,8 +1656,122 @@ def test_the_gated_path_list_is_pinned_to_the_team_rule():
     """The other gate tests iterate over DOMAIN_GATE_PATHS, so they prove
     "whatever is in the constant reaches both prompts" and nothing about what
     is IN it -- shrinking the list passed all of them. This pins the actual
-    rule: `\\DB\\Mongo`, the DB layer, and migrations."""
+    rule: `\\DB\\Mongo`, the DB layer, migrations, and the Mongo maintenance
+    scripts."""
     from worksweep.models import DOMAIN_GATE_PATHS, DOMAIN_GATE_OWNER
     assert DOMAIN_GATE_PATHS == ("phplib/local/DB/", "phplib/local/*Mongo*",
-                                 "db/")
+                                 "db/", "maintenance/mongodb/**",
+                                 "maintenance/*mongo*")
     assert DOMAIN_GATE_OWNER == "Leif"
+
+
+# --- the gate ENFORCED on what was pushed (2026-08-28) -------------------
+#
+# The prompt tells the run to escalate a thread whose fix touches Leif's
+# domain. This is what happens when it fixes and pushes anyway: the commit is
+# already on the branch, so the only honest outcome is a loud failure naming
+# the file, the thread, and what to revert.
+
+class _Committed(_Subprocess):
+    """_Subprocess whose `git show` reports whatever the commit touched."""
+
+    def __init__(self, worktree, files=(), show_rc=0, **kw):
+        super().__init__(worktree, **kw)
+        self.files, self.show_rc = list(files), show_rc
+        self.show_calls = []
+
+    def __call__(self, cmd, **kw):
+        if "show" in cmd:
+            self.show_calls.append(list(cmd))
+            return _Proc(self.show_rc, "\n".join(self.files) + "\n")
+        return super().__call__(cmd, **kw)
+
+
+def _addressed_run(worktree, files, sha="deadbee"):
+    sub = _Committed(worktree, files=files, remote_shas=(PRE_SHA, POST_SHA),
+                     report=_report(addressed=[{"thread": "t1", "sha": sha}]))
+    glab = _Glab(_payload(_waiting("t1")), _payload(_answered("t1")))
+    return sub, glab
+
+
+def test_a_pushed_mongo_change_fails_the_run(tmp_path, worktree):
+    """FALSIFYING. Without this the commit is verified, the tally is honest,
+    the item completes `done` -- and a schema change is on the branch with no
+    sign-off."""
+    sub, glab = _addressed_run(worktree, ["phplib/local/DB/Mongo.php"])
+    with pytest.raises(RunnerError) as e:
+        feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                         run_glab=glab, now=lambda: RUN_START)
+    assert "phplib/local/DB/Mongo.php" in str(e.value)
+    assert "t1" in str(e.value)
+    assert "Revert and escalate" in str(e.value)
+
+
+def test_the_gate_failure_has_its_own_reason_string(tmp_path, worktree):
+    from worksweep.feedback import DOMAIN_GATE_PUSHED
+    sub, glab = _addressed_run(worktree, ["db/migrations/x.sql"])
+    with pytest.raises(RunnerError) as e:
+        feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                         run_glab=glab, now=lambda: RUN_START)
+    assert DOMAIN_GATE_PUSHED in str(e.value)
+
+
+def test_the_check_names_the_sha_it_inspected(tmp_path, worktree):
+    sub, glab = _addressed_run(worktree, ["www/home/php/x.php"], sha="cafe123")
+    feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                     run_glab=glab, now=lambda: RUN_START)
+    assert sub.show_calls, "the commit was never inspected"
+    assert "cafe123" in sub.show_calls[0]
+    assert "--name-only" in sub.show_calls[0]
+
+
+def test_an_ungated_commit_completes_normally(tmp_path, worktree):
+    sub, glab = _addressed_run(worktree, ["www/home/php/x.php",
+                                          "phplib/local/Analytics.php"])
+    result = feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                              run_glab=glab, now=lambda: RUN_START)
+    assert result.addressed == 1
+
+
+def test_a_test_only_mongo_commit_is_allowed_through(tmp_path, worktree):
+    """Same exclusion as the pipeline: "add a test for this" is the most
+    common actionable ask on this domain and must stay answerable."""
+    sub, glab = _addressed_run(worktree,
+                               ["test/phpunit/mongo/MongoDuplicateKeyTest.php"])
+    result = feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                              run_glab=glab, now=lambda: RUN_START)
+    assert result.addressed == 1
+
+
+def test_a_reply_only_run_inspects_no_commits(tmp_path, worktree):
+    """Nothing was pushed, so there is nothing to check -- and no reason to
+    pay for a `git show` per thread."""
+    sub = _Committed(worktree, report=_report(replied=["t1"]))
+    glab = _Glab(_payload(_waiting("t1")), _payload(_answered("t1")))
+    feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                     run_glab=glab, now=lambda: RUN_START)
+    assert sub.show_calls == []
+
+
+def test_an_unreadable_commit_fails_rather_than_passing(tmp_path, worktree):
+    """Not knowing what a commit touched is not the same as knowing it is
+    clean -- and this check is the only thing standing between a schema
+    change and a silent `done`."""
+    sub, glab = _addressed_run(worktree, [])
+    sub.show_rc = 1
+    with pytest.raises(RunnerError) as e:
+        feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                         run_glab=glab, now=lambda: RUN_START)
+    assert "could not read" in str(e.value)
+
+
+def test_the_gate_is_checked_before_the_run_is_reported_done(tmp_path,
+                                                             worktree):
+    """It must beat the honest-tally completion: a gated run that reported a
+    perfect tally still has a schema change on the branch."""
+    sub, glab = _addressed_run(worktree, ["phplib/local/DB/Mongo.php"])
+    with pytest.raises(RunnerError):
+        feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                         run_glab=glab, now=lambda: RUN_START)
+    assert sub.ran("claude")               # the run happened
+    # ...and no result was returned to be completed

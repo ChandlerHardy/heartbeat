@@ -1,6 +1,7 @@
 """Data types for Worksweep (the GitLab sensor slice)."""
 from __future__ import annotations
 
+import fnmatch
 import re
 from dataclasses import dataclass
 
@@ -22,10 +23,68 @@ _DEV_URL_RE = re.compile(
 # live in ONE place. Two hand-maintained lists would drift the first time a
 # path is added, and the drift would be silent on both sides.
 DOMAIN_GATE_OWNER = "Leif"
-DOMAIN_GATE_PATHS = ("phplib/local/DB/", "phplib/local/*Mongo*", "db/")
+DOMAIN_GATE_PATHS = ("phplib/local/DB/", "phplib/local/*Mongo*", "db/",
+                     # Verified against the real pb-www tree (2026-08-28):
+                     # the numbered Mongo data-migration/backfill scripts live
+                     # here and sat outside every other pattern. A data
+                     # migration is squarely the owner's turf -- arguably more
+                     # so than a code change, since it rewrites live data.
+                     "maintenance/mongodb/**", "maintenance/*mongo*")
 # The exact reason string the feedback executor records, so the Discord
 # escalation line says which gate stopped it rather than just "escalated".
 DOMAIN_GATE_REASON = "touches DB/Mongo domain — Leif gate"
+
+
+# Path components that mean "this is a test", so the gate lets it through.
+# Matched as whole components, never as substrings: `Latest.php` contains
+# "test" and is not a test.
+_TEST_COMPONENTS = frozenset(("test", "tests", "phpunit", "spec", "__tests__"))
+# A schema change can arrive as a plain SQL file that no path glob covers --
+# the prompts say "any MySQL schema change", and this is what makes that
+# clause mechanical rather than a judgment the model has to get right.
+_GATED_SUFFIXES = (".sql",)
+
+
+def touches_domain_gate(paths) -> tuple:
+    """The subset of `paths` that falls inside Leif's domain, in order.
+
+    The subset, not a boolean: the caller has to name the offending files,
+    because "something is gated" does not tell Chandler what to unwind.
+
+    Test-only changes are deliberately NOT gated. Reviewers ask for tests
+    constantly, and gating them would make the executor refuse the single most
+    common actionable ask on the very domain the gate protects -- while adding
+    no risk, since a test cannot change a schema.
+    """
+    out = []
+    for raw in (paths or ()):
+        if not isinstance(raw, str):
+            continue
+        path = raw.strip().lstrip("/")
+        while path.startswith("./"):
+            path = path[2:]
+        if not path or path in out:
+            continue
+        lowered = path.lower()
+        parts = lowered.split("/")
+        if _TEST_COMPONENTS.intersection(parts):
+            continue
+        if lowered.endswith(_GATED_SUFFIXES):
+            out.append(path)
+            continue
+        # Case-insensitive on purpose. The patterns themselves are mixed case
+        # (`*Mongo*` for PHP classes, `*mongo*` for shell scripts), and a
+        # matcher whose answer depends on which one a file happens to resemble
+        # is one that fails quietly the first time somebody names a file
+        # differently than the pattern author expected.
+        for pattern in DOMAIN_GATE_PATHS:
+            low_pattern = pattern.lower()
+            hit = (lowered.startswith(low_pattern) if pattern.endswith("/")
+                   else fnmatch.fnmatch(lowered, low_pattern))
+            if hit:
+                out.append(path)
+                break
+    return tuple(out)
 
 
 def domain_gate_text() -> str:

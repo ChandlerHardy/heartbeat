@@ -79,7 +79,8 @@ from . import keepcurrent
 from .keepcurrent import (_git, _preflight_clean, _run,
                           iid_of)
 from .models import (DOMAIN_GATE_OWNER, DOMAIN_GATE_REASON,
-                     ReviewThread, WorkItem, domain_gate_text)
+                     ReviewThread, WorkItem, domain_gate_text,
+                     touches_domain_gate)
 from .runner import NeedsInputError, RunnerError
 
 EXECUTOR = "address-feedback"
@@ -109,6 +110,9 @@ _PUSHABLE_NAMESPACES = ("refs/heads/", "refs/tags/")
 # Lines of quoted third-party text one Discord post will carry. The
 # COUNTS always tell the whole truth; only the rendering is capped.
 _MAX_POSTED_LINES = 5
+# Own reason string, distinct from every generic verification failure:
+# this one means a commit has to be reverted, not just re-run.
+DOMAIN_GATE_PUSHED = "pushed a Mongo-domain change past the gate"
 # Threads handed to one run. A flat count rather than byte accounting: it is
 # the number a human can sanity-check, and the overflow is escalated rather
 # than dropped, so nothing goes missing either way.
@@ -552,11 +556,13 @@ def _verify(run_subprocess: Callable, run_glab: Callable, cfg, repo: str,
             f"at a sha the reviewer cannot see")
     # f-019: the branch moving ONCE used to clear every addressed thread at
     # once, including ones whose sha was never committed. Each claimed commit
-    # has to actually be on the branch the reviewer will look at.
+    # has to actually be on the branch the reviewer will look at -- and, since
+    # 2026-08-28, has to have stayed out of Leif's domain while it was there.
     for tid in addressed:
         sha = claims.get(tid, {}).get("sha", "")
         if not sha:
             continue          # a fix reported without a sha is checked above
+        _enforce_domain_gate(run_subprocess, checkout, iid, tid, sha)
         proc = _run(["git", "-C", checkout, "merge-base", "--is-ancestor",
                      sha, _ref_name(branch)], run_subprocess,
                     timeout=_FETCH_TIMEOUT)
@@ -566,6 +572,34 @@ def _verify(run_subprocess: Callable, run_glab: Callable, cfg, repo: str,
                 f"fixed in {sha}, but that commit is not on "
                 f"{_ref_name(branch)} — the reviewer cannot see it")
     return after
+
+
+def _enforce_domain_gate(run_subprocess: Callable, checkout: str, iid: int,
+                         tid: str, sha: str) -> None:
+    """Refuse a commit that touched Leif's domain, loudly.
+
+    The prompt ASKS for such a thread to be escalated rather than fixed. This
+    is the check. It runs before the run can be reported `done`, because a
+    gated commit with a perfectly honest tally is still a schema change sitting
+    on the branch with nobody's sign-off.
+
+    A commit we cannot read fails too: not knowing what it touched is not the
+    same as knowing it is clean, and this is the only thing between a schema
+    change and a silent completion.
+    """
+    proc = _run(["git", "-C", checkout, "show", "--name-only", "--format=",
+                 sha], run_subprocess, timeout=_FETCH_TIMEOUT)
+    if proc.returncode != 0:
+        out = f"{proc.stderr or ''}{proc.stdout or ''}"
+        raise RunnerError(f"{DOMAIN_GATE_PUSHED}: could not read commit {sha} "
+                          f"on !{iid} to check it: {_tail(out, 5)}")
+    gated = touches_domain_gate((proc.stdout or "").splitlines())
+    if gated:
+        raise RunnerError(
+            f"{DOMAIN_GATE_PUSHED}: thread {tid} on !{iid} was fixed in {sha}, "
+            f"which touches {', '.join(gated)} — {DOMAIN_GATE_OWNER} signs off "
+            f"on that domain and the thread should have been escalated. "
+            f"Revert and escalate.")
 
 
 def _ref_name(branch: str) -> str:
