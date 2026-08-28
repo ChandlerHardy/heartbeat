@@ -48,6 +48,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from .approvals import (_APPROVABLE, approve_all, approve_numbers,
                          is_blanket_eligible)
 from .formatter import DISCORD_MAX_CHARS, _truncate_bytes
+from .seennotes import record_seen
 from .models import RUNNABLE_EXECUTORS, QueueRecord, WorkItem
 from .queue import (_TERMINAL, dismiss as dismiss_record, is_dismissable,
                     load_queue, save_queue, write_lock)
@@ -1210,15 +1211,26 @@ def _checkbox(record: QueueRecord, view: str) -> str:
         # Nothing executes these, so the only resolution is "I looked at it".
         # A Dismiss button is that resolution; an approve checkbox here would
         # strand the record as a permanently-approved zombie.
-        return (f'<button type="button" class="btn-dismiss" '
-                f'data-dismiss="{_e(record.number)}" '
-                f'aria-label="dismiss item {_e(record.number)}" '
-                f'title="mark as handled">Dismiss</button>')
+        return _dismiss_button(record.number, "mark as handled")
     blanket = ' data-blanket="1"' if is_blanket_eligible(item) else ''
-    return (f'<label class="check">'
-            f'<input type="checkbox" data-view="{_e(view)}" '
-            f'value="{_e(record.number)}"{blanket} '
-            f'aria-label="approve item {_e(record.number)}"></label>')
+    check = (f'<label class="check">'
+             f'<input type="checkbox" data-view="{_e(view)}" '
+             f'value="{_e(record.number)}"{blanket} '
+             f'aria-label="approve item {_e(record.number)}"></label>')
+    if not is_dismissable(item):
+        return check
+    # BOTH controls. An address-feedback row can be runnable AND have nothing
+    # to run -- a reviewer's "LGTM" on a plain note is exactly that. Approve
+    # runs it; dismiss says "I read this note". Rendering only the checkbox
+    # made the server-side dismiss this round added unreachable from the page.
+    return (check + _dismiss_button(record.number, "seen it"))
+
+
+def _dismiss_button(number: int, title: str) -> str:
+    return (f'<button type="button" class="btn-dismiss" '
+            f'data-dismiss="{_e(number)}" '
+            f'aria-label="dismiss item {_e(number)}" '
+            f'title="{_e(title)}">Dismiss</button>')
 
 
 def _chip(record: QueueRecord) -> str:
@@ -2147,8 +2159,33 @@ class DashboardHandler(BaseHTTPRequestHandler):
             save_queue(self.server.queue_path, updated)
 
         self._mark_todo_done(target.item, number)
+        self._record_seen_notes(target.item, number)
         self._audit_dismiss(number, target.item, actor)
         self._json(200, {"dismissed": True, "number": number})
+
+    def _record_seen_notes(self, item, number: int) -> None:
+        """Remember which notes this dismissal covered, so the next sweep does
+        not re-derive the same row from the same note.
+
+        Best-effort, exactly like the todo edge above it: the row is already
+        `done` on disk by the time this runs. Losing the durable half means
+        the row comes back next sweep -- annoying, not wrong -- while raising
+        here would report a dismissal that DID happen as having failed.
+
+        Keyed on (discussion, last note), so a reviewer's follow-up changes
+        the key and the row returns. A row carrying no refs (written before
+        the field existed) simply dismisses without durability and picks it up
+        on the next sweep.
+        """
+        refs = getattr(item, "note_refs", ())
+        path = getattr(self.server, "seen_path", "")
+        if not refs or not path:
+            return
+        try:
+            record_seen(path, refs, self.server.now())
+        except Exception as e:
+            print(f"worksweep: dismissed #{number} but could not record its "
+                  f"notes ({path}): {e}", file=sys.stderr)
 
     def _mark_todo_done(self, item, number: int) -> None:
         """Best-effort: clear the matching GitLab todo. Never fatal."""
@@ -2242,7 +2279,8 @@ def make_server(address: Tuple[str, int], queue_path: str,
                 webhook: str = "",
                 now: Optional[Callable[[], str]] = None,
                 sweep: Optional[Callable[[], None]] = None,
-                mark_todo_done: Optional[Callable[[int], None]] = None
+                mark_todo_done: Optional[Callable[[int], None]] = None,
+                seen_path: str = ""
                 ) -> _DashboardServer:
     """Build (but do not start) the dashboard server.
 
@@ -2260,6 +2298,7 @@ def make_server(address: Tuple[str, int], queue_path: str,
     httpd.sweep = sweep
     httpd.sweep_last = 0.0
     httpd.mark_todo_done = mark_todo_done
+    httpd.seen_path = seen_path
     return httpd
 
 
@@ -2331,6 +2370,7 @@ def serve(queue_path: str, port: int = DEFAULT_PORT, bind: str = "auto",
           webhook: str = "",
           sweep: Optional[Callable[[], None]] = None,
           mark_todo_done: Optional[Callable[[int], None]] = None,
+          seen_path: str = "",
           run_subprocess: Callable = subprocess.run,
           sleep: Callable[[float], None] = time.sleep,
           max_attempts: int = 0) -> int:
@@ -2363,7 +2403,8 @@ def serve(queue_path: str, port: int = DEFAULT_PORT, bind: str = "auto",
             try:
                 httpd = make_server((address, port), queue_path,
                                     post=post, webhook=webhook, sweep=sweep,
-                                    mark_todo_done=mark_todo_done)
+                                    mark_todo_done=mark_todo_done,
+                                    seen_path=seen_path)
             except OSError as e:
                 print(f"worksweep: dashboard cannot bind {address}:{port} "
                       f"({e})", file=sys.stderr)

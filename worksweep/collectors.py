@@ -256,17 +256,20 @@ def parse_threads(raw_json) -> tuple:
                      and all(bool(n.get("resolved")) for n in resolvable_notes),
             last_author=((last or {}).get("author") or {}).get("username", ""),
             last_note=(last or {}).get("body") or "",
+            last_note_id=str((last or {}).get("id") or ""),
             resolved_by=resolved_by,
             notes=tuple(ReviewNote(
                 author=((n.get("author") or {}) or {}).get("username", ""),
                 system=bool(n.get("system")),
                 body=n.get("body") or "",
-                created_at=str(n.get("created_at") or "")) for n in notes),
+                created_at=str(n.get("created_at") or ""),
+                id=str(n.get("id") or "")) for n in notes),
         ))
     return tuple(out)
 
 
-def unaddressed_threads(raw_json, username: str, reviewers=()) -> tuple:
+def unaddressed_threads(raw_json, username: str, reviewers=(),
+                        seen=()) -> tuple:
     """The threads on this MR that are waiting on `username`.
 
     TWO shapes count, because GitLab review feedback arrives in two and only
@@ -298,9 +301,15 @@ def unaddressed_threads(raw_json, username: str, reviewers=()) -> tuple:
     system notes, bot chatter, or both) is nobody's question and is excluded.
     """
     listed = frozenset(r for r in (reviewers or ()) if r)
+    dismissed = frozenset(tuple(k) for k in (seen or ()))
     out = []
     for t in parse_threads(raw_json):
         if not t.last_author or t.last_author == username:
+            continue
+        # Dismissal is keyed on EVIDENCE, not on the thread. A reviewer's
+        # follow-up changes `last_note_id`, so the key stops matching and the
+        # row returns -- "seen this note", never "mute this thread".
+        if (t.id, t.last_note_id) in dismissed:
             continue
         if t.resolvable:
             if not t.resolved:
@@ -310,8 +319,9 @@ def unaddressed_threads(raw_json, username: str, reviewers=()) -> tuple:
     return tuple(out)
 
 
-def parse_unaddressed_count(raw_json, username: str, reviewers=()) -> int:
-    return len(unaddressed_threads(raw_json, username, reviewers))
+def parse_unaddressed_count(raw_json, username: str, reviewers=(),
+                            seen=()) -> int:
+    return len(unaddressed_threads(raw_json, username, reviewers, seen))
 
 
 def parse_mr_reviewers(raw_json: str) -> tuple:

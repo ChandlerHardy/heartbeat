@@ -318,9 +318,12 @@ def test_dashboard_renders_an_approve_checkbox_for_address_feedback():
     from worksweep.queue import is_dismissable
     item = _feedback(_assess(_own(unresolved_count=1, unaddressed_count=1)))[0]
     assert dashboard.has_checkbox(item) is True
-    # and the flip side the rename buys: runnable work is no longer a row you
-    # can wave away, it is a row you approve or leave alone.
-    assert is_dismissable(item) is False
+    # SUPERSEDED 2026-08-28: this used to assert the row was NOT dismissable
+    # ("runnable work is a row you approve or leave alone"). Three permanent
+    # "LGTM" rows showed that leaving it alone was not an option -- a plain
+    # note can never be closed out, so it re-fires forever. It now carries
+    # BOTH controls: approve runs it, dismiss records which notes were read.
+    assert is_dismissable(item) is True
 
 
 def test_the_informational_arm_keeps_its_manual_affordance():
@@ -329,3 +332,29 @@ def test_the_informational_arm_keeps_its_manual_affordance():
     item = _feedback(_assess(_own(changes_requested=True)))[0]
     assert dashboard.has_checkbox(item) is False
     assert is_dismissable(item) is True
+
+
+# --- the item carries the evidence a dismissal needs (2026-08-28) --------
+
+def test_the_address_feedback_item_carries_its_note_refs():
+    """Dismissal keys on (discussion, last note). The dashboard only has the
+    row, so the row has to carry them."""
+    mr = _own(unresolved_count=1, unaddressed_count=1,
+              note_refs=(("d1", "101"), ("d2", "202")))
+    it = _feedback(_assess(mr))[0]
+    assert it.note_refs == (("d1", "101"), ("d2", "202"))
+
+
+def test_the_informational_arm_carries_no_note_refs():
+    """`changes requested` with nothing unaddressed has no thread evidence --
+    there is nothing to have seen."""
+    it = _feedback(_assess(_own(changes_requested=True)))[0]
+    assert it.note_refs == ()
+
+
+def test_note_refs_default_empty_so_old_rows_still_load():
+    from worksweep.models import WorkItem
+    it = WorkItem(schema_version=1, id="x", repo="r", kind="feedback",
+                  executor="address-feedback", risk="low", why="w",
+                  web_url="u", sha="s")
+    assert it.note_refs == ()

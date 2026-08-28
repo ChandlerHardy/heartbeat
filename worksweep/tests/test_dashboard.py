@@ -172,11 +172,12 @@ class _Reader:
 
 class _Server:
     def __init__(self, qpath, post=None, webhook="", now=NOW, sweep=None,
-                 mark_todo_done=None):
+                 mark_todo_done=None, seen_path=""):
         self.httpd = dashboard.make_server(("127.0.0.1", 0), qpath, post=post,
                                            webhook=webhook, now=lambda: now,
                                            sweep=sweep,
-                                           mark_todo_done=mark_todo_done)
+                                           mark_todo_done=mark_todo_done,
+                                           seen_path=seen_path)
         # poll fast: serve_forever's default 0.5s interval is paid on every
         # shutdown() and would dominate the suite runtime
         self.thread = threading.Thread(
@@ -250,11 +251,11 @@ def serve_queue(tmp_path):
     made = []
 
     def _make(records, post=None, webhook="", now=NOW, sweep=None,
-              mark_todo_done=None):
+              mark_todo_done=None, seen_path=""):
         qpath = os.path.join(str(tmp_path), "queue.json")
         save_queue(qpath, list(records))
         s = _Server(qpath, post=post, webhook=webhook, now=now, sweep=sweep,
-                    mark_todo_done=mark_todo_done)
+                    mark_todo_done=mark_todo_done, seen_path=seen_path)
         made.append(s)
         return s, qpath
     yield _make
@@ -1211,6 +1212,10 @@ def test_grouping_is_pure_and_makes_no_network_call():
         "urllib.parse",          # pure string parsing, not network
         "dataclasses", "http.server", "typing", "__future__",
         ".approvals", ".formatter", ".models", ".queue",
+        # 2026-08-28: dismissing a feedback row records which notes it covered.
+        # Pure file I/O in ~/.worksweep, no network -- but the allowlist is
+        # exact on purpose, so it is listed rather than waved through.
+        ".seennotes",
     }
     recs = [_br(1, branch="b"), _br(2, web_url="")]
     snapshot = list(recs)
@@ -3463,3 +3468,100 @@ def test_a_client_reset_is_not_an_error_in_the_log(tmp_path):
         assert errors == [], "a client going away was logged as a server error"
     finally:
         s.close()
+
+
+# --- dismissing a feedback row records what was read (2026-08-28) --------
+
+def _fb_rec(number=1, note_refs=(("d1", "101"),)):
+    return QueueRecord(
+        number=number, first_seen=NOW, last_seen=NOW,
+        item=dataclasses.replace(_rec(number).item,
+                                 id="feedback:pb-www!4084", kind="feedback",
+                                 executor="address-feedback",
+                                 why="1 unaddressed thread",
+                                 status="proposed", note_refs=note_refs))
+
+
+def test_dismissing_a_feedback_row_records_its_notes(serve_queue, tmp_path):
+    """FALSIFYING. Without the record the next sweep re-derives the same row
+    from the same note, and the dismissal was theatre."""
+    seen_path = str(tmp_path / "seen-notes.json")
+    s, _ = serve_queue([_fb_rec()], seen_path=seen_path)
+    assert s.dismiss(1)[0] == 200
+    from worksweep.seennotes import load_seen
+    assert load_seen(seen_path) == frozenset({("d1", "101")})
+
+
+def test_dismissing_a_todo_records_nothing(serve_queue, tmp_path):
+    """Only feedback rows carry note evidence; a todo dismissal is unchanged."""
+    seen_path = str(tmp_path / "seen-notes.json")
+    todo = QueueRecord(number=1, first_seen=NOW, last_seen=NOW,
+                       item=dataclasses.replace(_rec(1).item, kind="todo",
+                                                executor="triage",
+                                                status="proposed"))
+    s, _ = serve_queue([todo], seen_path=seen_path)
+    assert s.dismiss(1)[0] == 200
+    from worksweep.seennotes import load_seen
+    assert load_seen(seen_path) == frozenset()
+
+
+def test_a_row_with_no_note_refs_dismisses_without_recording(serve_queue,
+                                                             tmp_path):
+    """An older feedback row carries no evidence. It still dismisses -- it
+    just needs one more sweep before the dismissal can be durable."""
+    seen_path = str(tmp_path / "seen-notes.json")
+    s, _ = serve_queue([_fb_rec(note_refs=())], seen_path=seen_path)
+    assert s.dismiss(1)[0] == 200
+    from worksweep.seennotes import load_seen
+    assert load_seen(seen_path) == frozenset()
+
+
+def test_a_dismissed_feedback_row_still_posts_its_audit(serve_queue, tmp_path):
+    posted = []
+    s, _ = serve_queue([_fb_rec()], post=lambda h, c: posted.append(c),
+                       webhook="https://discord.com/api/webhooks/1/x",
+                       seen_path=str(tmp_path / "seen-notes.json"))
+    body = json.dumps({"number": 1, "actor": "claude"})
+    assert s.dismiss(1, body=body)[0] == 200
+    assert [p for p in posted if p.startswith("🗑️")][0].endswith(
+        " (dashboard · claude)")
+
+
+def test_a_failed_seen_write_never_fails_the_dismissal(serve_queue, tmp_path):
+    """The row is already `done` on disk by then. Losing the durability half
+    means the row comes back next sweep -- annoying, not wrong -- while
+    failing the request would report the dismissal as not having happened."""
+    s, _ = serve_queue([_fb_rec()],
+                       seen_path=str(tmp_path / "nope" / "\0bad" / "s.json"))
+    assert s.dismiss(1)[0] == 200
+
+
+def test_a_feedback_row_renders_both_controls(serve_queue):
+    """FALSIFYING. The server accepts a dismiss for these rows, but the page
+    rendered only the checkbox -- so the control the whole round exists to
+    provide was unreachable. `_checkbox` keyed off `has_checkbox` alone;
+    `is_dismissable` was imported and never called."""
+    s, _ = serve_queue([_fb_rec()])
+    html = s.request("GET", "/")[2].decode("utf-8")
+    assert 'data-dismiss="1"' in html
+    assert 'type="checkbox"' in html
+
+
+def test_an_ordinary_runnable_row_renders_only_the_checkbox(serve_queue):
+    """Dismissing a magi row still silently drops real work, so it still
+    offers no way to."""
+    s, _ = serve_queue([_rec(1)])
+    html = s.request("GET", "/")[2].decode("utf-8")
+    assert 'data-dismiss="1"' not in html
+    assert 'type="checkbox"' in html
+
+
+def test_a_manual_row_still_renders_only_dismiss(serve_queue):
+    triage = QueueRecord(number=1, first_seen=NOW, last_seen=NOW,
+                         item=dataclasses.replace(_rec(1).item,
+                                                  executor="triage",
+                                                  status="proposed"))
+    s, _ = serve_queue([triage])
+    html = s.request("GET", "/")[2].decode("utf-8")
+    assert 'data-dismiss="1"' in html
+    assert 'type="checkbox"' not in html

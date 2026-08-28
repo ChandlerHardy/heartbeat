@@ -147,7 +147,8 @@ def assess_own_mr(mr: MergeRequest, username: str,
             schema_version=1, id=f"feedback:{mr.repo}!{mr.iid}",
             repo=mr.repo, kind="feedback", executor="address-feedback",
             risk="low", why=why, web_url=mr.web_url, sha=mr.sha,
-            title=mr.title, branch=mr.source_branch))
+            title=mr.title, branch=mr.source_branch,
+            note_refs=tuple(mr.note_refs)))
     elif mr.changes_requested:
         items.append(WorkItem(
             schema_version=1, id=f"feedback:{mr.repo}!{mr.iid}",

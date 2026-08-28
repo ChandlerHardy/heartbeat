@@ -628,3 +628,87 @@ def test_mr_reviewers_never_raises():
     def boom(args, body=None):
         raise RuntimeError("glab down")
     assert mr_reviewers(boom, "pb-www", 1) == ()
+
+
+# --- note identity for durable dismissal (live: three LGTM rows) ---------
+#
+# The plain-note sensor's first sweep produced three permanent proposed rows
+# whose entire content is "LGTM" (cmnoble on !4084, adamsoper on !3981/!3982).
+# Dismissing has to mean "I have seen THIS note", never "mute this thread" --
+# so the evidence is the (discussion, last note) pair, not the thread id.
+
+def _idnote(author, note_id, body="b", resolvable=True):
+    n = _note(author, body, resolvable=resolvable)
+    n["id"] = note_id
+    return n
+
+
+def test_a_thread_carries_the_id_of_its_last_human_note():
+    raw = json.dumps([{"id": "d1", "notes": [
+        _idnote("leyang", 101), _idnote("chandler.hardy", 102),
+        _idnote("leyang", 103)]}])
+    t = parse_threads(raw)[0]
+    assert t.id == "d1"
+    assert t.last_note_id == "103"
+    assert [n.id for n in t.notes] == ["101", "102", "103"]
+
+
+def test_the_last_note_id_skips_system_and_bot_notes():
+    """It has to name the note the LAST WORD calculation used, or the seen-set
+    key would not match what the human actually dismissed."""
+    raw = json.dumps([{"id": "d1", "notes": [
+        _idnote("leyang", 101),
+        dict(_idnote(BOT, 102)),
+        dict(_note("gitlab", system=True), id="103")]}])
+    t = parse_threads(raw)[0]
+    assert t.last_author == "leyang"
+    assert t.last_note_id == "101"
+
+
+def test_a_missing_note_id_is_empty_not_a_guess():
+    raw = json.dumps([{"id": "d1", "notes": [_note("leyang")]}])
+    assert parse_threads(raw)[0].last_note_id == ""
+
+
+def test_a_seen_note_is_not_unaddressed():
+    """FALSIFYING. This is the whole dismissal: the row goes away because the
+    human said they read that note."""
+    raw = json.dumps([{"id": "d1", "notes": [_idnote("leyang", 101)]}])
+    assert unaddressed_threads(raw, "chandler.hardy") != ()
+    assert unaddressed_threads(raw, "chandler.hardy",
+                               seen={("d1", "101")}) == ()
+
+
+def test_a_new_note_on_a_dismissed_thread_comes_back():
+    """FALSIFYING the other way. Dismiss means "seen THIS note" -- a reviewer
+    following up must reach Chandler, or dismissal becomes a mute button."""
+    raw = json.dumps([{"id": "d1", "notes": [
+        _idnote("leyang", 101), _idnote("leyang", 104)]}])
+    assert tuple(t.id for t in unaddressed_threads(
+        raw, "chandler.hardy", seen={("d1", "101")})) == ("d1",)
+
+
+def test_the_seen_key_is_the_pair_not_either_half():
+    """The same note id under a different discussion, and the same discussion
+    with a different note, must both still fire."""
+    raw = json.dumps([{"id": "d1", "notes": [_idnote("leyang", 101)]}])
+    assert unaddressed_threads(raw, "chandler.hardy",
+                               seen={("d2", "101")}) != ()
+    assert unaddressed_threads(raw, "chandler.hardy",
+                               seen={("d1", "999")}) != ()
+
+
+def test_the_seen_set_applies_to_plain_notes_too():
+    """The LGTM rows that motivated this are plain notes."""
+    raw = json.dumps([{"id": "d1", "individual_note": True,
+                       "notes": [_idnote("cmnoble", 55, "LGTM",
+                                         resolvable=False)]}])
+    assert unaddressed_threads(raw, "chandler.hardy", ("cmnoble",)) != ()
+    assert unaddressed_threads(raw, "chandler.hardy", ("cmnoble",),
+                               seen={("d1", "55")}) == ()
+
+
+def test_the_seen_set_is_optional():
+    raw = json.dumps([{"id": "d1", "notes": [_idnote("leyang", 101)]}])
+    assert unaddressed_threads(raw, "chandler.hardy") != ()
+    assert parse_unaddressed_count(raw, "chandler.hardy") == 1
