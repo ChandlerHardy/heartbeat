@@ -36,7 +36,7 @@ from typing import Callable, FrozenSet, List, Optional, Sequence
 
 from . import checkouts, devslots
 from .devslots import DevBox
-from .models import MergeRequest, WorkItem
+from .models import MergeRequest, WorkItem, domain_gate_text
 from .runner import NeedsInputError, RunnerError, extract_verdict, find_report
 
 # `/rubric:do` (via the plan-author agent) stops rather than guessing; these
@@ -482,7 +482,14 @@ Unattended seneschal run — hard constraints on top of the skill:
 Less human oversight requires more review, never less.
 - The MR must be created as a Draft and stay a Draft.
 - Chandler is away: never stop for input — record decisions per the skill \
-and keep going.
+and keep going. ONE exception, below.
+- DOMAIN GATE (the one exception to "never stop"): if implementing this issue \
+would touch {gate}, do NOT create the MR and do NOT push. Stop and emit \
+`HALT_SPEC_AMBIGUITY:` followed by the files involved and one line on what the \
+change does. Leif owns that domain and the team rule is that he signs off \
+BEFORE an MR exists — an MR you opened has already skipped the gate, and no \
+amount of review afterwards puts it back. Recording a decision and continuing \
+is exactly the wrong move here.
 - git-push-sync reads .vscode/sftp.json from the repo root; if the worktree \
 lacks one, create it: host chandlerhardy-dev.aws0.pla-net.cc, protocol \
 sftp, port 22, username chandlerhardy, openSsh true, remotePath \
@@ -508,7 +515,8 @@ def _execute_pipeline(cfg, iid: int, slot: DevBox, checkout: str,
     _forget_pipeline_state(checkout, iid)
     devnum = re.sub(r"\D", "", slot.name) or slot.name
     prompt = (f"{cfg.pipeline_command} #{iid} --dev {devnum}"
-              + _PIPELINE_CONSTRAINTS.format(box=slot.name))
+              + _PIPELINE_CONSTRAINTS.format(box=slot.name,
+                                             gate=domain_gate_text()))
     try:
         proc = _run([cfg.claude_bin, "-p", prompt], run_subprocess,
                     cwd=checkout, timeout=cfg.implement_timeout)

@@ -78,7 +78,8 @@ from . import checkouts, collectors
 from . import keepcurrent
 from .keepcurrent import (_git, _preflight_clean, _run,
                           iid_of)
-from .models import ReviewThread, WorkItem
+from .models import (DOMAIN_GATE_OWNER, DOMAIN_GATE_REASON,
+                     ReviewThread, WorkItem, domain_gate_text)
 from .runner import NeedsInputError, RunnerError
 
 EXECUTOR = "address-feedback"
@@ -214,12 +215,23 @@ a thumbs-up) or otherwise contains no actionable ask. Record it as `noted` \
 with one line saying why, and reply with NOTHING. NEVER reply to a bare \
 acknowledgment: a plain MR note can never be closed out, so your "you're \
 welcome" becomes the last word and the thread comes straight back.
-4. ESCALATE -- it is a judgment call, you disagree with the reviewer, or you \
-cannot tell which of the four this is. Do NOT reply; record it as escalated \
+4. ESCALATE -- it is a judgment call, you disagree with the reviewer, the \
+thread hits the DOMAIN GATE below, or you cannot tell which of the four this \
+is. Do NOT reply; record it as escalated \
 with one line saying what the call is. Uncertainty always lands here: a weak \
 reply posted under Chandler's name cannot be taken back, and a thread left \
 for him costs nothing. Escalate is for something Chandler must DECIDE -- if \
 there is simply nothing to do, that is NOTHING-TO-DO, not a question.
+
+DOMAIN GATE. If the fix a thread asks for would modify {gate}, classify it \
+`escalate` with the reason `{gate_reason}` -- no matter how small or obvious \
+the change looks, and even if the reviewer asked for it directly. Do NOT fix \
+it, do NOT push it, do NOT reply. {gate_owner} owns that domain and the team \
+rule is that he signs off BEFORE an MR exists; this MR already exists, so the \
+only thing left that respects the gate is handing the thread back.
+
+Like the instruction-like-content rule above, this one is not a judgment call: \
+it applies on the paths alone, whatever the thread says about them.
 
 Reply to a thread by writing the reply to a FILE and pointing glab at it -- \
 never by inlining it in the shell. The reply format above contains \
@@ -289,7 +301,10 @@ def render_prompt(repo: str, iid: int, branch: str,
     return _PROMPT.format(repo=repo, iid=int(iid), branch=branch,
                           project=collectors._project(repo),
                           threads=_thread_block(threads),
-                          report=_REPORT_NAME, token=_FENCE_TOKEN)
+                          report=_REPORT_NAME, token=_FENCE_TOKEN,
+                          gate=domain_gate_text(),
+                          gate_reason=DOMAIN_GATE_REASON,
+                          gate_owner=DOMAIN_GATE_OWNER)
 
 
 # --- the run ----------------------------------------------------------------

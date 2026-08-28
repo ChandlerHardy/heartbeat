@@ -13,6 +13,29 @@ _DEV_URL_RE = re.compile(
     r"https?://[^\s)\]]*[-.]dev\d*[^\s)\]]*\.performancebeef\.com", re.I)
 
 
+# --- the Mongo/DB domain gate (team policy, 2026-08-28) --------------------
+#
+# LeifPedersen owns the Mongo domain, and the team rule is that schema and
+# `\DB\Mongo` changes get his sign-off BEFORE an MR exists. Both unattended
+# prompts have to enforce it from their own side -- the pipeline by refusing to
+# open the MR, address-feedback by refusing to fix and push -- so the paths
+# live in ONE place. Two hand-maintained lists would drift the first time a
+# path is added, and the drift would be silent on both sides.
+DOMAIN_GATE_OWNER = "Leif"
+DOMAIN_GATE_PATHS = ("phplib/local/DB/", "phplib/local/*Mongo*", "db/")
+# The exact reason string the feedback executor records, so the Discord
+# escalation line says which gate stopped it rather than just "escalated".
+DOMAIN_GATE_REASON = "touches DB/Mongo domain — Leif gate"
+
+
+def domain_gate_text() -> str:
+    """What the gate covers, phrased for a prompt. `db/` is the migrations
+    directory; the MySQL clause is there because a schema change can arrive
+    as a plain SQL file that no path glob would catch."""
+    return (", ".join(f"`{p}`" for p in DOMAIN_GATE_PATHS)
+            + ", or any MySQL schema change")
+
+
 def dev_urls(text: str) -> tuple:
     """Every dev-server link in `text`, in order. The plural sibling of
     has_dev_url, added because "is there a link?" and "does it point at the
