@@ -47,6 +47,8 @@ _TERMINAL = ("done", "error")
 # it is never compacted away and never auto-re-proposed. The only path back
 # to `approved` is a fresh Discord ✅ (approvals.apply_approvals).
 _RETAIN_IF_GONE = ("approved", "running", "done", "error", "needs-input")
+# Runnable executors that may ALSO be dismissed. See is_dismissable.
+_DISMISSABLE_RUNNABLE = ("address-feedback",)
 _NEEDS_INPUT = "needs-input"
 # Executors whose approval is tied to the SIZE of the ask, not just the sha.
 # An address-feedback ✅ covers the threads it named; three threads is not the
@@ -169,6 +171,22 @@ def _older_than_days(iso_ts: str, iso_now: str, days: int) -> bool:
     return (now - ts) > datetime.timedelta(days=days)
 
 
+def _normalize_item(raw: dict) -> dict:
+    """JSON has no tuples. `note_refs` goes out as a list of lists and would
+    come back that way, so every loaded row would compare unequal to the
+    freshly-assessed one carrying the same evidence -- and reconcile compares
+    items. Rebuild the shape the dataclass was written with.
+    """
+    item = dict(raw)
+    refs = item.get("note_refs")
+    if isinstance(refs, (list, tuple)):
+        item["note_refs"] = tuple(
+            tuple(str(x) for x in pair[:2])
+            for pair in refs
+            if isinstance(pair, (list, tuple)) and len(pair) >= 2)
+    return item
+
+
 def load_queue(path: str) -> List[QueueRecord]:
     """Load queue records from `path`. Missing file or malformed JSON → []."""
     try:
@@ -190,7 +208,7 @@ def load_queue(path: str) -> List[QueueRecord]:
                 number=int(d["number"]),
                 first_seen=d.get("first_seen", ""),
                 last_seen=d.get("last_seen", ""),
-                item=WorkItem(**d["item"]),
+                item=WorkItem(**_normalize_item(d["item"])),
             ))
         except (KeyError, TypeError, ValueError) as e:
             print(f"worksweep: queue skipping bad record: {e}", file=sys.stderr)
@@ -265,14 +283,23 @@ def auto_approve(records: List[QueueRecord],
 def is_dismissable(item: WorkItem) -> bool:
     """True when a row may be dismissed from the dashboard.
 
-    Non-terminal AND non-runnable. The executor half is the safety gate:
-    anything the runner claims is approve-territory, and dismissing it would
-    silently drop work the human meant to run. What is left -- triage,
-    mr-hygiene, and any other executor nothing executes -- are FYI rows whose
-    only resolution is "I looked at it".
+    Non-terminal, and either non-runnable or one of _DISMISSABLE_RUNNABLE.
+
+    The executor half is a safety gate: anything the runner claims is
+    approve-territory, and dismissing it would silently drop work the human
+    meant to run. Triage, mr-hygiene and friends are FYI rows whose only
+    resolution is "I looked at it".
+
+    `address-feedback` is the exception, because for it both are true at once.
+    A reviewer's "LGTM" on a plain note produces a row that IS runnable and
+    has nothing to run -- and a plain note can never be closed out, so it
+    re-fires forever. It gets BOTH controls: approve runs it, dismiss records
+    which notes were read (see seennotes). Dismiss is not a substitute for
+    running it; it is the answer to a different question.
     """
     return (item.status not in _TERMINAL
-            and item.executor not in RUNNABLE_EXECUTORS)
+            and (item.executor not in RUNNABLE_EXECUTORS
+                 or item.executor in _DISMISSABLE_RUNNABLE))
 
 
 def dismiss(records: List[QueueRecord], number: int,

@@ -1012,3 +1012,83 @@ def test_the_reviewers_come_from_the_mr_the_sweep_already_read():
         discussions=lambda repo, iid: _plain_note(author="dasilvaja")))
     # dasilvaja is not a listed reviewer on THIS MR
     assert "feedback:pb-www!3997" not in _saved_items(posts)
+
+
+# --- dismissal survives the sweep (live: three LGTM rows, 2026-08-28) ----
+
+def _lgtm(note_id=55, author="cmnoble", discussion="d1"):
+    return json.dumps([{"id": discussion, "individual_note": True, "notes": [
+        {"id": note_id, "body": "LGTM", "system": False, "resolvable": False,
+         "resolved": False, "author": {"username": author}}]}])
+
+
+def _seen_deps(posts, discussions, seen=(), queue=None):
+    deps = _probe_deps(posts, _gql(authored_nodes=[_reviewed(
+        reviewers=("cmnoble",))]), discussions=discussions, queue=queue)
+    deps["seen_notes"] = lambda: frozenset(seen)
+    return deps
+
+
+def test_the_row_carries_the_notes_that_produced_it():
+    posts = []
+    run_sweep(_cfg(), _seen_deps(posts, lambda repo, iid: _lgtm()))
+    item = _saved_items(posts)["feedback:pb-www!3997"]
+    assert item.note_refs == (("d1", "55"),)
+
+
+def test_a_dismissed_note_produces_no_row_next_sweep():
+    """FALSIFYING, and the whole point: this is the third LGTM row not coming
+    back."""
+    posts = []
+    run_sweep(_cfg(), _seen_deps(posts, lambda repo, iid: _lgtm(),
+                                 seen={("d1", "55")}))
+    assert "feedback:pb-www!3997" not in _saved_items(posts)
+
+
+def test_a_follow_up_note_brings_the_row_back():
+    """FALSIFYING the other way. Dismiss means "seen this note" -- if a
+    reviewer's follow-up stayed suppressed, dismissal would be a mute button
+    and real feedback would vanish."""
+    posts = []
+    followed_up = json.dumps([{"id": "d1", "individual_note": True, "notes": [
+        {"id": 55, "body": "LGTM", "system": False, "resolvable": False,
+         "resolved": False, "author": {"username": "cmnoble"}},
+        {"id": 77, "body": "actually, one thing", "system": False,
+         "resolvable": False, "resolved": False,
+         "author": {"username": "cmnoble"}}]}])
+    run_sweep(_cfg(), _seen_deps(posts, lambda repo, iid: followed_up,
+                                 seen={("d1", "55")}))
+    item = _saved_items(posts)["feedback:pb-www!3997"]
+    assert item.executor == "address-feedback"
+    assert item.note_refs == (("d1", "77"),)
+
+
+def test_a_dismissed_row_that_stops_being_emitted_stays_done():
+    """The queue row and the seen-set agree: nothing re-proposes it."""
+    posts = []
+    prior = [_queue_rec(12, status="done")]
+    run_sweep(_cfg(), _seen_deps(posts, lambda repo, iid: _lgtm(),
+                                 seen={("d1", "55")}, queue=prior))
+    row = {r.item.id: r for r in _saved(posts)}["feedback:pb-www!3997"]
+    assert row.item.status == "done"
+
+
+def test_without_the_dep_the_sweep_consults_nothing_and_still_works():
+    posts = []
+    deps = _probe_deps(posts, _gql(authored_nodes=[_reviewed(
+        reviewers=("cmnoble",))]), discussions=lambda repo, iid: _lgtm())
+    assert run_sweep(_cfg(), deps) == 0
+    assert "feedback:pb-www!3997" in _saved_items(posts)
+
+
+def test_a_failed_seen_read_never_takes_the_sweep_down():
+    """Fail-safe in the noisy direction: not knowing what was dismissed shows
+    a row again, which is recoverable. Losing the sweep is not."""
+    posts = []
+    deps = _probe_deps(posts, _gql(authored_nodes=[_reviewed(
+        reviewers=("cmnoble",))]), discussions=lambda repo, iid: _lgtm())
+    def boom():
+        raise OSError("disk gone")
+    deps["seen_notes"] = boom
+    assert run_sweep(_cfg(), deps) == 0
+    assert "feedback:pb-www!3997" in _saved_items(posts)

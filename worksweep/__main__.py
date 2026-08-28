@@ -65,16 +65,25 @@ from .formatter import (
     DISCORD_MAX_CHARS, _FOOTER, _HEADER, _truncate_bytes,
     format_messages_from_records, format_reproposed,
 )
+from . import seennotes
 from .queue import (QueueLockError, auto_approve, load_queue, null_lock,
                     reconcile, save_queue, write_lock)
 
 _QUEUE_DEFAULT = os.path.expanduser("~/.worksweep/queue.json")
+# Notes a human has dismissed. Its own file, because a dismissal has to
+# outlive the row it dismissed (see seennotes).
+_SEEN_DEFAULT = os.path.expanduser("~/.worksweep/seen-notes.json")
 _CURSOR_DEFAULT = os.path.expanduser("~/.worksweep/intake-cursor")
 
 
 def _queue_path() -> str:
     """Path to the persistent queue (overridable in tests)."""
     return _QUEUE_DEFAULT
+
+
+def _seen_path() -> str:
+    """Path to the dismissed-notes sidecar (overridable in tests)."""
+    return _SEEN_DEFAULT
 
 
 def _cursor_path() -> str:
@@ -408,7 +417,8 @@ def _run_intake(cfg: WorksweepConfig) -> int:
 
 
 def _with_unaddressed(mr, cfg: WorksweepConfig,
-                      discussions: Callable[[str, int], str]) -> tuple:
+                      discussions: Callable[[str, int], str],
+                      seen=()) -> tuple:
     """`(mr rebound with its unaddressed-thread count, probe_ok)`. Never raises.
 
     Skipped (count stays 0, probe_ok True) for an MR with nothing unresolved --
@@ -438,9 +448,13 @@ def _with_unaddressed(mr, cfg: WorksweepConfig,
         print(f"worksweep: discussions probe for {mr.repo}!{mr.iid} failed: "
               f"{type(e).__name__}: {e}", file=sys.stderr)
         return mr, False
+    threads = collectors.unaddressed_threads(raw, cfg.username, mr.reviewers,
+                                             seen)
+    # Carry the evidence onto the MR so the emitted row can carry it too: the
+    # dashboard only has the row, and a dismissal keys on (discussion, note).
     return dataclasses.replace(
-        mr, unaddressed_count=collectors.parse_unaddressed_count(
-            raw, cfg.username, mr.reviewers)), True
+        mr, unaddressed_count=len(threads),
+        note_refs=tuple((t.id, t.last_note_id) for t in threads)), True
 
 
 PROBE_FAILED_MARKER = "(probe failed)"
@@ -550,11 +564,23 @@ def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
         records0 = deps["load"]()
         prior_by_id = {r.item.id: r.item for r in records0}
         discussions_edge = deps.get("discussions")
+        # Notes a human has already dismissed. Fail-safe in the NOISY
+        # direction: not knowing what was dismissed shows a row again, which
+        # is recoverable, while losing the sweep is not.
+        seen_notes = frozenset()
+        seen_edge = deps.get("seen_notes")
+        if seen_edge is not None:
+            try:
+                seen_notes = frozenset(seen_edge())
+            except Exception as e:
+                print(f"worksweep: could not read dismissed notes: "
+                      f"{type(e).__name__}: {e}", file=sys.stderr)
         probe_failed = set()
         if discussions_edge is not None:
             probed = []
             for mr in authored:
-                mr, ok = _with_unaddressed(mr, cfg, discussions_edge)
+                mr, ok = _with_unaddressed(mr, cfg, discussions_edge,
+                                           seen_notes)
                 probed.append(mr)
                 if not ok:
                     probe_failed.add(f"feedback:{mr.repo}!{mr.iid}")
@@ -908,7 +934,8 @@ def main(argv=None) -> int:
         return _dashboard.serve(_queue_path(), port=args.port, bind=args.bind,
                                 post=_post_discord, webhook=cfg.discord_webhook,
                                 sweep=_kickstart_sweep,
-                                mark_todo_done=_mark_todo_done)
+                                mark_todo_done=_mark_todo_done,
+                                seen_path=_seen_path())
 
     if args.command == "run":
         from . import runner as _runner
@@ -977,6 +1004,7 @@ def main(argv=None) -> int:
     # One read-only GET per stranded MR, and normally none at all -- same
     # reasoning as the probes above, so --dry-run runs it for real too.
     deps["mr_state"] = collectors.collect_mr_state
+    deps["seen_notes"] = lambda: seennotes.load_seen(_seen_path(), _now())
     if not args.dry_run:
         deps["queue_lock"] = lambda: write_lock(_queue_path())
     return run_sweep(cfg, deps)

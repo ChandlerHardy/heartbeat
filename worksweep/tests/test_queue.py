@@ -333,3 +333,59 @@ def test_reconcile_reports_only_the_records_that_actually_reset():
     resets = set()
     reconcile(prior, fresh, "2026-08-25T09:00:00Z", resets=resets)
     assert resets == {1}
+
+
+# --- address-feedback rows get BOTH controls (2026-08-28) ----------------
+#
+# Three permanent proposed rows whose entire content was "LGTM" could not be
+# dismissed, because dismissability was "non-runnable" and this executor is
+# runnable. Approve and dismiss are not alternatives here: approve runs it,
+# dismiss says "I read it and there is nothing to run".
+
+def _fb_item(status="proposed", executor="address-feedback"):
+    from worksweep.models import WorkItem
+    return WorkItem(schema_version=1, id="feedback:pb-www!4084", repo="pb-www",
+                    kind="feedback", executor=executor, risk="low",
+                    why="1 unaddressed thread", web_url="u", sha="s",
+                    status=status, note_refs=(("d1", "101"),))
+
+
+def test_an_address_feedback_row_is_dismissable():
+    """FALSIFYING. Runnable used to mean undismissable, which left the LGTM
+    rows with no resolution at all."""
+    from worksweep.queue import is_dismissable
+    assert is_dismissable(_fb_item()) is True
+
+
+def test_it_is_still_approvable_too():
+    """Both controls. Dismiss is not a substitute for running it."""
+    from worksweep import dashboard
+    assert dashboard.has_checkbox(_fb_item()) is True
+
+
+def test_other_runnable_rows_stay_undismissable():
+    """The safety gate that made this rule is unchanged everywhere else:
+    dismissing a magi or implement row silently drops real work."""
+    from worksweep.queue import is_dismissable
+    for executor in ("magi-review", "keep-current", "implement", "park"):
+        assert is_dismissable(_fb_item(executor=executor)) is False, executor
+
+
+def test_a_terminal_feedback_row_is_not_dismissable_again():
+    from worksweep.queue import is_dismissable
+    for status in ("done", "error"):
+        assert is_dismissable(_fb_item(status=status)) is False, status
+
+
+def test_dismissing_records_the_notes_it_saw(tmp_path):
+    """The point of the whole round: the dismissal has to outlive the row."""
+    from worksweep.queue import dismiss
+    from worksweep.models import QueueRecord
+    now = "2026-08-28T12:00:00+00:00"
+    rec = QueueRecord(number=7, first_seen=now, last_seen=now,
+                      item=_fb_item())
+    out, dismissed = dismiss([rec], 7, now)
+    assert dismissed is not None
+    assert out[0].item.status == "done"
+    assert out[0].item.done_reason == "dismissed"
+    assert dismissed.item.note_refs == (("d1", "101"),)

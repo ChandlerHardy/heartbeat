@@ -146,6 +146,9 @@ class MergeRequest:
     # and simply proposes no `address-feedback` work. Never mutated -- the
     # sweep rebinds via dataclasses.replace.
     unaddressed_count: int = 0
+    # (discussion id, last note id) for each unaddressed thread, so the item
+    # the assessor emits can carry the evidence a dismissal keys on.
+    note_refs: tuple = ()
 
     @property
     def dev_url_present(self) -> bool:
@@ -176,6 +179,10 @@ class ReviewNote:
     system: bool
     body: str
     created_at: str = ""
+    # GitLab's own note id. It is the second half of the dismissal key: a
+    # dismissal says "I have seen THIS note", so a follow-up on the same
+    # discussion is a different key and comes straight back.
+    id: str = ""
 
 
 @dataclass(frozen=True)
@@ -200,6 +207,9 @@ class ReviewThread:
     # in code rather than merely asked for in a prompt.
     resolved_by: str = ""
     notes: tuple = ()               # tuple[ReviewNote, ...], in payload order
+    # id of the note `last_author`/`last_note` came from -- the same one the
+    # last-word calculation used, so a dismissal keys on what the human read.
+    last_note_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -276,6 +286,13 @@ class WorkItem:
     mr_iid: int = 0           # Draft MR iid opened by the `implement` executor
     branch: str = ""          # M4 Task H: mr.source_branch, set by assess_stale --
                               # the `keep-current` executor's checkout target
+    # (discussion id, last note id) pairs for a feedback row's unaddressed
+    # threads. Dismissing the row records these, and the predicate then skips
+    # exactly those notes -- so dismissal means "I read this", and a reviewer's
+    # follow-up changes the note id and brings the row straight back. Empty on
+    # every other kind, and on any feedback row written before this existed
+    # (which simply needs one more sweep to carry them).
+    note_refs: tuple = ()
     todo_id: int = 0          # GitLab todo id for `kind == "todo"` items, so the
                               # dashboard's Dismiss can mark the todo done. 0 for
                               # every other kind, and for todo records written
