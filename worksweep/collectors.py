@@ -268,6 +268,34 @@ def parse_threads(raw_json) -> tuple:
     return tuple(out)
 
 
+# The complete bodies that count as "a reviewer closing the loop". Matched
+# against the WHOLE note body (normalized) -- "LGTM, but rename X" carries an
+# ask and must never match. Multi-line bodies never match for the same reason.
+_ACK_BODIES = frozenset((
+    "lgtm", "looks good", "looks good to me", "looksgoodtome",
+    "approved", "approve", "ship it", "shipit", "+1",
+    "nice", "nice work", "great work", "\U0001F44D", "\U0001F680",
+    "\U0001F389", "\u2705",
+))
+_ACK_STRIP = " \t!.\U0001F44D\U0001F680\U0001F389\u2705\U0001F64C\u2764\ufe0f"
+
+
+def is_pure_ack(body) -> bool:
+    """Whether `body` is NOTHING BUT an approval ("LGTM", "Looks good to
+    me!", a thumbs-up). Exact-on-the-whole-body by design: any additional
+    sentence, line, or clause means an ask might be riding along, and the
+    cost of a false negative (one hand-dismissal) is nothing next to a false
+    positive (a real ask suppressed silently).
+    """
+    if not isinstance(body, str):
+        return False
+    text = body.strip()
+    if not text or "\n" in text:
+        return False
+    text = text.strip(_ACK_STRIP).lower().replace(",", "")
+    return text in _ACK_BODIES or (text == "" and bool(body.strip()))
+
+
 def unaddressed_threads(raw_json, username: str, reviewers=(),
                         seen=()) -> tuple:
     """The threads on this MR that are waiting on `username`.
@@ -310,6 +338,12 @@ def unaddressed_threads(raw_json, username: str, reviewers=(),
         # follow-up changes `last_note_id`, so the key stops matching and the
         # row returns -- "seen this note", never "mute this thread".
         if (t.id, t.last_note_id) in dismissed:
+            continue
+        # A listed reviewer whose ENTIRE last word is an approval token has
+        # closed the loop, not opened one -- on either arm. The executor may
+        # not resolve threads, so without this a diff thread ending in a bare
+        # "LGTM" nags forever with nothing to do (cmnoble on !4084).
+        if t.last_author in listed and is_pure_ack(t.last_note):
             continue
         if t.resolvable:
             if not t.resolved:

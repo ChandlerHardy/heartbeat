@@ -634,6 +634,8 @@ def test_mr_reviewers_never_raises():
 #
 # The plain-note sensor's first sweep produced three permanent proposed rows
 # whose entire content is "LGTM" (cmnoble on !4084, adamsoper on !3981/!3982).
+# (Bare acks are now suppressed upstream by is_pure_ack; dismissal remains the
+# tool for every reviewer note that carries words but no ask.)
 # Dismissing has to mean "I have seen THIS note", never "mute this thread" --
 # so the evidence is the (discussion, last note) pair, not the thread id.
 
@@ -699,9 +701,11 @@ def test_the_seen_key_is_the_pair_not_either_half():
 
 
 def test_the_seen_set_applies_to_plain_notes_too():
-    """The LGTM rows that motivated this are plain notes."""
+    """The nag rows that motivated this were bare-LGTM plain notes; those are
+    suppressed upstream by is_pure_ack now, so the fixture carries a real nit
+    to stay on the dismissal path."""
     raw = json.dumps([{"id": "d1", "individual_note": True,
-                       "notes": [_idnote("cmnoble", 55, "LGTM",
+                       "notes": [_idnote("cmnoble", 55, "one nit: rename it",
                                          resolvable=False)]}])
     assert unaddressed_threads(raw, "chandler.hardy", ("cmnoble",)) != ()
     assert unaddressed_threads(raw, "chandler.hardy", ("cmnoble",),
@@ -712,3 +716,72 @@ def test_the_seen_set_is_optional():
     raw = json.dumps([{"id": "d1", "notes": [_idnote("leyang", 101)]}])
     assert unaddressed_threads(raw, "chandler.hardy") != ()
     assert parse_unaddressed_count(raw, "chandler.hardy") == 1
+
+
+# --- pure-ack suppression (live friction: cmnoble's "LGTM" on !4084) -------
+#
+# A plain note whose ENTIRE body is an approval token ("LGTM", "Looks good
+# to me", a thumbs-up) is a reviewer closing the loop, not an ask -- parking
+# an address-feedback row on it makes Chandler dismiss praise by hand. The
+# match is exact-on-the-whole-body by design: "LGTM, but rename X" carries an
+# ask and must keep counting.
+
+def _plain_with_body(tid, author, body):
+    return {"id": tid, "individual_note": True,
+            "notes": [_note(author, body, resolvable=False)]}
+
+
+def test_a_reviewers_bare_lgtm_is_not_unaddressed():
+    for body in ("LGTM", "lgtm!", "  Looks good to me  ", "Looks good",
+                 "Approved", "ship it", "+1", "\U0001F44D",
+                 "LGTM \U0001F680", "Nice work!"):
+        raw = json.dumps([_plain_with_body("t1", "dasilvaja", body)])
+        assert unaddressed_threads(raw, "chandler.hardy", REVIEWERS) == (), body
+
+
+def test_an_lgtm_with_an_ask_still_counts():
+    for body in ("LGTM, but rename the flag first",
+                 "Looks good to me.\nOne thing though: the cron window",
+                 "LGTM once CI is green and the secret is deployed",
+                 "Not LGTM"):
+        raw = json.dumps([_plain_with_body("t1", "dasilvaja", body)])
+        got = unaddressed_threads(raw, "chandler.hardy", REVIEWERS)
+        assert tuple(t.id for t in got) == ("t1",), body
+
+
+def test_ack_suppression_only_speaks_for_listed_reviewers():
+    # A passer-by's LGTM was already ignored; a reviewer's real note that
+    # FOLLOWS someone else's LGTM keeps counting (the ack is not the last
+    # word).
+    raw = json.dumps([{"id": "t1", "individual_note": True,
+                       "notes": [_note("leyang", "LGTM", resolvable=False),
+                                 _note("dasilvaja", "please add a test",
+                                       resolvable=False)]}])
+    got = unaddressed_threads(raw, "chandler.hardy", REVIEWERS)
+    assert tuple(t.id for t in got) == ("t1",)
+
+
+def test_an_unresolved_diff_thread_ending_in_a_pure_ack_is_settled():
+    # The reviewer wrote "LGTM" under a diff thread and never clicked
+    # resolve. The executor is forbidden to resolve threads, so without
+    # suppression this row nags forever with nothing to do.
+    raw = json.dumps([{"id": "t1", "individual_note": False,
+                       "notes": [_note("dasilvaja", "is this right?",
+                                       resolvable=True),
+                                 _note("chandler.hardy", "yes, because ...",
+                                       resolvable=False),
+                                 _note("dasilvaja", "LGTM",
+                                       resolvable=False)]}])
+    assert unaddressed_threads(raw, "chandler.hardy", REVIEWERS) == ()
+
+
+def test_an_unresolved_diff_thread_ending_in_an_ack_from_a_nonreviewer_counts():
+    # Only a LISTED reviewer's ack settles: same evidence rule as the
+    # plain-note arm.
+    raw = json.dumps([{"id": "t1", "individual_note": False,
+                       "notes": [_note("dasilvaja", "is this right?",
+                                       resolvable=True),
+                                 _note("some-observer", "LGTM",
+                                       resolvable=False)]}])
+    got = unaddressed_threads(raw, "chandler.hardy", REVIEWERS)
+    assert tuple(t.id for t in got) == ("t1",)

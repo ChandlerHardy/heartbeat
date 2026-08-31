@@ -1018,7 +1018,7 @@ def test_the_reviewers_come_from_the_mr_the_sweep_already_read():
 
 def _lgtm(note_id=55, author="cmnoble", discussion="d1"):
     return json.dumps([{"id": discussion, "individual_note": True, "notes": [
-        {"id": note_id, "body": "LGTM", "system": False, "resolvable": False,
+        {"id": note_id, "body": "one nit: rename it", "system": False, "resolvable": False,
          "resolved": False, "author": {"username": author}}]}])
 
 
@@ -1051,7 +1051,7 @@ def test_a_follow_up_note_brings_the_row_back():
     and real feedback would vanish."""
     posts = []
     followed_up = json.dumps([{"id": "d1", "individual_note": True, "notes": [
-        {"id": 55, "body": "LGTM", "system": False, "resolvable": False,
+        {"id": 55, "body": "one nit: rename it", "system": False, "resolvable": False,
          "resolved": False, "author": {"username": "cmnoble"}},
         {"id": 77, "body": "actually, one thing", "system": False,
          "resolvable": False, "resolved": False,
