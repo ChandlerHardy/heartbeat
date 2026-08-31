@@ -15,9 +15,10 @@
     launchctl unload -w ~/Library/LaunchAgents/com.chandlerhardy.worksweep.plist
   Logs: ~/heartbeat-reports/worksweep.log (stdout) / worksweep.err (stderr)
 
-  Sweeps run at 9am / 1pm / 5pm CT (5pm added 2026-08-31: an MR created after
-  the 1pm sweep sat behind master until next morning -- the keep-current lane
-  needs an end-of-day pass).
+  Sweeps run every 3 hours across the working day: 8am / 11am / 2pm / 5pm /
+  8pm CT (2026-08-31: keep-current wants <=3h staleness against master while
+  colleagues are merging; no overnight runs because the digest contract is
+  never-silence and master does not move at 3am).
 -->
 <plist version="1.0">
 <dict>
@@ -35,19 +36,31 @@
     <array>
         <dict>
             <key>Hour</key>
-            <integer>9</integer>
+            <integer>8</integer>
             <key>Minute</key>
             <integer>0</integer>
         </dict>
         <dict>
             <key>Hour</key>
-            <integer>13</integer>
+            <integer>11</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+        <dict>
+            <key>Hour</key>
+            <integer>14</integer>
             <key>Minute</key>
             <integer>0</integer>
         </dict>
         <dict>
             <key>Hour</key>
             <integer>17</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+        <dict>
+            <key>Hour</key>
+            <integer>20</integer>
             <key>Minute</key>
             <integer>0</integer>
         </dict>
