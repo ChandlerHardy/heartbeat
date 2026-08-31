@@ -66,6 +66,7 @@ from .formatter import (
     DISCORD_MAX_CHARS, _FOOTER, _HEADER, _truncate_bytes,
     format_messages_from_records, format_reproposed,
 )
+from . import reviewedstate
 from . import seennotes
 from .queue import (QueueLockError, auto_approve, load_queue, null_lock,
                     reconcile, save_queue, write_lock)
@@ -85,6 +86,11 @@ def _queue_path() -> str:
 def _seen_path() -> str:
     """Path to the dismissed-notes sidecar (overridable in tests)."""
     return _SEEN_DEFAULT
+
+
+def _reviewed_path() -> str:
+    """Path to the re-review sensor's reviewed-state sidecar."""
+    return os.path.join(os.path.dirname(_SEEN_DEFAULT), "reviewed-state.json")
 
 
 def _cursor_path() -> str:
@@ -590,6 +596,34 @@ def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
         items = []
         for mr in review_mrs:
             items += assessor.assess_review_request(mr, cfg.username)
+        # Re-review sensing (the reverse-direction twin of the plain-note
+        # sensor). The sidecar remembers the head each reviewed MR was at;
+        # first sight SEEDS quietly, a later head fires a row. Edges are
+        # opt-in like every other side channel: absent -> sensor off.
+        reviewed_load = deps.get("reviewed_state")
+        reviewed_record = deps.get("record_reviewed")
+        if reviewed_load is not None:
+            reviewed = {}
+            try:
+                reviewed = dict(reviewed_load())
+            except Exception as e:
+                print(f"worksweep: could not read reviewed-state: "
+                      f"{type(e).__name__}: {e}", file=sys.stderr)
+            for mr in review_mrs:
+                if (cfg.username in mr.reviewers
+                        and mr.my_review_state in assessor.RE_REVIEW_WAITING_STATES):
+                    key = f"{mr.repo}!{mr.iid}"
+                    if key not in reviewed:
+                        if reviewed_record is not None:
+                            try:
+                                reviewed_record(key, mr.sha)
+                            except Exception as e:
+                                print(f"worksweep: could not seed reviewed-state "
+                                      f"for {key}: {type(e).__name__}: {e}",
+                                      file=sys.stderr)
+                        continue
+                    items += assessor.assess_re_review(mr, cfg.username,
+                                                       reviewed[key])
         records0 = assessor.bootstrap_magi_records(
             records0, authored, deps["now"]())
         for mr in authored:
@@ -655,6 +689,9 @@ def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
                 items.append(_retained_feedback(prior_by_id[fid]))
 
         resolved = assessor.resolutions(review_mrs, cfg.username, authored)
+        if reviewed_load is not None:
+            resolved.update(assessor.re_review_resolutions(
+                review_mrs, cfg.username, reviewed))
         # An MR that merged or closed takes every row it stranded with it.
         # Probing happens HERE, outside the lock, because it is a read; the
         # closures are applied by reconcile inside it.
@@ -943,7 +980,10 @@ def main(argv=None) -> int:
                                 post=_post_discord, webhook=cfg.discord_webhook,
                                 sweep=_kickstart_sweep,
                                 mark_todo_done=_mark_todo_done,
-                                seen_path=_seen_path())
+                                seen_path=_seen_path(),
+                                record_reviewed=lambda key, sha:
+                                    reviewedstate.record_state(
+                                        _reviewed_path(), key, sha, _now()))
 
     if args.command == "run":
         from . import runner as _runner
@@ -1013,6 +1053,10 @@ def main(argv=None) -> int:
     # reasoning as the probes above, so --dry-run runs it for real too.
     deps["mr_state"] = collectors.collect_mr_state
     deps["seen_notes"] = lambda: seennotes.load_seen(_seen_path(), _now())
+    deps["reviewed_state"] = lambda: reviewedstate.load_state(
+        _reviewed_path(), _now())
+    deps["record_reviewed"] = lambda key, sha: reviewedstate.record_state(
+        _reviewed_path(), key, sha, _now())
     if not args.dry_run:
         deps["queue_lock"] = lambda: write_lock(_queue_path())
     return run_sweep(cfg, deps)

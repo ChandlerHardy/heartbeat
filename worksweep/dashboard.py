@@ -2160,8 +2160,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
         self._mark_todo_done(target.item, number)
         self._record_seen_notes(target.item, number)
+        self._record_reviewed_sha(target.item, number)
         self._audit_dismiss(number, target.item, actor)
         self._json(200, {"dismissed": True, "number": number})
+
+    def _record_reviewed_sha(self, item, number: int) -> None:
+        """Dismissing a re_review row means "I re-reviewed this head myself":
+        record the row's sha so the sensor resolves instead of re-proposing.
+        A later push changes the head and the row comes back — evidence-keyed,
+        exactly like seen-notes."""
+        if getattr(item, "kind", "") != "re_review" or not getattr(item, "sha", ""):
+            return
+        record = getattr(self.server, "record_reviewed", None)
+        if record is None:
+            return
+        iid = mr_iid_of(item)
+        if not iid:
+            return
+        try:
+            record(f"{item.repo}!{iid}", item.sha)
+        except Exception as e:
+            print(f"worksweep: dismissing #{number} could not record reviewed "
+                  f"sha: {type(e).__name__}: {e}", file=sys.stderr)
 
     def _record_seen_notes(self, item, number: int) -> None:
         """Remember which notes this dismissal covered, so the next sweep does
@@ -2280,7 +2300,8 @@ def make_server(address: Tuple[str, int], queue_path: str,
                 now: Optional[Callable[[], str]] = None,
                 sweep: Optional[Callable[[], None]] = None,
                 mark_todo_done: Optional[Callable[[int], None]] = None,
-                seen_path: str = ""
+                seen_path: str = "",
+                record_reviewed: Optional[Callable[[str, str], None]] = None
                 ) -> _DashboardServer:
     """Build (but do not start) the dashboard server.
 
@@ -2299,6 +2320,10 @@ def make_server(address: Tuple[str, int], queue_path: str,
     httpd.sweep_last = 0.0
     httpd.mark_todo_done = mark_todo_done
     httpd.seen_path = seen_path
+    # Injected edge: dismissing a re_review row records "reviewed at sha"
+    # into the reviewedstate sidecar; None -> recording silently off (tests,
+    # older callers).
+    httpd.record_reviewed = record_reviewed
     return httpd
 
 
@@ -2371,6 +2396,7 @@ def serve(queue_path: str, port: int = DEFAULT_PORT, bind: str = "auto",
           sweep: Optional[Callable[[], None]] = None,
           mark_todo_done: Optional[Callable[[int], None]] = None,
           seen_path: str = "",
+          record_reviewed: Optional[Callable[[str, str], None]] = None,
           run_subprocess: Callable = subprocess.run,
           sleep: Callable[[float], None] = time.sleep,
           max_attempts: int = 0) -> int:
@@ -2404,7 +2430,8 @@ def serve(queue_path: str, port: int = DEFAULT_PORT, bind: str = "auto",
                 httpd = make_server((address, port), queue_path,
                                     post=post, webhook=webhook, sweep=sweep,
                                     mark_todo_done=mark_todo_done,
-                                    seen_path=seen_path)
+                                    seen_path=seen_path,
+                                    record_reviewed=record_reviewed)
             except OSError as e:
                 print(f"worksweep: dashboard cannot bind {address}:{port} "
                       f"({e})", file=sys.stderr)

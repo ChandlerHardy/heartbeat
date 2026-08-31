@@ -58,6 +58,59 @@ def assess_review_request(mr: MergeRequest, username: str) -> List[WorkItem]:
         risk="low", why=why, web_url=mr.web_url, sha=mr.sha, title=mr.title)]
 
 
+# GitLab reviewState values meaning "my review is finished and the ball is
+# in the author's court". APPROVED is deliberately excluded: post-LGTM pushes
+# either auto-unapprove (routing back to the review_request lane) or are the
+# maintainer's business — a re-review nag on an approved MR is noise.
+RE_REVIEW_WAITING_STATES = ("REVIEWED", "REQUESTED_CHANGES")
+
+
+def assess_re_review(mr: MergeRequest, username: str,
+                     reviewed_sha: str) -> List[WorkItem]:
+    """The reverse-direction twin of the plain-note sensor: the author moved
+    the branch after my review finished, so they are waiting on my re-review
+    or LGTM and nothing else says so (reviewState stays REVIEWED unless the
+    author clicks re-request review — most don't; origin ck-www !401 and
+    pb-www !4076, 2026-08-31).
+
+    `reviewed_sha` is the sidecar's record of the head I dealt with; ""
+    means first sight, which SEEDS quietly rather than firing retroactively.
+    """
+    if username not in mr.reviewers:
+        return []
+    if mr.my_review_state not in RE_REVIEW_WAITING_STATES:
+        return []
+    if not reviewed_sha or reviewed_sha == mr.sha:
+        return []
+    why = (f"author moved the branch since your review "
+           f"({reviewed_sha[:8]} \u2192 {mr.sha[:8]}) \u2014 re-review/LGTM awaited")
+    return [WorkItem(
+        schema_version=1, id=f"re-review:{mr.repo}!{mr.iid}",
+        repo=mr.repo, kind="re_review", executor="magi-review",
+        risk="low", why=why, web_url=mr.web_url, sha=mr.sha, title=mr.title)]
+
+
+def re_review_resolutions(review_mrs: List[MergeRequest], username: str,
+                          reviewed: dict) -> dict:
+    """ids of re-review rows the sensor says are settled. Three ways out:
+    the review lane reopened (author re-requested \u2192 a fresh review_request
+    row supersedes), the MR got approved, or the recorded sha caught up with
+    the head (the executor or a dismissal marked this head dealt with)."""
+    out = {}
+    for mr in review_mrs:
+        key = f"{mr.repo}!{mr.iid}"
+        if key not in reviewed:
+            continue
+        rid = f"re-review:{mr.repo}!{mr.iid}"
+        if username in mr.reviewers and mr.my_review_state in REVIEW_ACTIONABLE_STATES:
+            out[rid] = "review-lane-active"
+        elif mr.my_review_state == "APPROVED":
+            out[rid] = "approved"
+        elif reviewed.get(key) == mr.sha:
+            out[rid] = "re-reviewed"
+    return out
+
+
 def resolutions(review_mrs: List[MergeRequest], username: str,
                authored: List[MergeRequest] = ()) -> dict:
     """ids the sensor says are settled: review items where my state is a

@@ -1092,3 +1092,59 @@ def test_a_failed_seen_read_never_takes_the_sweep_down():
     deps["seen_notes"] = boom
     assert run_sweep(_cfg(), deps) == 0
     assert "feedback:pb-www!3997" in _saved_items(posts)
+
+
+# --- re-review sensor wiring (reverse twin of the plain-note sensor) --------
+
+def _rr_deps(posts, state, recorded, node):
+    deps = _deps(posts, _gql(review_nodes=[node]))
+    deps["reviewed_state"] = lambda: dict(state)
+    deps["record_reviewed"] = lambda key, sha: recorded.append((key, sha))
+    return deps
+
+
+def test_first_sight_of_a_reviewed_mr_seeds_quietly():
+    """Turning the sensor on must not fire a retroactive storm."""
+    posts, recorded = [], []
+    run_sweep(_cfg(), _rr_deps(posts, {}, recorded,
+                               _node(iid=9, state="REVIEWED")))
+    assert recorded == [("pb-www!9", "s9")]
+    assert "re-review:pb-www!9" not in _saved_items(posts)
+
+
+def test_a_moved_head_after_review_fires_the_row():
+    """FALSIFYING: this is ck-www !401 / pb-www !4076 not sitting silent."""
+    posts, recorded = [], []
+    run_sweep(_cfg(), _rr_deps(posts, {"pb-www!9": "old-sha"}, recorded,
+                               _node(iid=9, state="REVIEWED")))
+    item = _saved_items(posts)["re-review:pb-www!9"]
+    assert item.kind == "re_review"
+    assert item.executor == "magi-review"
+    assert item.sha == "s9"
+    assert recorded == []          # known key is never re-seeded
+
+
+def test_an_unmoved_head_stays_quiet_and_reseeds_nothing():
+    posts, recorded = [], []
+    run_sweep(_cfg(), _rr_deps(posts, {"pb-www!9": "s9"}, recorded,
+                               _node(iid=9, state="REVIEWED")))
+    assert "re-review:pb-www!9" not in _saved_items(posts)
+    assert recorded == []
+
+
+def test_actionable_review_state_takes_the_review_request_lane_instead():
+    posts, recorded = [], []
+    run_sweep(_cfg(), _rr_deps(posts, {"pb-www!9": "old-sha"}, recorded,
+                               _node(iid=9, state="UNREVIEWED")))
+    items = _saved_items(posts)
+    assert "re-review:pb-www!9" not in items
+    assert "review:pb-www!9" in items
+
+
+def test_a_failed_reviewed_state_read_never_takes_the_sweep_down():
+    posts = []
+    deps = _deps(posts, _gql(review_nodes=[_node(iid=9, state="REVIEWED")]))
+    def boom():
+        raise OSError("sidecar unreadable")
+    deps["reviewed_state"] = boom
+    assert run_sweep(_cfg(), deps) == 0

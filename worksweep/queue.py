@@ -299,7 +299,11 @@ def is_dismissable(item: WorkItem) -> bool:
     """
     return (item.status not in _TERMINAL
             and (item.executor not in RUNNABLE_EXECUTORS
-                 or item.executor in _DISMISSABLE_RUNNABLE))
+                 or item.executor in _DISMISSABLE_RUNNABLE
+                 # re_review gets BOTH controls for the address-feedback
+                 # reason: approve runs the targeted magi pass, dismiss
+                 # records "I re-reviewed this head myself" (reviewedstate).
+                 or getattr(item, "kind", "") == "re_review"))
 
 
 def dismiss(records: List[QueueRecord], number: int,
