@@ -313,7 +313,8 @@ def execute(item: WorkItem, cfg,
         # problems"). `--no-rebuttal` is gone as of magi 0.2.4 -- the rebuttal
         # round is performed mechanically now, and passing a flag it no longer
         # defines is an unknown-argument error, not a no-op.
-        drafts = " --draft-findings" if item.kind == "review_request" else ""
+        drafts = (" --draft-findings"
+                  if item.kind in ("review_request", "re_review") else "")
         proc = run_subprocess(
             [cfg.claude_bin, "-p", f"/magi:magi-review !{iid}{drafts}"],
             cwd=checkout, capture_output=True, text=True,
@@ -475,6 +476,18 @@ def _run_magi_pass(cfg, deps: Dict[str, Callable], lock_path: str) -> int:
             deps, cfg, target.number,
             lambda fresh: complete(fresh, target.number, result_sha, report_path,
                                    deps["now"]()))
+        if updated is not None and target.item.kind == "re_review":
+            # The re-review is done at this head: record it so the sensor's
+            # sha comparison resolves the row instead of re-proposing it.
+            record_edge = deps.get("record_reviewed")
+            if record_edge is not None:
+                try:
+                    record_edge(f"{target.item.repo}!{_iid_of(target.item)}",
+                                result_sha or target.item.sha)
+                except Exception as e:
+                    print(f"worksweep: could not record reviewed sha for "
+                          f"#{target.number}: {type(e).__name__}: {e}",
+                          file=sys.stderr)
         if updated is not None:
             verdict = extract_verdict(report_path) if report_path else ""
             msg = (f"🧙 magi-review done — #{target.number} {target.item.repo} "
