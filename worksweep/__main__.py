@@ -60,6 +60,7 @@ from . import assessor, collectors, curator, devslots, implementer, keepcurrent
 from .approvals import apply_approvals
 from .config import WorksweepConfig, load_config
 from .discord_read import fetch_messages
+from . import models
 from .models import WorkItem
 from .formatter import (
     DISCORD_MAX_CHARS, _FOOTER, _HEADER, _truncate_bytes,
@@ -922,6 +923,13 @@ def main(argv=None) -> int:
     except RuntimeError as e:
         print(f"worksweep: {e}", file=sys.stderr)
         return 1
+
+    # Resolve the domain gate ONCE per process, from the configured registry
+    # (or the default ferdinand-checkout path). Every later
+    # touches_domain_gate() call uses this resolution; a missing or invalid
+    # registry leaves the baked-in fallback in force.
+    models.refresh_domain_gate(cfg.domain_registry_path
+                               or models.DEFAULT_DOMAIN_REGISTRY)
 
     if args.command == "intake":
         return _run_intake(cfg)
