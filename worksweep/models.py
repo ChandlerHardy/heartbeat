@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import fnmatch
+import json
+import os
 import re
 from dataclasses import dataclass
 
@@ -45,6 +47,99 @@ _TEST_COMPONENTS = frozenset(("test", "tests", "phpunit", "spec", "__tests__"))
 _GATED_SUFFIXES = (".sql",)
 
 
+# --- registry-driven gate (domain-check skill, 2026-08-31) -----------------
+#
+# The path list above is the FALLBACK. The canonical source is the
+# domain-check skill's domains.json in the ferdinand checkout (spec:
+# ferdinand-personal docs/specs/2026-08-31-domain-guard-design.md), so the
+# skill, magi, and this gate can never drift apart again -- four
+# hand-maintained copies of "Leif's paths" is how the !4083 incident got
+# three different answers. Fail-closed: a missing, unparseable, invalid, or
+# empty-for-pb-www registry means the baked-in list above stays in force,
+# because an absent registry must never mean an absent gate.
+DEFAULT_DOMAIN_REGISTRY = os.path.expanduser(
+    "~/repos/ferdinand/.claude/skills/domain-check/domains.json")
+# The repo this sweep gates. Worksweep is a pb-www sensor; registry domains
+# scoped to other repos (pb-api contracts) are review guidance for other
+# tools, not push blockers here.
+_GATE_REPO = "pb-www"
+
+# (patterns, exclusions) actually in force. None = not yet resolved; resolved
+# lazily on first use so importing models never does I/O.
+_active_gate = None
+
+
+def _registry_gate_patterns(doc, repo):
+    """(patterns, exclusions) for `repo` from a parsed registry, or None.
+
+    Registry globs use `**`; fnmatch has no path-aware `**` (its `*` already
+    crosses slashes), so `**` collapses to `*` -- and a leading `**/` also
+    emits the stripped variant, or `**/migration*/**` would silently miss a
+    top-level `migrations/` directory.
+
+    Only domains with at least one gate-severity rule contribute: an
+    advisory-only domain is review guidance, and treating it as a push
+    blocker would freeze the executors on nitpicks.
+    """
+    def normalize(glob):
+        low = glob.lower()
+        out = [low.replace("**", "*")]
+        if low.startswith("**/"):
+            out.append(low[3:].replace("**", "*"))
+        return out
+
+    if not isinstance(doc, dict) or doc.get("version") != 1:
+        return None
+    patterns, exclusions = [], []
+    for domain in doc.get("domains") or ():
+        if not isinstance(domain, dict):
+            return None
+        if repo not in (domain.get("repos") or ()):
+            continue
+        rules = domain.get("rules") or ()
+        if not any(isinstance(r, dict) and r.get("severity") == "gate"
+                   for r in rules):
+            continue
+        for glob in domain.get("paths") or ():
+            if not isinstance(glob, str) or not glob:
+                return None
+            patterns.extend(normalize(glob))
+        for glob in domain.get("path_exclusions") or ():
+            if not isinstance(glob, str) or not glob:
+                return None
+            exclusions.extend(normalize(glob))
+    if not patterns:
+        # Valid registry, nothing gated for this repo: weaker than the
+        # fallback, so it does not win. (Also the invalid-shape cases above.)
+        return None
+    return (tuple(patterns), tuple(exclusions))
+
+
+def refresh_domain_gate(path=DEFAULT_DOMAIN_REGISTRY):
+    """(Re)resolve the active gate from `path`; None or unreadable -> fallback.
+
+    Called at executor startup with the configured registry path, and by
+    tests. Returns the (patterns, exclusions) now in force.
+    """
+    global _active_gate
+    resolved = None
+    if path:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                resolved = _registry_gate_patterns(json.load(fh), _GATE_REPO)
+        except (OSError, ValueError):
+            resolved = None
+    _active_gate = resolved if resolved else (DOMAIN_GATE_PATHS, ())
+    return _active_gate
+
+
+def _gate_in_force():
+    global _active_gate
+    if _active_gate is None:
+        refresh_domain_gate()
+    return _active_gate
+
+
 def touches_domain_gate(paths) -> tuple:
     """The subset of `paths` that falls inside Leif's domain, in order.
 
@@ -77,7 +172,10 @@ def touches_domain_gate(paths) -> tuple:
         # matcher whose answer depends on which one a file happens to resemble
         # is one that fails quietly the first time somebody names a file
         # differently than the pattern author expected.
-        for pattern in DOMAIN_GATE_PATHS:
+        patterns, exclusions = _gate_in_force()
+        if any(fnmatch.fnmatch(lowered, ex) for ex in exclusions):
+            continue
+        for pattern in patterns:
             low_pattern = pattern.lower()
             hit = (lowered.startswith(low_pattern) if pattern.endswith("/")
                    else fnmatch.fnmatch(lowered, low_pattern))
@@ -91,7 +189,8 @@ def domain_gate_text() -> str:
     """What the gate covers, phrased for a prompt. `db/` is the migrations
     directory; the MySQL clause is there because a schema change can arrive
     as a plain SQL file that no path glob would catch."""
-    return (", ".join(f"`{p}`" for p in DOMAIN_GATE_PATHS)
+    patterns, _ = _gate_in_force()
+    return (", ".join(f"`{p}`" for p in patterns)
             + ", or any MySQL schema change")
 
 

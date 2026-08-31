@@ -32,6 +32,12 @@ class WorksweepConfig:
     # rather than borrowing `runner_timeout` -- which is also address-feedback's,
     # and that one is contractually inside the 45-minute reap window.
     magi_timeout: int = 4500
+    # 2026-08-31 domain guard: where the domain-check registry (domains.json)
+    # lives on THIS machine. "" -> models.DEFAULT_DOMAIN_REGISTRY (the
+    # ferdinand checkout). The mini has no ferdinand checkout, so its config
+    # points at a delivered copy; a missing/stale file falls back to the
+    # baked-in gate either way (fail-closed).
+    domain_registry_path: str = ""
     # M3.5 Task C: gate for the LLM digest-curation pass. Reuses claude_bin
     # (no separate curator_bin) -- both are just "claude" runs in a
     # subprocess, one against a checkout, one against the repo root.
@@ -128,6 +134,7 @@ def load_config(path: str | None = None) -> WorksweepConfig:
         runner_timeout=runner_timeout,
         implement_timeout=implement_timeout,
         magi_timeout=magi_timeout,
+        domain_registry_path=str(rn.get("domain_registry_path", "") or ""),
         curate=curate_raw,
         dev_boxes=tuple(dev_boxes_raw),
         stale_threshold=stale_threshold,
