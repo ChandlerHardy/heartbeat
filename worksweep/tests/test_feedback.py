@@ -787,10 +787,12 @@ def test_an_unreadable_ref_list_is_loud(tmp_path, worktree):
 
 def test_a_thread_this_run_closed_is_a_hard_failure(tmp_path, worktree):
     """BLOCKER 2b: never-resolve is enforced in code, not just in the prompt.
-    A prompt rule is a request; this is the check."""
+    A prompt rule is a request; this is the check. Resolving a discussion
+    stamps resolved_by on every resolvable note, HEAD included -- and the
+    head's stamp is the one the guard reads (!4098, 2026-09-01)."""
     sub = _Subprocess(worktree, report=_report(replied=["t1"]))
     closed = {"id": "t1", "notes": [
-        _tnote("leyang", "question on t1", resolved=True),
+        _tnote("leyang", "question on t1", resolved=True, resolved_by=ME),
         _tnote(ME, "done", created_at=DURING_RUN, resolved=True,
                resolved_by=ME)]}
     with pytest.raises(RunnerError) as e:
@@ -805,9 +807,29 @@ def test_a_thread_the_reviewer_closed_is_fine(tmp_path, worktree):
     sub = _Subprocess(worktree, report=_report(replied=["t1"],
                                                reply="answered"))
     closed = {"id": "t1", "notes": [
-        _tnote("leyang", "question on t1", resolved=True),
+        _tnote("leyang", "question on t1", resolved=True, resolved_by="leyang"),
         _tnote(ME, "answered", created_at=DURING_RUN, resolved=True,
                resolved_by="leyang")]}
+    result = _run(tmp_path, worktree, sub, [_waiting("t1")], [closed])
+    assert result.replied == 1
+
+
+def test_an_opener_resolved_thread_with_a_stray_stamp_on_our_reply_is_fine(
+        tmp_path, worktree):
+    """FALSIFYING (#238 / !4098, 2026-09-01). GitLab stamps resolved_by PER
+    NOTE: CodeRabbit auto-resolved its own finding note the moment the fix
+    commit landed, while the run's reply note picked up a stamp under
+    Chandler's name. The opener decided its thread was finished -- reading
+    the trailing stamp as OUR closing failed the whole run over a settled
+    thread."""
+    bot = "group_2846274_bot_bb6bad6e"
+    sub = _Subprocess(worktree, report=_report(replied=["t1"],
+                                               reply="answered"))
+    closed = {"id": "t1", "notes": [
+        _tnote(bot, "correct the primary pin", resolved=True,
+               resolved_by=bot),
+        _tnote(ME, "answered", created_at=DURING_RUN, resolved=True,
+               resolved_by=ME)]}
     result = _run(tmp_path, worktree, sub, [_waiting("t1")], [closed])
     assert result.replied == 1
 
@@ -1275,7 +1297,7 @@ def test_closing_a_thread_we_escalated_is_still_a_hard_failure(tmp_path,
         replied=["t1"],
         escalated=[{"thread": "t2", "reason": "product call"}]))
     closed = {"id": "t2", "notes": [
-        _tnote("leyang", "question on t2", resolved=True),
+        _tnote("leyang", "question on t2", resolved=True, resolved_by=ME),
         _tnote("leyang", "still waiting", resolved=True, resolved_by=ME)]}
     glab = _Glab(_payload(_waiting("t1"), _waiting("t2")),
                  _payload(_answered("t1"), closed))
