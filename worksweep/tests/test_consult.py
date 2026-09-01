@@ -263,3 +263,47 @@ def test_a_rec_is_never_written_onto_a_row_that_moved_on():
     assert _set_consult(deps, 7, "done", "stale rec") is False
     assert state["saves"] == []
     assert _by_num(state, 7).item.consult_rec == ""
+
+
+# --- run_once families (2026-09-01): the anti-starvation split ---------------
+#
+# Passes run sequentially inside one invocation and launchd starts no second
+# instance while one lives, so the implement drain placed anywhere but LAST
+# (or in its own job) starves the other families for hours — a live consult
+# sat "requested" behind the first drain. `families` lets etc/mini run
+# implement as its own launchd job.
+
+def test_families_gates_which_passes_run(tmp_path):
+    from worksweep.runner import run_once
+    consulted = []
+    deps, posts, state = _deps([_rec(7, consult="requested")],
+                               execute=lambda item, cfg:
+                                   consulted.append(item.id) or "rec")
+    deps["execute_address_feedback"] = lambda item, cfg: (_ for _ in ()).throw(
+        AssertionError("feedback pass must not run"))
+    locks = dict(lock_path=str(tmp_path / "runner.lock"))
+    assert run_once(_cfg(tmp_path), deps, families=("consult",), **locks) == 0
+    assert consulted == ["feedback:pb-www!4098"]
+
+
+def test_default_families_serves_everything(tmp_path):
+    from worksweep.runner import RUN_FAMILIES, run_once
+    consulted = []
+    deps, posts, state = _deps([_rec(7, consult="requested")],
+                               execute=lambda item, cfg:
+                                   consulted.append(item.id) or "rec")
+    locks = dict(lock_path=str(tmp_path / "runner.lock"))
+    assert run_once(_cfg(tmp_path), deps, **locks) == 0
+    assert consulted, "the consult pass is part of the default families"
+    assert RUN_FAMILIES == ("short", "feedback", "consult", "implement")
+
+
+def test_implement_runs_last_in_the_combined_invocation():
+    """FALSIFYING for the ordering: source-order the passes so the drain can
+    never precede the short families in one invocation."""
+    import inspect
+
+    from worksweep import runner
+    src = inspect.getsource(runner.run_once)
+    assert src.index('"short"') < src.index('"feedback"') \
+        < src.index('"consult"') < src.index('"implement"')
