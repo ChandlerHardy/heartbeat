@@ -138,3 +138,50 @@ def test_run_ssh_pins_stdin_to_devnull():
         assert m.run_ssh("host", "hostname") == "ok\n"
     assert seen["stdin"] is subprocess.DEVNULL
     assert seen["cmd"][:2] == ["ssh", "host"]
+
+
+# --- the wrapper/edge signature contract (2026-09-01) ------------------------
+#
+# _execute_implement passed run_glab=_run_glab_api for five days while
+# implementer.execute had no such parameter: every implement claim died in
+# seconds with a TypeError, and nothing noticed until the first batch of nine
+# approvals hit it — the wrappers were only ever tested as fakes. This pins
+# every dashboard/runner wrapper's keywords against its real executor's
+# signature, so an edge added on one side without the other reds immediately.
+
+def test_every_executor_wrapper_matches_its_executors_signature():
+    import ast
+    import inspect
+    import textwrap
+
+    from worksweep import __main__ as main_mod
+    from worksweep import consult, feedback, implementer
+
+    def kwargs_the_wrapper_passes(wrapper, target_name):
+        """Keywords of the wrapper's call TO THE TARGET, read from source --
+        hardcoding the expected set here would rot exactly the way the
+        wrapper did."""
+        tree = ast.parse(textwrap.dedent(inspect.getsource(wrapper)))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = getattr(func, "attr", getattr(func, "id", ""))
+            if name == target_name:
+                return {kw.arg for kw in node.keywords if kw.arg}
+        raise AssertionError(
+            f"{wrapper.__name__} never calls {target_name} -- pair is stale")
+
+    pairs = [
+        (main_mod._execute_implement, implementer.execute),
+        (main_mod._execute_address_feedback, feedback.execute),
+        (main_mod._execute_consult, consult.execute_consult),
+    ]
+    for wrapper, target in pairs:
+        passed = kwargs_the_wrapper_passes(wrapper, target.__name__)
+        accepted = set(inspect.signature(target).parameters)
+        stray = passed - accepted
+        assert not stray, (
+            f"{wrapper.__name__} passes {sorted(stray)} but "
+            f"{target.__module__}.{target.__name__} does not accept them -- "
+            f"the claim will TypeError at run time")

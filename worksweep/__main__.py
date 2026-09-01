@@ -831,7 +831,7 @@ def _execute_implement(item, cfg, boxes):
         item, cfg, boxes, run_subprocess=subprocess.run,
         run_ssh=lambda host, command: run_ssh(
             host, command, timeout=_SSH_SYNC_TIMEOUT_SECONDS),
-        http_get=http_status, run_glab=_run_glab_api)
+        http_get=http_status)
 
 
 def _run_glab_api(args, body=None, run_subprocess: Callable = subprocess.run):
