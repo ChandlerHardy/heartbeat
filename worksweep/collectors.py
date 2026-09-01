@@ -249,11 +249,16 @@ def parse_threads(raw_json) -> tuple:
         # still be dismissable, and a bot follow-up must re-fire it.
         nonsys = [n for n in notes if not n.get("system")]
         last_any = nonsys[-1] if nonsys else None
-        resolved_by = ""
-        for n in notes:
-            who = ((n.get("resolved_by") or {}) or {}).get("username", "")
-            if who:
-                resolved_by = who
+        # Who decided the thread was finished = who resolved its HEAD note.
+        # GitLab stamps resolved_by PER NOTE, and the stamps can differ: on
+        # !4098 (2026-09-01) CodeRabbit auto-resolved its own finding note
+        # while the run's later reply note got swept up under Chandler's name.
+        # Last-wins read that thread as "closed by chandler.hardy" and the
+        # never-resolve guard blamed the run for a thread its opener had
+        # already settled. The opener's note is the thread; its resolver is
+        # the decision.
+        head = resolvable_notes[0] if resolvable_notes else {}
+        resolved_by = ((head.get("resolved_by") or {}) or {}).get("username", "")
         out.append(ReviewThread(
             id=str(d.get("id") or ""),
             resolvable=bool(resolvable_notes),
