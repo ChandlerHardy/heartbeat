@@ -344,6 +344,64 @@ def dismiss(records: List[QueueRecord], number: int,
     return out, dismissed
 
 
+def request_consult(records: List[QueueRecord], number: int,
+                    now: str) -> Tuple[List[QueueRecord], str]:
+    """Flip a parked row's consult lane to `requested` (Send-to-Fable).
+
+    Returns (records, outcome): "requested" on the flip, "already" when a
+    request is live (idempotent — a double-tap is not an error), "has-rec"
+    when a recommendation is already waiting (re-burning a run to replace an
+    unread rec would make the button a slot machine), "not-parked" for any
+    row that is not a needs-input question, "not-found" otherwise. The
+    status rules live HERE, not in the dashboard (AC #20).
+    """
+    out: List[QueueRecord] = []
+    outcome = "not-found"
+    for r in records:
+        if r.number != number:
+            out.append(r)
+            continue
+        if r.item.status != _NEEDS_INPUT:
+            outcome = "not-parked"
+        elif r.item.consult == "requested":
+            outcome = "already"
+        elif r.item.consult == "done" and r.item.consult_rec:
+            outcome = "has-rec"
+        else:
+            outcome = "requested"
+            r = QueueRecord(number=r.number, first_seen=r.first_seen,
+                            last_seen=now,
+                            item=dataclasses.replace(r.item,
+                                                     consult="requested",
+                                                     consult_rec=""))
+        out.append(r)
+    return out, outcome
+
+
+def accept_rec(records: List[QueueRecord], number: int,
+               now: str) -> Tuple[List[QueueRecord], Optional[QueueRecord]]:
+    """Accept a consult recommendation: needs-input -> approved, and the rec
+    text becomes the RULING the executor's prompt carries. The consult fields
+    clear so a stale rec can never be re-accepted; the question text clears
+    with them because the question is now answered. Returns (records, the
+    accepted record or None when #number has no rec to accept)."""
+    out: List[QueueRecord] = []
+    accepted: Optional[QueueRecord] = None
+    for r in records:
+        if (r.number == number and r.item.status == _NEEDS_INPUT
+                and r.item.consult == "done" and r.item.consult_rec):
+            accepted = QueueRecord(
+                number=r.number, first_seen=r.first_seen, last_seen=now,
+                item=dataclasses.replace(r.item, status="approved",
+                                         ruling=r.item.consult_rec,
+                                         consult="", consult_rec="",
+                                         error_summary=""))
+            out.append(accepted)
+        else:
+            out.append(r)
+    return out, accepted
+
+
 def reconcile(existing: List[QueueRecord], fresh: List[WorkItem],
               now: str, resolved: dict | None = None,
               resets: set | None = None) -> List[QueueRecord]:
@@ -402,7 +460,12 @@ def reconcile(existing: List[QueueRecord], fresh: List[WorkItem],
             # scroll away unanswered.
             merged = dataclasses.replace(it, status=_NEEDS_INPUT,
                                          error_summary=prior.item.error_summary,
-                                         dev_box=prior.item.dev_box)
+                                         dev_box=prior.item.dev_box,
+                                         # the consult conversation belongs to
+                                         # the PARKED question, so it rides
+                                         # with the hold, not with the sweep
+                                         consult=prior.item.consult,
+                                         consult_rec=prior.item.consult_rec)
         elif ps == "error":
             merged = dataclasses.replace(it, status="proposed")
         elif ps == "done":
@@ -420,7 +483,12 @@ def reconcile(existing: List[QueueRecord], fresh: List[WorkItem],
             merged = dataclasses.replace(it, status=ps,
                                          claimed_at=prior.item.claimed_at,
                                          dev_box=prior.item.dev_box,
-                                         mr_iid=prior.item.mr_iid)
+                                         mr_iid=prior.item.mr_iid,
+                                         # an accepted-rec ruling is consent
+                                         # WITH content: it must reach the
+                                         # executor even if a sweep runs
+                                         # between Accept and the claim
+                                         ruling=prior.item.ruling)
         else:
             # Fresh wins: the ask changed (the sha moved, or for a why-keyed
             # executor the thread ask did), so the queue's view is stale.

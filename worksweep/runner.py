@@ -34,6 +34,7 @@ _ERROR_SUMMARY_MAX = 500
 _LOCK_DEFAULT = os.path.expanduser("~/.worksweep/runner.lock")
 _IMPLEMENT_LOCK_NAME = "runner-implement.lock"
 _ADDRESS_FEEDBACK_LOCK_NAME = "runner-address-feedback.lock"
+_CONSULT_LOCK_NAME = "runner-consult.lock"
 # The `why` on a row worksweep approved for itself. The trailing
 # "(auto)" is the marker the digest and the dashboard both render, so a
 # human can see the row was never ✅'d by hand.
@@ -378,7 +379,8 @@ def _apply_to_fresh(deps, cfg, number: int,
 
 def run_once(cfg, deps: Dict[str, Callable], lock_path: str = _LOCK_DEFAULT,
              implement_lock_path: Optional[str] = None,
-             address_feedback_lock_path: Optional[str] = None) -> int:
+             address_feedback_lock_path: Optional[str] = None,
+             consult_lock_path: Optional[str] = None) -> int:
     """One runner pass: reap stale claims, then run at most ONE item from each
     of the three executor families.
 
@@ -401,13 +403,17 @@ def run_once(cfg, deps: Dict[str, Callable], lock_path: str = _LOCK_DEFAULT,
         implement_lock_path = _sibling(_IMPLEMENT_LOCK_NAME)
     if address_feedback_lock_path is None:
         address_feedback_lock_path = _sibling(_ADDRESS_FEEDBACK_LOCK_NAME)
+    if consult_lock_path is None:
+        consult_lock_path = _sibling(_CONSULT_LOCK_NAME)
     rc = _guarded_pass(cfg, deps, _MAGI, _run_magi_pass, lock_path)
     rc_implement = _guarded_pass(cfg, deps, _IMPLEMENT, _run_implement_pass,
                                  implement_lock_path)
     rc_feedback = _guarded_pass(cfg, deps, _ADDRESS_FEEDBACK,
                                 _run_address_feedback_pass,
                                 address_feedback_lock_path)
-    return rc or rc_implement or rc_feedback
+    rc_consult = _guarded_pass(cfg, deps, "consult", _run_consult_pass,
+                               consult_lock_path)
+    return rc or rc_implement or rc_feedback or rc_consult
 
 
 def _guarded_pass(cfg, deps: Dict[str, Callable], kind: str,
@@ -598,6 +604,84 @@ def _run_address_feedback_pass(cfg, deps: Dict[str, Callable],
         return _run_address_feedback_claim(cfg, deps, target)
     finally:
         release_lock(lock_path)
+
+
+def _run_consult_pass(cfg, deps: Dict[str, Callable], lock_path: str) -> int:
+    """At most one Send-to-Fable consult, on its own lock.
+
+    A consult is a bounded read-only claude pass over a PARKED question — the
+    row stays `needs-input` throughout, so this pass deliberately bypasses
+    pick_claim (which only sees `approved`) and never calls claim(): there is
+    no status to flip, only the consult fields to advance. requested -> done
+    (rec on the row + a 🔮 post) or requested -> error (⚠️ post, and the
+    dashboard re-offers the button). A crash mid-run leaves "requested", which
+    simply retries next pass — a consult is advisory and idempotent, so a
+    retry costs tokens, never correctness.
+    """
+    execute = deps.get("execute_consult")
+    if execute is None:
+        return 0                       # not wired (old caller/tests) — inert
+    try:
+        parked = [r for r in deps["load"]()
+                  if r.item.status == _NEEDS_INPUT_STATUS
+                  and r.item.consult == "requested"]
+    except Exception as e:
+        _post(deps, cfg, f"⚠️ Worksweep runner: could not read the queue for "
+                         f"the consult pass — {type(e).__name__}: {e}")
+        return 1
+    if not parked:
+        return 0
+    if not acquire_lock(lock_path):
+        return 0                       # another consult is live — fine
+    try:
+        target = min(parked, key=lambda r: r.number)
+        try:
+            rec_text = execute(target.item, cfg)
+        except RunnerError as e:
+            _set_consult(deps, target.number, "error", "")
+            _post(deps, cfg, _clamped(
+                f"⚠️ Consult on #{target.number} failed — {e}"))
+            return 1
+        except Exception as e:
+            _set_consult(deps, target.number, "error", "")
+            _post(deps, cfg, _clamped(
+                f"⚠️ Consult on #{target.number} crashed — "
+                f"{type(e).__name__}: {e}"))
+            return 1
+        if _set_consult(deps, target.number, "done", rec_text):
+            _post(deps, cfg, _clamped(
+                f"🔮 Consult ready — #{target.number} {target.item.repo} "
+                f"{target.item.id}\n> {rec_text}\n"
+                f"Accept it on the dashboard to hand the ruling to the "
+                f"executor."))
+        return 0
+    finally:
+        release_lock(lock_path)
+
+
+_NEEDS_INPUT_STATUS = "needs-input"
+
+
+def _set_consult(deps, number: int, state: str, rec: str) -> bool:
+    """Advance a row's consult fields, on the FRESH queue and only while the
+    row is still parked: a question answered (approved, dismissed, signal-
+    cleared) mid-consult must not grow a stale recommendation the human could
+    accept against a row that no longer asks it."""
+    with _queue_lock(deps):
+        records = deps["load"]()
+        hit = False
+        out = []
+        for r in records:
+            if (r.number == number
+                    and r.item.status == _NEEDS_INPUT_STATUS):
+                out.append(_replace(r, deps["now"](), consult=state,
+                                    consult_rec=rec))
+                hit = True
+            else:
+                out.append(r)
+        if hit:
+            deps["save"](out)
+        return hit
 
 
 def _run_address_feedback_claim(cfg, deps: Dict[str, Callable],

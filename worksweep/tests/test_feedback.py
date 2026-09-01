@@ -279,6 +279,22 @@ def test_feedback_prompt_posts_replies_to_the_notes_endpoint():
     assert "merge_requests/3997" in prompt
 
 
+def test_an_operator_ruling_reaches_the_prompt_bounded_by_the_hard_rules():
+    """Send-to-Fable (2026-09-01): an accepted rec travels as a RULING the
+    run follows — but it must never read as a tool grant. The prompt says
+    both, in that order, and stays byte-identical when there is no ruling."""
+    threads = _unaddressed(_payload(_thread("t1")))
+    with_ruling = feedback.render_prompt("pb-www", 3997, BRANCH, threads,
+                                         ruling="Decline the change in-MR.")
+    assert "OPERATOR RULING" in with_ruling
+    assert "Decline the change in-MR." in with_ruling
+    assert "NEVER override the DOMAIN GATE" in with_ruling
+    without = feedback.render_prompt("pb-www", 3997, BRANCH, threads)
+    assert "OPERATOR RULING" not in without
+    assert without == feedback.render_prompt("pb-www", 3997, BRANCH, threads,
+                                             ruling="   ")
+
+
 # --- AC #10: worktree, run-time re-fetch, python verification ---------------
 
 def test_feedback_uses_its_own_worktree(tmp_path, worktree):

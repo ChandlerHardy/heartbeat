@@ -50,8 +50,10 @@ from .approvals import (_APPROVABLE, approve_all, approve_numbers,
 from .formatter import DISCORD_MAX_CHARS, _truncate_bytes
 from .seennotes import record_seen
 from .models import RUNNABLE_EXECUTORS, QueueRecord, WorkItem
-from .queue import (_TERMINAL, dismiss as dismiss_record, is_dismissable,
-                    load_queue, save_queue, write_lock)
+from .queue import (_TERMINAL, accept_rec as accept_rec_record,
+                    dismiss as dismiss_record, is_dismissable, load_queue,
+                    request_consult as request_consult_record, save_queue,
+                    write_lock)
 
 DEFAULT_PORT = 8787
 _LOOPBACK = "127.0.0.1"
@@ -633,6 +635,23 @@ button.cnt:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
 .btn-dismiss:hover{background:var(--panel-2);color:var(--ink);border-color:var(--ink-3)}
 .btn-dismiss:active{transform:translateY(1px);background:var(--line)}
 .btn-dismiss:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
+/* Send-to-Fable: the parked question, the recommendation, and its controls */
+.ask{font-size:12px;color:var(--violet);margin-top:2px;white-space:pre-wrap}
+.rec{font-size:12px;color:var(--ink-2);margin-top:4px;padding:6px 8px;
+  border:1px solid var(--line);border-left:2px solid var(--violet);
+  border-radius:6px;background:var(--panel-2);white-space:pre-wrap}
+.rec-failed{font-size:11px;color:var(--danger)}
+.btn-consult{
+  appearance:none;font:inherit;font-size:10px;font-weight:650;
+  letter-spacing:.04em;text-transform:uppercase;display:inline-flex;
+  align-items:center;justify-content:center;min-height:28px;margin-top:4px;
+  padding:0 10px;border-radius:9px;cursor:pointer;
+  border:1px solid var(--violet);background:transparent;color:var(--violet);
+  transition:background .13s ease,color .13s ease;
+}
+.btn-consult:hover{background:var(--violet);color:var(--accent-ink)}
+.btn-consult:active{transform:translateY(1px)}
+.btn-consult:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
 /* An actionable row no runner will ever claim: it needs a human, but not this
    button, so it gets a label where the checkbox would be. */
 .manual{
@@ -1133,6 +1152,16 @@ _BODY_SCRIPT = """
       if(!inflight){send('/dismiss',{number:parseInt(d.getAttribute('data-dismiss'),10)});}
       return;
     }
+    var c=e.target.closest('[data-consult]');
+    if(c){
+      if(!inflight){send('/consult',{number:parseInt(c.getAttribute('data-consult'),10)});}
+      return;
+    }
+    var a=e.target.closest('[data-accept-rec]');
+    if(a){
+      if(!inflight){send('/accept-rec',{number:parseInt(a.getAttribute('data-accept-rec'),10)});}
+      return;
+    }
     if(e.target.closest('#approve-selected')){approveSelected();return;}
     if(e.target.closest('#approve-all')){approveAll();return;}
     if(e.target.closest('#sync')){kickSweep();return;}
@@ -1233,6 +1262,34 @@ def _dismiss_button(number: int, title: str) -> str:
             f'title="{_e(title)}">Dismiss</button>')
 
 
+def _consult_html(record: QueueRecord) -> str:
+    """The Send-to-Fable strip on a parked row.
+
+    Four states, one element each: offer the button ("" / "error"), show the
+    hold ("requested"), or show the recommendation plus Accept ("done"). The
+    checkbox next to it stays the PLAIN re-approve — accepting is the path
+    that carries content, so it gets its own verb rather than overloading ✅.
+    """
+    item = record.item
+    n = record.number
+    if item.consult == "requested":
+        return '<div class="rec">🔮 consult pending — the runner picks it up within 10 min</div>'
+    if item.consult == "done" and item.consult_rec:
+        return (f'<div class="rec">🔮 {_e(item.consult_rec)}</div>'
+                f'<button type="button" class="btn-consult" '
+                f'data-accept-rec="{_e(n)}" '
+                f'aria-label="accept recommendation for item {_e(n)}" '
+                f'title="approve this row with the recommendation as the '
+                f'operator ruling">Accept → run</button>')
+    failed = ('<span class="rec-failed">consult failed — </span>'
+              if item.consult == "error" else "")
+    return (f'<div>{failed}<button type="button" class="btn-consult" '
+            f'data-consult="{_e(n)}" '
+            f'aria-label="consult fable on item {_e(n)}" '
+            f'title="run an unattended second opinion on this question">'
+            f'🔮 Consult Fable</button></div>')
+
+
 def _chip(record: QueueRecord) -> str:
     st = record.item.status
     return f'<span class="chip" data-st="{_e(st)}">{_e(st)}</span>'
@@ -1269,6 +1326,13 @@ def _section_row(record: QueueRecord, now: str, section: str) -> str:
             detail.append(f'<div class="why">{_e(item.why)}</div>')
         if section == _IN_PROGRESS and item.dev_box:
             detail.append(f'<div class="why">{_e(item.dev_box)}</div>')
+        if item.status == "needs-input":
+            # The QUESTION is the whole point of a parked row; rendering only
+            # the why left the human reading Discord scrollback to learn what
+            # was asked (#238, 2026-09-01).
+            if item.error_summary:
+                detail.append(f'<div class="ask">{_e(item.error_summary)}</div>')
+            detail.append(_consult_html(record))
 
     age = _age(record, now)
     meta = f'<div class="meta">{_e(age)}</div>' if age else ""
@@ -2024,7 +2088,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:                                 # noqa: N802
         path = self._path()
-        if path not in ("/approve", "/approve-all", "/sweep", "/dismiss"):
+        if path not in ("/approve", "/approve-all", "/sweep", "/dismiss",
+                        "/consult", "/accept-rec"):
             self._reject(404, "not found")
             return
         if not self._csrf_ok():
@@ -2067,6 +2132,22 @@ class DashboardHandler(BaseHTTPRequestHandler):
             except Exception as e:                 # never crash the agent
                 print(f"worksweep: dashboard dismiss failed: {e}", file=sys.stderr)
                 self._json(500, {"dismissed": False, "error": "dismiss failed"})
+            return
+
+        if path in ("/consult", "/accept-rec"):
+            number = _valid_number(payload)
+            if number is None:
+                self._reject(400, "bad request")
+                return
+            try:
+                if path == "/consult":
+                    self._consult_request(number)
+                else:
+                    self._accept_rec(number, _valid_actor(payload))
+            except Exception as e:                 # never crash the agent
+                print(f"worksweep: dashboard {path} failed: {e}",
+                      file=sys.stderr)
+                self._json(500, {"ok": False, "error": f"{path} failed"})
             return
 
         numbers = _valid_numbers(payload)
@@ -2163,6 +2244,55 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self._record_reviewed_sha(target.item, number)
         self._audit_dismiss(number, target.item, actor)
         self._json(200, {"dismissed": True, "number": number})
+
+    def _consult_request(self, number: int) -> None:
+        """Queue a Send-to-Fable consult on a parked row. The flip itself
+        lives in queue.request_consult — the dashboard holds no status rules
+        of its own (AC #20), it only maps outcomes to HTTP."""
+        with _WRITE_LOCK, write_lock(self.server.queue_path):
+            records = load_queue(self.server.queue_path)
+            updated, outcome = request_consult_record(records, number,
+                                                      self.server.now())
+            if outcome == "requested":
+                save_queue(self.server.queue_path, updated)
+        if outcome in ("requested", "already"):
+            self._json(200, {"ok": True, "consult": "requested"})
+        elif outcome == "has-rec":
+            self._json(400, {"ok": False,
+                             "error": f"#{number} already has a recommendation "
+                                      f"— accept it or handle it in a session"})
+        else:
+            self._json(400, {"ok": False,
+                             "error": f"#{number} is not a parked question"})
+
+    def _accept_rec(self, number: int, actor: str = "") -> None:
+        """Accept a consult recommendation: queue.accept_rec flips the row to
+        approved with the rec as the operator RULING. This is the one approval
+        path that carries content, so its audit line says so."""
+        with _WRITE_LOCK, write_lock(self.server.queue_path):
+            records = load_queue(self.server.queue_path)
+            updated, accepted = accept_rec_record(records, number,
+                                                  self.server.now())
+            if accepted is None:
+                self._json(400, {"ok": False,
+                                 "error": f"#{number} has no recommendation "
+                                          f"to accept"})
+                return
+            save_queue(self.server.queue_path, updated)
+        suffix = (" (dashboard · claude · accepted fable rec)"
+                  if actor == _ACTOR else " (dashboard · accepted fable rec)")
+        confirm = (f"✅ Approved: #{number} {accepted.item.repo} "
+                   f"{accepted.item.id}{suffix}")
+        post, webhook = self.server.post, self.server.webhook
+        if post and webhook:
+            try:
+                post(webhook, confirm)
+            except Exception as e:
+                print(f"worksweep: dashboard accept-rec post failed: {e}",
+                      file=sys.stderr)
+        else:
+            print(confirm)
+        self._json(200, {"ok": True, "approved": number})
 
     def _record_reviewed_sha(self, item, number: int) -> None:
         """Dismissing a re_review row means "I re-reviewed this head myself":

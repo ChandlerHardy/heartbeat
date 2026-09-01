@@ -384,3 +384,74 @@ def test_a_cleared_signal_closes_an_unspent_approval_too():
                     resolved={"feedback:pb-www!4082": "signal-cleared"})
     assert out[0].item.status == "done"
     assert out[0].item.done_reason == "signal-cleared"
+
+
+# --- Send-to-Fable (2026-09-01) ---------------------------------------------
+#
+# The consult conversation belongs to the PARKED question and the accepted
+# ruling belongs to the approval, so both must survive the sweep's rebuild --
+# reconcile constructs merged rows from the FRESH item, which carries neither.
+
+import dataclasses as _dc  # noqa: E402
+
+from worksweep.queue import accept_rec, request_consult  # noqa: E402
+
+
+def test_a_parked_rows_consult_state_survives_the_sweep():
+    """FALSIFYING: without the carry, every sweep silently cancels a pending
+    consult and deletes an unread recommendation."""
+    prior = [_dc.replace(_parked(), item=_dc.replace(
+        _parked().item, consult="done", consult_rec="Do X."))]
+    out = reconcile(prior, [_parked().item], NOW)
+    assert out[0].item.status == "needs-input"
+    assert out[0].item.consult == "done"
+    assert out[0].item.consult_rec == "Do X."
+
+
+def test_an_accepted_ruling_survives_the_sweep_until_the_claim():
+    """The ruling is consent WITH content: a sweep between Accept and the
+    runner's claim must not strip what the executor was told to follow."""
+    prior_item = _dc.replace(_fb(status="approved").item, ruling="Do X.")
+    prior = [_dc.replace(_fb(), item=prior_item)]
+    out = reconcile(prior, [_fb().item], NOW)
+    assert out[0].item.status == "approved"
+    assert out[0].item.ruling == "Do X."
+
+
+def test_request_consult_flips_exactly_the_parked_row():
+    records = [_parked(number=3)]
+    out, outcome = request_consult(records, 3, NOW)
+    assert outcome == "requested"
+    assert out[0].item.consult == "requested"
+    assert out[0].item.status == "needs-input"       # status untouched
+
+
+def test_request_consult_is_idempotent_and_guards_the_rec():
+    already = [_dc.replace(_parked(), item=_dc.replace(
+        _parked().item, consult="requested"))]
+    assert request_consult(already, 3, NOW)[1] == "already"
+    has_rec = [_dc.replace(_parked(), item=_dc.replace(
+        _parked().item, consult="done", consult_rec="r"))]
+    assert request_consult(has_rec, 3, NOW)[1] == "has-rec"
+    assert request_consult([_fb(status="proposed")], 3, NOW)[1] == "not-parked"
+    assert request_consult([], 3, NOW)[1] == "not-found"
+
+
+def test_accept_rec_approves_with_the_rec_as_ruling():
+    prior = [_dc.replace(_parked(), item=_dc.replace(
+        _parked().item, consult="done", consult_rec="Do X.  ·  Why: Y."))]
+    out, accepted = accept_rec(prior, 3, NOW)
+    assert accepted is not None
+    row = out[0].item
+    assert row.status == "approved"
+    assert row.ruling == "Do X.  ·  Why: Y."
+    assert row.consult == "" and row.consult_rec == ""   # never re-acceptable
+    assert row.error_summary == ""                       # question answered
+
+
+def test_accept_rec_refuses_a_row_without_a_rec():
+    """FALSIFYING: accepting nothing would approve a run with an empty ruling
+    -- the plain checkbox already exists for that, and it says so honestly."""
+    out, accepted = accept_rec([_parked()], 3, NOW)
+    assert accepted is None
+    assert out[0].item.status == "needs-input"
