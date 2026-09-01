@@ -967,6 +967,11 @@ def main(argv=None) -> int:
     ap.add_argument("--bind", default="auto",
                     help="dashboard bind address; `auto` resolves the Tailscale "
                          "IP and falls back to 127.0.0.1")
+    ap.add_argument("--families", default="all",
+                    help="run: comma list of pass families to serve "
+                         "(short,feedback,consult,implement; default all). "
+                         "Splitting implement into its own launchd job keeps "
+                         "an hours-long drain from starving the short passes")
     args = ap.parse_args(argv)
 
     try:
@@ -1032,7 +1037,15 @@ def main(argv=None) -> int:
             "queue_lock": (null_lock if args.dry_run
                            else (lambda: write_lock(_queue_path()))),
         }
-        return _runner.run_once(cfg, deps)
+        fams = (None if (args.families or "all").strip() == "all"
+                else tuple(f.strip() for f in args.families.split(",")
+                           if f.strip()))
+        unknown = set(fams or ()) - set(_runner.RUN_FAMILIES)
+        if unknown:
+            print(f"worksweep: unknown run families: {', '.join(sorted(unknown))}",
+                  file=sys.stderr)
+            return 1
+        return _runner.run_once(cfg, deps, families=fams)
 
     if args.discord and not args.dry_run and not cfg.discord_webhook:
         print("worksweep: no discord_webhook configured", file=sys.stderr)

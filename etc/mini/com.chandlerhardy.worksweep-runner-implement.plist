@@ -1,17 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Worksweep runner (mini): short/feedback/consult passes every 10 min (implement runs in its own job). -->
+<!-- Worksweep runner (mini): implement drain in its own job so an hours-long claim never starves the short passes (2026-09-01). -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.chandlerhardy.worksweep-runner</string>
+    <string>com.chandlerhardy.worksweep-runner-implement</string>
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
         <string>/Users/chandlerhardy/repos/heartbeat/bin/worksweep.sh</string>
         <string>run</string>
         <string>--families</string>
-        <string>short,feedback,consult</string>
+        <string>implement</string>
     </array>
     <key>StartInterval</key>
     <integer>600</integer>
@@ -25,8 +25,8 @@
         <string>/Users/chandlerhardy</string>
     </dict>
     <key>StandardOutPath</key>
-    <string>/Users/chandlerhardy/heartbeat-reports/worksweep-runner.log</string>
+    <string>/Users/chandlerhardy/heartbeat-reports/worksweep-runner-implement.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/chandlerhardy/heartbeat-reports/worksweep-runner.err</string>
+    <string>/Users/chandlerhardy/heartbeat-reports/worksweep-runner-implement.err</string>
 </dict>
 </plist>

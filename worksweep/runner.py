@@ -377,10 +377,16 @@ def _apply_to_fresh(deps, cfg, number: int,
     return updated
 
 
+# The pass families one runner invocation may serve, in the order they run.
+# "short" = magi-review/keep-current/park plus the stale-claim reap.
+RUN_FAMILIES = ("short", "feedback", "consult", "implement")
+
+
 def run_once(cfg, deps: Dict[str, Callable], lock_path: str = _LOCK_DEFAULT,
              implement_lock_path: Optional[str] = None,
              address_feedback_lock_path: Optional[str] = None,
-             consult_lock_path: Optional[str] = None) -> int:
+             consult_lock_path: Optional[str] = None,
+             families: Optional[Tuple[str, ...]] = None) -> int:
     """One runner pass: reap stale claims, then run at most ONE item from each
     of the three executor families.
 
@@ -405,15 +411,28 @@ def run_once(cfg, deps: Dict[str, Callable], lock_path: str = _LOCK_DEFAULT,
         address_feedback_lock_path = _sibling(_ADDRESS_FEEDBACK_LOCK_NAME)
     if consult_lock_path is None:
         consult_lock_path = _sibling(_CONSULT_LOCK_NAME)
-    rc = _guarded_pass(cfg, deps, _MAGI, _run_magi_pass, lock_path)
-    rc_implement = _guarded_pass(cfg, deps, _IMPLEMENT, _run_implement_pass,
-                                 implement_lock_path)
-    rc_feedback = _guarded_pass(cfg, deps, _ADDRESS_FEEDBACK,
-                                _run_address_feedback_pass,
-                                address_feedback_lock_path)
-    rc_consult = _guarded_pass(cfg, deps, "consult", _run_consult_pass,
-                               consult_lock_path)
-    return rc or rc_implement or rc_feedback or rc_consult
+    families = tuple(families or RUN_FAMILIES)
+    rcs = []
+    # Short passes FIRST, implement LAST: passes run sequentially inside one
+    # invocation and launchd will not start a new instance while this one
+    # lives, so an hours-long implement drain placed earlier would starve
+    # every other family for its whole duration (2026-09-01: a queued consult
+    # sat "requested" for an hour behind the first drain). The real decoupling
+    # is running implement as its OWN launchd job (`--families implement`,
+    # etc/mini has the plist); the ordering protects the combined default.
+    if "short" in families:
+        rcs.append(_guarded_pass(cfg, deps, _MAGI, _run_magi_pass, lock_path))
+    if "feedback" in families:
+        rcs.append(_guarded_pass(cfg, deps, _ADDRESS_FEEDBACK,
+                                 _run_address_feedback_pass,
+                                 address_feedback_lock_path))
+    if "consult" in families:
+        rcs.append(_guarded_pass(cfg, deps, "consult", _run_consult_pass,
+                                 consult_lock_path))
+    if "implement" in families:
+        rcs.append(_guarded_pass(cfg, deps, _IMPLEMENT, _run_implement_pass,
+                                 implement_lock_path))
+    return next((rc for rc in rcs if rc), 0)
 
 
 def _guarded_pass(cfg, deps: Dict[str, Callable], kind: str,
