@@ -188,6 +188,46 @@ def test_a_needs_input_row_stays_halted_when_the_arm_does_not_change():
     assert out[0].item.status == "needs-input"
 
 
+def test_a_push_alone_does_not_revoke_an_address_feedback_tick():
+    """FALSIFYING (#238, 2026-09-01). The ✅ said "answer these 4 threads" --
+    a commit landing on the branch does not change that ask, and keying this
+    executor's consent on the sha revoked the approval over a mere push."""
+    prior = [_fb(status="approved", why="4 unaddressed threads", sha="s1")]
+    fresh = [_fb(why="4 unaddressed threads", sha="s2").item]
+    resets = set()
+    out = reconcile(prior, fresh, NOW, resets=resets)
+    assert out[0].item.status == "approved"
+    assert out[0].item.sha == "s2"             # consent now recorded here
+    assert resets == set()
+
+
+def test_a_push_that_also_grows_the_ask_still_resets():
+    """The sha moving does not launder a changed ask: new threads arriving
+    alongside a push revoke the ✅ exactly as they would without one."""
+    prior = [_fb(status="approved", why="4 unaddressed threads", sha="s1")]
+    fresh = [_fb(why="5 unaddressed threads", sha="s2").item]
+    resets = set()
+    out = reconcile(prior, fresh, NOW, resets=resets)
+    assert out[0].item.status == "proposed"
+    assert resets == {3}
+    assert "revoked" in out[0].item.why
+
+
+def test_the_revoked_marker_does_not_poison_a_re_approval():
+    """FALSIFYING the f-006 bug class, reborn: the on-row revocation marker
+    (2026-09-01) is worksweep's own bookkeeping. A re-approved row still
+    wearing it must compare equal to the clean fresh why, or every ✅ given
+    to a marked row is revoked again at the next sweep."""
+    from worksweep.queue import _REVOKED_MARKER
+    prior = [_fb(status="approved",
+                 why="4 unaddressed threads" + _REVOKED_MARKER)]
+    fresh = [_fb(why="4 unaddressed threads").item]
+    resets = set()
+    out = reconcile(prior, fresh, NOW, resets=resets)
+    assert out[0].item.status == "approved"
+    assert resets == set()
+
+
 def test_other_executors_keep_their_approval_when_the_why_drifts():
     """Rule (c) is scoped to address-feedback. A keep-current row whose commit
     count moved must not lose its ✅ -- it is auto-approved anyway, and

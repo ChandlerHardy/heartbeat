@@ -56,6 +56,8 @@ _NEEDS_INPUT = "needs-input"
 _WHY_SENSITIVE = ("address-feedback",)
 # Bookkeeping worksweep appends to a why-string. Never part of the ask.
 _PROBE_FAILED_MARKER = "(probe failed)"
+_REVOKED_MARKER = (" — prior ✅ revoked: the ask changed "
+                   "(new head/threads); re-approve if still wanted")
 # Resolution reasons strong enough to close an already-`error` row rather than
 # retain it. Deliberately narrow: each one means "the work provably no longer
 # exists" -- the signal cleared on its own, or the MR merged/closed and took
@@ -132,17 +134,21 @@ def null_lock(*args, **kwargs):
 
 
 def _consent_holds(prior: WorkItem, fresh: WorkItem) -> bool:
-    """Whether `prior`'s status may carry onto `fresh` at an unchanged sha.
+    """Whether `prior`'s status may carry onto `fresh` -- i.e. whether the ASK
+    the human approved is still the ask on the table.
 
-    For most executors the sha IS the ask, so an unchanged sha means unchanged
-    consent. `address-feedback` is different: its sha is the MR head, but what
-    was approved is a set of threads, and a reviewer can add a thread without
-    anyone pushing a commit. Its why-string carries that count, so a changed
-    why means a changed ask.
+    For most executors the sha IS the ask ("review this head"), so consent is
+    keyed on the sha. `address-feedback` is different in both directions: what
+    was approved is a set of threads, and (a) a reviewer can add a thread
+    without anyone pushing a commit -- the sha holds but the ask grew -- while
+    (b) a push alone does not change "answer these 4 threads" -- the sha moved
+    but the ask held. Keying its consent on the sha revoked a ✅ over a mere
+    push (#238, 2026-09-01), so its consent is keyed on the why-string, which
+    carries the thread ask, and the sha is ignored.
     """
-    if prior.executor not in _WHY_SENSITIVE:
-        return True
-    return _ask_of(prior.why) == _ask_of(fresh.why)
+    if prior.executor in _WHY_SENSITIVE:
+        return _ask_of(prior.why) == _ask_of(fresh.why)
+    return prior.sha == fresh.sha
 
 
 def _ask_of(why: str) -> str:
@@ -152,9 +158,12 @@ def _ask_of(why: str) -> str:
     row. Comparing the raw strings would read that marker as "the ask changed"
     and reset the ✅ on the very next sweep -- turning a one-sweep blip into a
     lost approval anyway, one step later. The marker describes OUR failure to
-    look, never a change in what was asked.
+    look, never a change in what was asked. The revoked marker is the same
+    class: left unstripped, a re-approved row still wearing it compares
+    unequal to the clean fresh why and the ✅ is revoked again every sweep.
     """
-    return (why or "").replace(_PROBE_FAILED_MARKER, "").strip()
+    return (why or "").replace(_PROBE_FAILED_MARKER, "") \
+                      .replace(_REVOKED_MARKER, "").strip()
 
 
 def _older_than_days(iso_ts: str, iso_now: str, days: int) -> bool:
@@ -402,7 +411,7 @@ def reconcile(existing: List[QueueRecord], fresh: List[WorkItem],
                                        first_seen=prior.first_seen, last_seen=now))
                 continue
             merged = dataclasses.replace(it, status="proposed")
-        elif prior.item.sha == it.sha and _consent_holds(prior.item, it):
+        elif _consent_holds(prior.item, it):
             # Carry the executor's own bookkeeping across the sweep. `dev_box`
             # in particular: issue items have sha="" so this branch fires
             # EVERY sweep, and rebuilding from the fresh item (dev_box="")
@@ -413,7 +422,8 @@ def reconcile(existing: List[QueueRecord], fresh: List[WorkItem],
                                          dev_box=prior.item.dev_box,
                                          mr_iid=prior.item.mr_iid)
         else:
-            # Fresh wins: the sha moved, so whatever the queue thought is stale.
+            # Fresh wins: the ask changed (the sha moved, or for a why-keyed
+            # executor the thread ask did), so the queue's view is stale.
             # ONLY an approved->proposed reset is reported: `error`->proposed is
             # a retry, `done`+new-sha is a resurrection, and `proposed`->
             # proposed is a no-op -- none of those revoke a human decision.
@@ -427,9 +437,7 @@ def reconcile(existing: List[QueueRecord], fresh: List[WorkItem],
                 # rebuilds `why` next pass, so the marker naturally ages out
                 # once the human has had a sweep-interval to see it.
                 merged = dataclasses.replace(
-                    merged,
-                    why=(merged.why + " — prior ✅ revoked: the ask changed "
-                         "(new head/threads); re-approve if still wanted"))
+                    merged, why=merged.why + _REVOKED_MARKER)
         out.append(QueueRecord(number=prior.number, item=merged,
                                first_seen=prior.first_seen, last_seen=now))
 
