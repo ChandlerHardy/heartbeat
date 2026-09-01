@@ -655,16 +655,21 @@ def test_a_thread_carries_the_id_of_its_last_human_note():
     assert [n.id for n in t.notes] == ["101", "102", "103"]
 
 
-def test_the_last_note_id_skips_system_and_bot_notes():
-    """It has to name the note the LAST WORD calculation used, or the seen-set
-    key would not match what the human actually dismissed."""
+def test_the_last_note_id_tracks_bots_but_the_last_word_does_not():
+    """Two different jobs, two different scopes. The LAST WORD (last_author/
+    last_note) skips bots -- a bot answering is not a reviewer waiting (!4082).
+    The DISMISSAL KEY (last_note_id) includes bots: a bot-finding thread has no
+    human note but must still be dismissable, and a bot follow-up must re-fire
+    a dismissal exactly as a human one does (CodeRabbit Majors on !4085,
+    2026-09-01). Both the row and the dismiss action read the same field, so
+    the seen-set key always matches what the dashboard recorded."""
     raw = json.dumps([{"id": "d1", "notes": [
         _idnote("leyang", 101),
         dict(_idnote(BOT, 102)),
         dict(_note("gitlab", system=True), id="103")]}])
     t = parse_threads(raw)[0]
     assert t.last_author == "leyang"
-    assert t.last_note_id == "101"
+    assert t.last_note_id == "102"
 
 
 def test_a_missing_note_id_is_empty_not_a_guess():
@@ -785,3 +790,69 @@ def test_an_unresolved_diff_thread_ending_in_an_ack_from_a_nonreviewer_counts():
                                        resolvable=False)]}])
     got = unaddressed_threads(raw, "chandler.hardy", REVIEWERS)
     assert tuple(t.id for t in got) == ("t1",)
+
+
+# --- bot FINDING threads (live blind spot: CodeRabbit Majors on !4085) ------
+#
+# The bot-noise rule computes "last word" skipping bots, so a thread containing
+# ONLY CodeRabbit notes had last_author == "" and was filed as nobody's
+# question -- two Major findings sat invisible on !4085 (2026-09-01). The
+# distinction that matters is the thread SHAPE: a bot's RESOLVABLE diff thread
+# is a review finding; a bot's plain note is chatter. Findings count while
+# unresolved and unanswered; chatter stays invisible (!4082).
+
+def _bot_finding(tid, note_id=91, resolved=False):
+    return {"id": tid, "individual_note": False,
+            "notes": [{"id": note_id, "body": "**Major** stale key survives",
+                       "system": False, "resolvable": True, "resolved": resolved,
+                       "author": {"username": BOT}}]}
+
+
+def test_a_bots_unresolved_finding_thread_counts():
+    got = unaddressed_threads(json.dumps([_bot_finding("t1")]),
+                              "chandler.hardy", REVIEWERS)
+    assert tuple(t.id for t in got) == ("t1",)
+
+
+def test_a_resolved_bot_finding_is_settled():
+    raw = json.dumps([_bot_finding("t1", resolved=True)])
+    assert unaddressed_threads(raw, "chandler.hardy", REVIEWERS) == ()
+
+
+def test_our_reply_under_a_bot_finding_settles_it():
+    raw = json.dumps([{"id": "t1", "individual_note": False,
+                       "notes": [_bot_finding("t1")["notes"][0],
+                                 _note("chandler.hardy", "fixed in abc123",
+                                       resolvable=False)]}])
+    assert unaddressed_threads(raw, "chandler.hardy", REVIEWERS) == ()
+
+
+def test_bot_plain_chatter_stays_invisible():
+    raw = json.dumps([{"id": "t1", "individual_note": True,
+                       "notes": [_note(BOT, "walkthrough summary",
+                                       resolvable=False)]}])
+    assert unaddressed_threads(raw, "chandler.hardy", REVIEWERS + (BOT,)) == ()
+
+
+def test_a_dismissed_bot_finding_stays_dismissed_until_it_speaks_again():
+    raw = json.dumps([_bot_finding("t1", note_id=91)])
+    assert unaddressed_threads(raw, "chandler.hardy", REVIEWERS,
+                               seen={("t1", "91")}) == ()
+    followed_up = json.dumps([{"id": "t1", "individual_note": False,
+                               "notes": [_bot_finding("t1", note_id=91)["notes"][0],
+                                         {"id": 92, "body": "still applies",
+                                          "system": False, "resolvable": True,
+                                          "resolved": False,
+                                          "author": {"username": BOT}}]}])
+    got = unaddressed_threads(followed_up, "chandler.hardy", REVIEWERS,
+                              seen={("t1", "91")})
+    assert tuple(t.id for t in got) == ("t1",)
+
+
+def test_a_system_only_thread_is_still_nobodys_question():
+    raw = json.dumps([{"id": "t1", "individual_note": False,
+                       "notes": [{"id": 1, "body": "changed this line",
+                                  "system": True, "resolvable": True,
+                                  "resolved": False,
+                                  "author": {"username": "leyang"}}]}])
+    assert unaddressed_threads(raw, "chandler.hardy", REVIEWERS) == ()
