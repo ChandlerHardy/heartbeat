@@ -365,3 +365,55 @@ def test_fail_post_is_bounded_for_discord(tmp_path):
     warn = next(p for p in posts if p.startswith("⚠️"))
     assert len(warn.encode("utf-8")) <= DISCORD_MAX_CHARS
     assert state["records"][0].item.status == "error"
+
+
+# --------------------------------------------------------------------------
+# the drain (2026-09-01): one pass, every approved item
+# --------------------------------------------------------------------------
+
+def test_one_pass_drains_every_approved_implement_item(tmp_path):
+    """FALSIFYING for the drain: two approved rows used to cost two launchd
+    fires 10 minutes apart. One pass now works the queue until it is empty."""
+    ran = []
+    deps, posts, saves, state = _deps(
+        [_rec(1), _rec(2, iid=1776)],
+        execute_implement=lambda item, cfg, bx: (ran.append(item.id),
+                                                 _result())[1])
+    assert run_once(_cfg(tmp_path), deps, **_locks(tmp_path)) == 0
+    assert len(ran) == 2
+    final = {r.number: r.item.status for r in state["records"]}
+    assert final == {1: "done", 2: "done"}
+
+
+def test_a_failed_claim_does_not_stop_the_drain(tmp_path):
+    """The failure already posted; the next item deserves its run."""
+    from worksweep.runner import RunnerError as _RE
+    calls = {"n": 0}
+
+    def flaky(item, cfg, bx):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _RE("first run fell over")
+        return _result()
+    deps, posts, saves, state = _deps([_rec(1), _rec(2, iid=1776)],
+                                      execute_implement=flaky)
+    assert run_once(_cfg(tmp_path), deps, **_locks(tmp_path)) == 1
+    final = {r.number: r.item.status for r in state["records"]}
+    assert final == {1: "error", 2: "done"}
+    assert any("#1" in p and "failed" in p for p in posts)
+
+
+def test_a_needs_input_park_does_not_stop_the_drain(tmp_path):
+    from worksweep.runner import NeedsInputError as _NIE
+    calls = {"n": 0}
+
+    def asks(item, cfg, bx):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise _NIE("which sheet wins?")
+        return _result()
+    deps, posts, saves, state = _deps([_rec(1), _rec(2, iid=1776)],
+                                      execute_implement=asks)
+    assert run_once(_cfg(tmp_path), deps, **_locks(tmp_path)) == 0
+    final = {r.number: r.item.status for r in state["records"]}
+    assert final == {1: "needs-input", 2: "done"}

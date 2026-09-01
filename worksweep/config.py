@@ -38,6 +38,10 @@ class WorksweepConfig:
     # points at a delivered copy; a missing/stale file falls back to the
     # baked-in gate either way (fail-closed).
     domain_registry_path: str = ""
+    # In-claim pipeline resume (2026-09-01): how many claude runs one implement
+    # claim may chain while the pipeline's checkpoint keeps advancing. The
+    # total wall budget stays implement_timeout regardless.
+    pipeline_resume_attempts: int = 3
     # Send-to-Fable (2026-09-01): the consult pass's model override and its
     # own timeout. consult_model="" means claude_bin's default model; the
     # consult is one read-only pass, so it gets a shorter budget than the
@@ -141,6 +145,8 @@ def load_config(path: str | None = None) -> WorksweepConfig:
         implement_timeout=implement_timeout,
         magi_timeout=magi_timeout,
         domain_registry_path=str(rn.get("domain_registry_path", "") or ""),
+        pipeline_resume_attempts=int(
+            rn.get("pipeline_resume_attempts", 3) or 3),
         consult_model=str(rn.get("consult_model", "") or ""),
         consult_timeout=int(rn.get("consult_timeout", 900) or 900),
         curate=curate_raw,
