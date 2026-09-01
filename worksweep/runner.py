@@ -771,11 +771,22 @@ def _chain_magi_review(records: List[QueueRecord], item: WorkItem, result,
                       status="approved", title=item.title))]
 
 
+# How many implement claims one pass may DRAIN back-to-back. A bound, not a
+# budget: each claim is already time-boxed by its own executor, and the pass
+# stops the moment nothing is approved. Before this, a nine-item batch spent
+# up to 80 minutes purely waiting on the 10-minute launchd cadence between
+# claims (2026-09-01).
+_IMPLEMENT_DRAIN_MAX = 9
+
+
 def _run_implement_pass(cfg, deps: Dict[str, Callable], lock_path: str) -> int:
-    """At most one implement item. Every exit below is either a no-op (nothing
-    approved / lock held) or ends in BOTH a queue status and a Discord post —
-    this executor writes to GitLab and occupies a dev box, so a silent failure
-    would leave a claimed box and a half-open branch with nobody told."""
+    """Drain approved implement items back-to-back, one at a time, under the
+    one lock. Every claim's exit is either a no-op (nothing approved / lock
+    held) or ends in BOTH a queue status and a Discord post — this executor
+    writes to GitLab and occupies a dev box, so a silent failure would leave
+    a claimed box and a half-open branch with nobody told. A failed claim
+    does not stop the drain: the next item deserves its run, and the failure
+    already posted."""
     # Cheap pre-check before taking the lock (and before probing dev boxes over
     # ssh): the overwhelmingly common case is "nothing approved".
     try:
@@ -788,73 +799,85 @@ def _run_implement_pass(cfg, deps: Dict[str, Callable], lock_path: str) -> int:
     if not acquire_lock(lock_path):
         return 0    # an implement run is already live under this lock
     try:
-        from . import implementer      # local: implementer imports runner
-        now = deps["now"]()
-        records = deps["load"]()
-        target = pick_claim(records, (_IMPLEMENT,))
-        if target is None:
-            return 0                   # raced with another pass — fine
-        number = target.number
-
-        if "boxes" not in deps or "execute_implement" not in deps:
-            _fail_and_post(deps, cfg, number,
-                           "implement executor is not wired into this runner "
-                           "(no boxes/execute_implement dep)", _IMPLEMENT)
-            return 1
-        try:
-            iid = implementer.issue_iid(target.item)
-            branch = implementer.branch_name(iid, target.item.title or "")
-        except RunnerError as e:
-            _fail_and_post(deps, cfg, number, str(e), _IMPLEMENT)
-            return 1
-
-        try:
-            slot = implementer.select_slot(deps["boxes"]())
-            reason = "no dev slot available — free one or reclaim"
-        except Exception as e:
-            slot, reason = None, (f"dev-slot probe failed: "
-                                  f"{type(e).__name__}: {e}")
-        if slot is None:
-            _fail_and_post(deps, cfg, number, reason, _IMPLEMENT)
-            return 1
-
-        # Claim the box on disk BEFORE the long work: a concurrent sweep's
-        # devslots.classify reads dev_box off running/approved records, so an
-        # unstamped claim could hand the same box to the next implement item.
-        with _queue_lock(deps):
-            # Re-load: selecting a dev slot probes every box over ssh, so the
-            # `records` read at the top of this pass is seconds old by now.
-            deps["save"](claim(deps["load"](), number, now,
-                               dev_box=slot.name))
-        _post(deps, cfg, _implement_claim_message(iid, slot, branch))
-
-        try:
-            result = deps["execute_implement"](target.item, cfg, [slot])
-        except NeedsInputError as e:
-            if _apply_to_fresh(
-                    deps, cfg, number,
-                    lambda fresh: needs_input(fresh, number, str(e),
-                                              deps["now"]())) is not None:
-                _post(deps, cfg, f"❓ #{iid} needs your input: {e}")
-            return 0        # a question is a handled outcome, not a failure
-        except RunnerError as e:
-            _fail_and_post(deps, cfg, number, str(e), _IMPLEMENT)
-            return 1
-        except Exception as e:
-            _fail_and_post(deps, cfg, number, f"{type(e).__name__}: {e}",
-                           _IMPLEMENT)
-            return 1
-
-        updated = _apply_to_fresh(
-            deps, cfg, number,
-            lambda fresh: complete(fresh, number, result.result_sha,
-                                   result.report_path, deps["now"](),
-                                   mr_iid=result.mr_iid))
-        if updated is not None:
-            _post(deps, cfg, _implement_done_message(result))
-        return 0
+        worst = 0
+        for _ in range(_IMPLEMENT_DRAIN_MAX):
+            rc = _run_one_implement_claim(cfg, deps)
+            if rc is None:             # nothing approved any more — done
+                break
+            worst = worst or rc
+        return worst
     finally:
         release_lock(lock_path)
+
+
+def _run_one_implement_claim(cfg, deps: Dict[str, Callable]) -> Optional[int]:
+    """One implement claim, called WITH the implement lock held. Returns the
+    claim's rc, or None when nothing is approved (the drain's stop signal)."""
+    from . import implementer      # local: implementer imports runner
+    now = deps["now"]()
+    records = deps["load"]()
+    target = pick_claim(records, (_IMPLEMENT,))
+    if target is None:
+        return None                # raced with another pass — fine
+    number = target.number
+
+    if "boxes" not in deps or "execute_implement" not in deps:
+        _fail_and_post(deps, cfg, number,
+                       "implement executor is not wired into this runner "
+                       "(no boxes/execute_implement dep)", _IMPLEMENT)
+        return 1
+    try:
+        iid = implementer.issue_iid(target.item)
+        branch = implementer.branch_name(iid, target.item.title or "")
+    except RunnerError as e:
+        _fail_and_post(deps, cfg, number, str(e), _IMPLEMENT)
+        return 1
+
+    try:
+        slot = implementer.select_slot(deps["boxes"]())
+        reason = "no dev slot available — free one or reclaim"
+    except Exception as e:
+        slot, reason = None, (f"dev-slot probe failed: "
+                              f"{type(e).__name__}: {e}")
+    if slot is None:
+        _fail_and_post(deps, cfg, number, reason, _IMPLEMENT)
+        return 1
+
+    # Claim the box on disk BEFORE the long work: a concurrent sweep's
+    # devslots.classify reads dev_box off running/approved records, so an
+    # unstamped claim could hand the same box to the next implement item.
+    with _queue_lock(deps):
+        # Re-load: selecting a dev slot probes every box over ssh, so the
+        # `records` read at the top of this pass is seconds old by now.
+        deps["save"](claim(deps["load"](), number, now,
+                           dev_box=slot.name))
+    _post(deps, cfg, _implement_claim_message(iid, slot, branch))
+
+    try:
+        result = deps["execute_implement"](target.item, cfg, [slot])
+    except NeedsInputError as e:
+        if _apply_to_fresh(
+                deps, cfg, number,
+                lambda fresh: needs_input(fresh, number, str(e),
+                                          deps["now"]())) is not None:
+            _post(deps, cfg, f"❓ #{iid} needs your input: {e}")
+        return 0        # a question is a handled outcome, not a failure
+    except RunnerError as e:
+        _fail_and_post(deps, cfg, number, str(e), _IMPLEMENT)
+        return 1
+    except Exception as e:
+        _fail_and_post(deps, cfg, number, f"{type(e).__name__}: {e}",
+                       _IMPLEMENT)
+        return 1
+
+    updated = _apply_to_fresh(
+        deps, cfg, number,
+        lambda fresh: complete(fresh, number, result.result_sha,
+                               result.report_path, deps["now"](),
+                               mr_iid=result.mr_iid))
+    if updated is not None:
+        _post(deps, cfg, _implement_done_message(result))
+    return 0
 
 
 def _implement_timeout(cfg) -> int:

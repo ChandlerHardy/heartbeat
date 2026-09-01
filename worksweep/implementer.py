@@ -31,6 +31,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from dataclasses import dataclass, replace as _dc_replace
 from typing import Callable, FrozenSet, List, Optional, Sequence
 
@@ -515,48 +516,83 @@ def _execute_pipeline(cfg, iid: int, slot: DevBox, checkout: str,
     # first directory matching the issue. A run that exits zero without
     # writing state would otherwise be reported against a PREVIOUS run's MR --
     # a completed queue item pointing at somebody else's work. Clear this
-    # issue's state first, so anything found afterwards can only be ours.
+    # issue's state ONCE, before the first attempt: the resume loop below
+    # depends on later attempts finding the earlier attempts' checkpoint.
     # Mirrors feedback._forget, and touches only THIS issue's directories.
     _forget_pipeline_state(checkout, iid)
     devnum = re.sub(r"\D", "", slot.name) or slot.name
     prompt = (f"{cfg.pipeline_command} #{iid} --dev {devnum}"
               + _PIPELINE_CONSTRAINTS.format(box=slot.name,
                                              gate=domain_gate_text()))
-    try:
-        proc = _run([cfg.claude_bin, "-p", prompt], run_subprocess,
-                    cwd=checkout, timeout=cfg.implement_timeout)
-    except subprocess.TimeoutExpired:
-        raise RunnerError(f"{cfg.pipeline_command} #{iid} exceeded "
-                          f"{cfg.implement_timeout}s")
-    transcript = f"{proc.stdout or ''}\n{proc.stderr or ''}"
-    halt = detect_halt(transcript)
-    if halt:
-        raise NeedsInputError(halt)
-    if proc.returncode != 0:
-        raise RunnerError(f"{cfg.pipeline_command} #{iid} exited "
-                          f"{proc.returncode}: {_tail(transcript)}")
 
-    # The prompt ASKS the run to halt before creating an MR on Leif's domain
-    # (see _PIPELINE_CONSTRAINTS). This is the check. It runs BEFORE the state
-    # file is read, so a gated run reports the gate rather than whatever else
-    # happens to be wrong -- otherwise Chandler goes looking for a missing
-    # state file when the real problem is an MR that needs closing.
-    _enforce_domain_gate(checkout, run_subprocess)
+    # An unattended `claude -p` run routinely ends itself after 25-50 minutes
+    # with the pipeline mid-phase (2026-09-01: four such exits in one day,
+    # each costing a reap -> sweep -> re-approve -> next-fire cycle of 15-30
+    # dead minutes, plus a fresh run's re-discovery of its own progress). The
+    # pipeline checkpoints, so the fix is to resume HERE, inside the claim:
+    # while an attempt ADVANCED the checkpoint and budget remains, run it
+    # again. An attempt that advances nothing raises exactly as a single run
+    # always did -- a stuck pipeline must fail loudly, never spin.
+    attempts = max(1, int(getattr(cfg, "pipeline_resume_attempts", 3) or 3))
+    started = time.monotonic()
+    state_path = state = None
+    last_progress = (-1, -1)
+    for attempt in range(1, attempts + 1):
+        if attempt == 1:
+            timeout = cfg.implement_timeout
+        else:
+            timeout = int(cfg.implement_timeout
+                          - (time.monotonic() - started))
+            if timeout < _RESUME_MIN_REMAINING_SECONDS:
+                break              # not enough budget left for a useful leg
+        try:
+            proc = _run([cfg.claude_bin, "-p", prompt], run_subprocess,
+                        cwd=checkout, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise RunnerError(f"{cfg.pipeline_command} #{iid} exceeded "
+                              f"{cfg.implement_timeout}s")
+        transcript = f"{proc.stdout or ''}\n{proc.stderr or ''}"
+        halt = detect_halt(transcript)
+        if halt:
+            raise NeedsInputError(halt)
+        if proc.returncode != 0:
+            raise RunnerError(f"{cfg.pipeline_command} #{iid} exited "
+                              f"{proc.returncode}: {_tail(transcript)}")
 
-    state_path, state = _find_pipeline_state(checkout, iid)
+        # The prompt ASKS the run to halt before creating an MR on Leif's
+        # domain (see _PIPELINE_CONSTRAINTS). This is the check. It runs
+        # BEFORE the state file is read, so a gated run reports the gate
+        # rather than whatever else happens to be wrong -- otherwise Chandler
+        # goes looking for a missing state file when the real problem is an
+        # MR that needs closing. Checked EVERY attempt: a resumed leg can
+        # touch the gate as easily as a first one.
+        _enforce_domain_gate(checkout, run_subprocess)
+
+        state_path, state = _find_pipeline_state(checkout, iid)
+        if state is not None and _pipeline_mr_of(state) is not None:
+            break                  # Phase 7 reached -- on to verification
+        progress = _pipeline_progress(state)
+        if attempt < attempts and progress > last_progress:
+            last_progress = progress
+            continue               # the checkpoint moved: resume in-claim
+        if state is None:
+            raise RunnerError(f"pipeline run for #{iid} left no state file "
+                              f"under .claude/state/pla-pipelines/ — cannot "
+                              f"prove an MR exists; inspect the checkout by "
+                              f"hand")
+        raise RunnerError(f"pipeline state for #{iid} names no MR "
+                          f"({state_path}) — the run did not reach Phase 7 "
+                          f"(after {attempt} attempt(s) in this claim)")
+
     if state is None:
         raise RunnerError(f"pipeline run for #{iid} left no state file under "
                           f".claude/state/pla-pipelines/ — cannot prove an MR "
                           f"exists; inspect the checkout by hand")
-    url_m = re.search(r"https?://\S*/-/merge_requests/(\d+)", state)
-    bang_m = re.search(r"MR[^\n]*?!(\d+)", state)
-    if url_m:
-        mr_iid, mr_url = int(url_m.group(1)), url_m.group(0)
-    elif bang_m:
-        mr_iid, mr_url = int(bang_m.group(1)), ""
-    else:
+    mr = _pipeline_mr_of(state)
+    if mr is None:
         raise RunnerError(f"pipeline state for #{iid} names no MR "
                           f"({state_path}) — the run did not reach Phase 7")
+    mr_iid, mr_url = mr
     _ensure_draft(checkout, mr_iid, run_subprocess, mr_url)
     branch, head = _mr_branch_sha(checkout, mr_iid, run_subprocess)
 
@@ -586,6 +622,37 @@ def _execute_pipeline(cfg, iid: int, slot: DevBox, checkout: str,
         reassigned_from=(str(slot.mr_iid)
                          if slot.tier == _TIER_HANDED_OFF and slot.mr_iid else ""),
         magi_note=magi_line)
+
+
+# A resumed pipeline leg needs at least this much of the claim's budget left
+# to be worth launching; below it the loop stops and the honest no-MR error
+# reports instead of burning a doomed claude run.
+_RESUME_MIN_REMAINING_SECONDS = 600
+
+
+def _pipeline_mr_of(state: str):
+    """(mr_iid, mr_url) named by a pipeline state file, or None before
+    Phase 7. mr_url is "" when the state names the MR only as !NNN."""
+    url_m = re.search(r"https?://\S*/-/merge_requests/(\d+)", state)
+    if url_m:
+        return int(url_m.group(1)), url_m.group(0)
+    bang_m = re.search(r"MR[^\n]*?!(\d+)", state)
+    if bang_m:
+        return int(bang_m.group(1)), ""
+    return None
+
+
+def _pipeline_progress(state) -> tuple:
+    """How far a state file has come: (phase number, checked boxes).
+    Orderable, so the resume loop can ask "did the checkpoint move?" --
+    either counter advancing counts, and a missing/blank state is the
+    floor. Both fields are LLM-written, which is exactly why two are read:
+    a run that forgets to bump `phase:` still usually ticks a box."""
+    if not state:
+        return (-1, -1)
+    phase_m = re.search(r"^phase:\s*(\d+)", state, re.M)
+    phase = int(phase_m.group(1)) if phase_m else -1
+    return (phase, state.count("- [x]"))
 
 
 def _forget_pipeline_state(checkout: str, iid: int) -> None:

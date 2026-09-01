@@ -418,3 +418,86 @@ def test_an_unreadable_diff_fails_rather_than_passing(tmp_path):
         _run(tmp_path, edges=_Touched(changed=[], diff_rc=128))
     assert DOMAIN_GATE_VIOLATION in str(e.value)
     assert "could not diff" in str(e.value)
+
+
+# --- in-claim resume (2026-09-01) -------------------------------------------
+#
+# An unattended `claude -p` pipeline run routinely ends itself mid-phase; the
+# checkpoint survives, so the executor resumes INSIDE the claim while the
+# checkpoint advances. Before this, every early exit cost a reap -> sweep ->
+# re-approve -> next-fire cycle of 15-30 dead minutes.
+
+_STATE_PHASE3 = "---\nphase: 3\n---\n- [x] 0. Orient\n- [x] 1. Trace\n- [x] 2. Decide\n"
+_STATE_PHASE5 = "---\nphase: 5\n---\n- [x] 0. Orient\n- [x] 1. Trace\n- [x] 2. Decide\n- [x] 3. Implement\n- [x] 4. Ship gate\n"
+
+
+class _ResumingEdges(_Edges):
+    """Like _Edges, but each claude call writes the NEXT state in sequence."""
+
+    def __init__(self, states, **kw):
+        super().__init__(**kw)
+        self.states = list(states)
+        self.claude_calls = 0
+
+    def run(self, cmd, **kw):
+        c = list(cmd)
+        if c[0] == "claude":
+            self.write_state = self.states[
+                min(self.claude_calls, len(self.states) - 1)]
+            self.claude_calls += 1
+        return super().run(cmd, **kw)
+
+
+def test_an_early_exit_with_progress_resumes_inside_the_claim(tmp_path):
+    """FALSIFYING for the whole feature: attempt 1 ends at phase 3 with no
+    MR; the old executor raised there and the queue burned a ✅. Now the
+    claim itself runs the pipeline again, and attempt 2's Phase-7 state
+    completes normally."""
+    edges = _ResumingEdges([_STATE_PHASE3, _STATE])
+    result, edges = _run(tmp_path, edges=edges)
+    assert edges.claude_calls == 2
+    assert result.mr_iid == 4099
+
+
+def test_no_progress_between_attempts_fails_instead_of_spinning(tmp_path):
+    """A pipeline that cannot move is a stuck pipeline: same checkpoint twice
+    means raise the honest error, never a third token-burning attempt."""
+    edges = _ResumingEdges([_STATE_PHASE3, _STATE_PHASE3, _STATE_PHASE3])
+    with pytest.raises(RunnerError) as e:
+        _run(tmp_path, edges=edges)
+    assert edges.claude_calls == 2
+    assert "did not reach Phase 7" in str(e.value)
+    assert "2 attempt(s)" in str(e.value)
+
+
+def test_the_attempts_cap_bounds_the_loop(tmp_path):
+    """Progress on every attempt still ends at the cap — the reap window is
+    sized to implement_timeout, and an unbounded resumer would outlive it."""
+    edges = _ResumingEdges([_STATE_PHASE3, _STATE_PHASE5, _STATE_PHASE5])
+    with pytest.raises(RunnerError) as e:
+        _run(tmp_path, edges=edges,
+             cfg=_cfg(tmp_path, pipeline_resume_attempts=2))
+    assert edges.claude_calls == 2
+    assert "did not reach Phase 7" in str(e.value)
+
+
+def test_a_first_attempt_that_reaches_phase7_never_resumes(tmp_path):
+    edges = _ResumingEdges([_STATE])
+    result, edges = _run(tmp_path, edges=edges)
+    assert edges.claude_calls == 1
+    assert result.mr_iid == 4099
+
+
+def test_a_halt_on_a_resumed_attempt_still_parks(tmp_path):
+    """The domain gate / needs-input contract survives the loop: a resumed
+    leg that halts must park the row, not be retried into compliance."""
+    class _HaltSecond(_ResumingEdges):
+        def run(self, cmd, **kw):
+            c = list(cmd)
+            if c[0] == "claude" and self.claude_calls == 1:
+                self.claude_out = "HALT_INSUFFICIENT_CONTEXT: which endpoint owns this?\n"
+            return super().run(cmd, **kw)
+    edges = _HaltSecond([_STATE_PHASE3, _STATE_PHASE3])
+    with pytest.raises(NeedsInputError):
+        _run(tmp_path, edges=edges)
+    assert edges.claude_calls == 2
