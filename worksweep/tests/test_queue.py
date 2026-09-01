@@ -1,8 +1,9 @@
+import dataclasses
 import os, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 import pytest  # noqa: E402
 from worksweep.models import WorkItem, QueueRecord  # noqa: E402
-from worksweep.queue import load_queue, save_queue   # noqa: E402
+from worksweep.queue import load_queue, save_queue   # noqa: E402, reconcile
 
 
 def _rec(n, id_, status="proposed"):
@@ -389,3 +390,20 @@ def test_dismissing_records_the_notes_it_saw(tmp_path):
     assert out[0].item.status == "done"
     assert out[0].item.done_reason == "dismissed"
     assert dismissed.item.note_refs == (("d1", "101"),)
+
+
+def test_a_revoked_approval_says_so_on_the_row():
+    """A ✅ revoked by a sha change must be visible on the ROW, not only in
+    the Discord footnote — a silently re-proposed row reads as a failed click
+    (#238, 2026-09-01)."""
+    from worksweep.queue import reconcile
+    prior_rec = _rec(1, "feedback:pb-www!4098", status="approved")
+    fresh = dataclasses.replace(prior_rec.item, status="proposed", sha="bbb",
+                                why="4 unaddressed threads")
+    resets = set()
+    out = reconcile([prior_rec], [fresh], "2026-09-01T14:00:00+00:00",
+                    resets=resets)
+    assert resets == {1}
+    row = out[0].item
+    assert row.status == "proposed"
+    assert "revoked" in row.why and "re-approve" in row.why
