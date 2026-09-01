@@ -420,6 +420,16 @@ def reconcile(existing: List[QueueRecord], fresh: List[WorkItem],
             if ps == "approved" and resets is not None:
                 resets.add(prior.number)
             merged = dataclasses.replace(it, status="proposed")
+            if ps == "approved":
+                # Say it ON THE ROW, not only in the Discord footnote: a
+                # revoked ✅ that silently reappears as proposed reads as "my
+                # click didn't work" (#238, 2026-09-01). The fresh sweep
+                # rebuilds `why` next pass, so the marker naturally ages out
+                # once the human has had a sweep-interval to see it.
+                merged = dataclasses.replace(
+                    merged,
+                    why=(merged.why + " — prior ✅ revoked: the ask changed "
+                         "(new head/threads); re-approve if still wanted"))
         out.append(QueueRecord(number=prior.number, item=merged,
                                first_seen=prior.first_seen, last_seen=now))
 
