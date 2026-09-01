@@ -244,6 +244,11 @@ def parse_threads(raw_json) -> tuple:
                  and not _is_bot(((n.get("author") or {}) or {})
                                  .get("username", ""))]
         last = human[-1] if human else None
+        # The dismissal evidence key, by contrast, tracks the last non-system
+        # note INCLUDING bots: a bot-finding thread has no human note but must
+        # still be dismissable, and a bot follow-up must re-fire it.
+        nonsys = [n for n in notes if not n.get("system")]
+        last_any = nonsys[-1] if nonsys else None
         resolved_by = ""
         for n in notes:
             who = ((n.get("resolved_by") or {}) or {}).get("username", "")
@@ -256,7 +261,7 @@ def parse_threads(raw_json) -> tuple:
                      and all(bool(n.get("resolved")) for n in resolvable_notes),
             last_author=((last or {}).get("author") or {}).get("username", ""),
             last_note=(last or {}).get("body") or "",
-            last_note_id=str((last or {}).get("id") or ""),
+            last_note_id=str((last_any or {}).get("id") or ""),
             resolved_by=resolved_by,
             notes=tuple(ReviewNote(
                 author=((n.get("author") or {}) or {}).get("username", ""),
@@ -332,11 +337,19 @@ def unaddressed_threads(raw_json, username: str, reviewers=(),
     dismissed = frozenset(tuple(k) for k in (seen or ()))
     out = []
     for t in parse_threads(raw_json):
-        if not t.last_author or t.last_author == username:
+        if t.last_author == username:
             continue
-        # Dismissal is keyed on EVIDENCE, not on the thread. A reviewer's
-        # follow-up changes `last_note_id`, so the key stops matching and the
-        # row returns -- "seen this note", never "mute this thread".
+        if not t.last_author and not (t.resolvable and not t.resolved
+                                      and t.last_note_id):
+            # No human word: either a system-only thread (nobody's question)
+            # or bot content. A bot's RESOLVABLE unresolved thread is a review
+            # FINDING (CodeRabbit posts findings as resolvable diff threads --
+            # two Majors sat invisible on !4085, 2026-09-01) and falls through
+            # to count; bot plain-note chatter stays invisible (!4082).
+            continue
+        # Dismissal is keyed on EVIDENCE, not on the thread. A reviewer's (or
+        # bot's) follow-up changes `last_note_id`, so the key stops matching
+        # and the row returns -- "seen this note", never "mute this thread".
         if (t.id, t.last_note_id) in dismissed:
             continue
         # A listed reviewer whose ENTIRE last word is an approval token has
