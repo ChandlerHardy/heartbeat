@@ -38,6 +38,12 @@ class WorksweepConfig:
     # points at a delivered copy; a missing/stale file falls back to the
     # baked-in gate either way (fail-closed).
     domain_registry_path: str = ""
+    # Send-to-Fable (2026-09-01): the consult pass's model override and its
+    # own timeout. consult_model="" means claude_bin's default model; the
+    # consult is one read-only pass, so it gets a shorter budget than the
+    # posting executors.
+    consult_model: str = ""
+    consult_timeout: int = 900
     # M3.5 Task C: gate for the LLM digest-curation pass. Reuses claude_bin
     # (no separate curator_bin) -- both are just "claude" runs in a
     # subprocess, one against a checkout, one against the repo root.
@@ -135,6 +141,8 @@ def load_config(path: str | None = None) -> WorksweepConfig:
         implement_timeout=implement_timeout,
         magi_timeout=magi_timeout,
         domain_registry_path=str(rn.get("domain_registry_path", "") or ""),
+        consult_model=str(rn.get("consult_model", "") or ""),
+        consult_timeout=int(rn.get("consult_timeout", 900) or 900),
         curate=curate_raw,
         dev_boxes=tuple(dev_boxes_raw),
         stale_threshold=stale_threshold,

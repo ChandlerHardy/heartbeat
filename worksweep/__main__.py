@@ -903,6 +903,20 @@ def _dry_run_address_feedback(item, cfg):
                                    already_answered=True)
 
 
+def _execute_consult(item, cfg):
+    """Send-to-Fable edge: one read-only claude pass (Read/Grep/Glob, no
+    Bash) over the parked question plus its MR threads. Posts nothing —
+    the rec goes back onto the queue row for the human to accept."""
+    from . import consult
+    return consult.execute_consult(item, cfg, run_subprocess=subprocess.run,
+                                   run_glab=_run_glab_api)
+
+
+def _dry_run_consult(item, cfg):
+    """--dry-run previews the lane without burning a claude run."""
+    return "(dry-run) no recommendation produced"
+
+
 def _execute_keep_current(item, cfg):
     """Real keep-current edge: subprocess + two ssh budgets + an http probe.
     `cfg.dev_boxes` is the raw box-config list — keepcurrent.execute probes
@@ -1012,6 +1026,8 @@ def main(argv=None) -> int:
             "execute_address_feedback": (_dry_run_address_feedback
                                          if args.dry_run
                                          else _execute_address_feedback),
+            "execute_consult": (_dry_run_consult if args.dry_run
+                                else _execute_consult),
             # --dry-run never saves, so it never needs to exclude anyone.
             "queue_lock": (null_lock if args.dry_run
                            else (lambda: write_lock(_queue_path()))),

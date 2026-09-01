@@ -3565,3 +3565,123 @@ def test_a_manual_row_still_renders_only_dismiss(serve_queue):
     html = s.request("GET", "/")[2].decode("utf-8")
     assert 'data-dismiss="1"' in html
     assert 'type="checkbox"' not in html
+
+
+# =============================================================================
+# Send-to-Fable (2026-09-01): the consult strip on parked rows
+# =============================================================================
+#
+# A needs-input row is a question, and before this the question itself never
+# reached the page (#238: the human read Discord scrollback to learn what was
+# asked). Now the row shows the question, offers 🔮 Consult, renders the rec,
+# and Accept flips it to approved with the rec as the executor's ruling.
+
+def _parked_rec(n=7, consult="", consult_rec="", **kw):
+    item = dict(schema_version=1, id=f"feedback:pb-www!{4090 + n}",
+                repo="pb-www", kind="feedback", executor="address-feedback",
+                risk="low", why="2 unaddressed threads",
+                web_url=f"https://gl/x/-/merge_requests/{4090 + n}", sha="s",
+                status="needs-input", title=f"parked {n}",
+                error_summary="2 threads need your call",
+                consult=consult, consult_rec=consult_rec)
+    item.update(kw)
+    return QueueRecord(number=n, first_seen=T0, last_seen=T0,
+                       item=WorkItem(**item))
+
+
+def _consult_post(s, path, number):
+    h = {"X-Worksweep": "approve", "Content-Type": "application/json"}
+    return s.request("POST", path, json.dumps({"number": number}), h)
+
+
+def test_a_parked_row_shows_its_question_and_the_consult_button(serve_queue):
+    """FALSIFYING for the question: error_summary never rendered on parked
+    rows, so the dashboard offered a hold with no way to read the ask."""
+    s, _ = serve_queue([_parked_rec()])
+    html = _markup(s.request("GET", "/")[2].decode("utf-8"))
+    assert "2 threads need your call" in html
+    assert 'data-consult="7"' in html
+
+
+def test_a_pending_consult_shows_the_hold_not_the_button(serve_queue):
+    s, _ = serve_queue([_parked_rec(consult="requested")])
+    html = _markup(s.request("GET", "/")[2].decode("utf-8"))
+    assert "consult pending" in html
+    assert 'data-consult="7"' not in html
+
+
+def test_a_finished_consult_shows_the_rec_and_accept(serve_queue):
+    s, _ = serve_queue([_parked_rec(consult="done",
+                                    consult_rec="Do X.  ·  Why: Y.")])
+    html = _markup(s.request("GET", "/")[2].decode("utf-8"))
+    assert "Do X." in html
+    assert 'data-accept-rec="7"' in html
+    assert 'data-consult="7"' not in html
+
+
+def test_a_failed_consult_reoffers_the_button(serve_queue):
+    s, _ = serve_queue([_parked_rec(consult="error")])
+    html = _markup(s.request("GET", "/")[2].decode("utf-8"))
+    assert "consult failed" in html
+    assert 'data-consult="7"' in html
+
+
+def test_post_consult_flips_the_row_to_requested(serve_queue):
+    s, qpath = serve_queue([_parked_rec()])
+    status, _, body = _consult_post(s, "/consult", 7)
+    assert status == 200
+    assert json.loads(body)["consult"] == "requested"
+    row = load_queue(qpath)[0]
+    assert row.item.consult == "requested"
+    assert row.item.status == "needs-input"
+
+
+def test_post_consult_is_idempotent_but_never_replaces_a_rec(serve_queue):
+    s, _ = serve_queue([_parked_rec(consult="requested")])
+    assert _consult_post(s, "/consult", 7)[0] == 200
+    s2, qpath2 = serve_queue([_parked_rec(consult="done", consult_rec="r")])
+    status, _, body = _consult_post(s2, "/consult", 7)
+    assert status == 400
+    assert load_queue(qpath2)[0].item.consult == "done"
+
+
+def test_post_consult_refuses_a_row_that_is_not_parked(serve_queue):
+    s, qpath = serve_queue([_rec(1)])
+    assert _consult_post(s, "/consult", 1)[0] == 400
+    assert load_queue(qpath)[0].item.consult == ""
+
+
+def test_accept_rec_approves_with_the_ruling_and_audits_it(serve_queue):
+    """The one approval path WITH content, and the audit line says so."""
+    posts = []
+    s, qpath = serve_queue([_parked_rec(consult="done",
+                                        consult_rec="Do X.  ·  Why: Y.")],
+                           post=lambda hook, c: posts.append(c),
+                           webhook="https://discord/hook")
+    status, _, body = _consult_post(s, "/accept-rec", 7)
+    assert status == 200
+    row = load_queue(qpath)[0]
+    assert row.item.status == "approved"
+    assert row.item.ruling == "Do X.  ·  Why: Y."
+    assert row.item.consult == "" and row.item.consult_rec == ""
+    assert len(posts) == 1
+    assert "accepted fable rec" in posts[0] and "#7" in posts[0]
+
+
+def test_accept_rec_without_a_rec_is_a_400(serve_queue):
+    posts = []
+    s, qpath = serve_queue([_parked_rec()],
+                           post=lambda hook, c: posts.append(c),
+                           webhook="https://discord/hook")
+    assert _consult_post(s, "/accept-rec", 7)[0] == 400
+    assert load_queue(qpath)[0].item.status == "needs-input"
+    assert posts == []
+
+
+def test_consult_routes_demand_the_csrf_header(serve_queue):
+    """Same skin as every other POST: no header, no flip."""
+    s, qpath = serve_queue([_parked_rec()])
+    status, _, _ = s.request("POST", "/consult", json.dumps({"number": 7}),
+                             {"Content-Type": "application/json"})
+    assert status == 403
+    assert load_queue(qpath)[0].item.consult == ""

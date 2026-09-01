@@ -400,6 +400,21 @@ class WorkItem:
                               # deliberately unchanged -- it is the queue's
                               # identity key, so touching it would renumber
                               # every todo.
+    # --- Send-to-Fable (consult) -- needs-input rows only --------------------
+    # A ✅ carries no content, so until this existed a session was the only
+    # channel that could ANSWER a parked question. `consult` requests an
+    # unattended recommendation run: "" (never asked) | "requested" (queued
+    # for the runner's consult pass) | "done" (consult_rec holds the
+    # recommendation) | "error" (the run failed; the dashboard re-offers the
+    # button).
+    consult: str = ""
+    consult_rec: str = ""     # rendered recommendation (decision / why /
+                              # rejected fork), written by the consult pass
+    # The operator's decision, handed to the executor's prompt when the row
+    # runs. Set by the dashboard's Accept action (the accepted consult_rec
+    # becomes the ruling). Empty means no ruling: the executor re-derives
+    # everything itself, exactly as before this field existed.
+    ruling: str = ""
 
 
 @dataclass(frozen=True)
