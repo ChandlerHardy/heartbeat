@@ -512,14 +512,14 @@ def _execute_pipeline(cfg, iid: int, slot: DevBox, checkout: str,
     MR, run magi, or push. It verifies instead: the pipeline's state file
     names an MR, that MR reads back as (or is forced) Draft, and the box
     serves 200."""
-    # f-021: this worktree is permanent and `_find_pipeline_state` takes the
-    # first directory matching the issue. A run that exits zero without
-    # writing state would otherwise be reported against a PREVIOUS run's MR --
-    # a completed queue item pointing at somebody else's work. Clear this
-    # issue's state ONCE, before the first attempt: the resume loop below
-    # depends on later attempts finding the earlier attempts' checkpoint.
-    # Mirrors feedback._forget, and touches only THIS issue's directories.
-    _forget_pipeline_state(checkout, iid)
+    # f-021 rethought (2026-09-02): the hazard is reporting a PREVIOUS run's
+    # MR as this claim's result. Wiping the state file at claim start guarded
+    # that -- and also destroyed the checkpoint every resumed claim needed,
+    # which is why resumes spent their first leg re-discovering their own
+    # progress from artifacts. The state now SURVIVES between claims; the
+    # anti-stale guard moves to completion, where the MR is accepted only
+    # from a state file WRITTEN DURING THIS CLAIM (mtime gate below).
+    run_started = time.time()
     devnum = re.sub(r"\D", "", slot.name) or slot.name
     prompt = (f"{cfg.pipeline_command} #{iid} --dev {devnum}"
               + _PIPELINE_CONSTRAINTS.format(box=slot.name,
@@ -622,6 +622,20 @@ def _execute_pipeline(cfg, iid: int, slot: DevBox, checkout: str,
     if mr is None:
         raise RunnerError(f"pipeline state for #{iid} names no MR "
                           f"({state_path}) — the run did not reach Phase 7")
+    # The f-021 guard, relocated: an MR is only THIS claim's result if the
+    # state file was written during this claim. A surviving checkpoint that
+    # names an MR but was never touched by these legs is a previous run's
+    # work -- refuse to complete on it rather than report it as ours.
+    try:
+        state_mtime = os.path.getmtime(state_path)
+    except OSError:
+        state_mtime = 0.0
+    if state_mtime < run_started - 5:
+        raise RunnerError(
+            f"pipeline state for #{iid} ({state_path}) predates this claim "
+            f"— a prior run's checkpoint names that MR, and these legs never "
+            f"updated it; verify by hand rather than reporting it as this "
+            f"run's work")
     mr_iid, mr_url = mr
     _ensure_draft(checkout, mr_iid, run_subprocess, mr_url)
     branch, head = _mr_branch_sha(checkout, mr_iid, run_subprocess)
@@ -726,28 +740,6 @@ def _pipeline_progress(state) -> tuple:
     return (phase, state.count("- [x]"))
 
 
-def _forget_pipeline_state(checkout: str, iid: int) -> None:
-    """Remove any pipeline state for `iid` left in this reused worktree.
-
-    Best-effort and silent: a state file we cannot delete is caught by the
-    caller's own "left no state file" check, and failing the run over cleanup
-    would turn a recoverable mess into an outage. State for OTHER issues is
-    untouched -- that is somebody else's run, not ours to clear.
-    """
-    root = os.path.join(checkout, ".claude", "state", "pla-pipelines")
-    try:
-        names = os.listdir(root)
-    except OSError:
-        return
-    for name in names:
-        if not re.match(rf"{iid}(\D|$)", name):
-            continue
-        try:
-            os.remove(os.path.join(root, name, "state.md"))
-        except OSError:
-            pass
-
-
 def _enforce_domain_gate(checkout: str, run_subprocess: Callable) -> None:
     """Refuse a branch that touched Leif's domain, loudly.
 
@@ -777,23 +769,42 @@ def _enforce_domain_gate(checkout: str, run_subprocess: Callable) -> None:
             f"Close it and loop {DOMAIN_GATE_OWNER} in.")
 
 
+def _pipeline_state_bases(checkout: str) -> list:
+    """Every directory a pipeline session may have anchored its relative
+    `.claude/state/pla-pipelines/` path to. The skill says the path, not the
+    base, and overnight 2026-09-02 four sessions anchored it at the SHARED
+    CLONE while the executor looked only in its worktree — hours of real
+    progress read back as "left no state file", and the rows burned their
+    ✅s. The worktree stays first: it is where a compliant run writes."""
+    bases = [checkout]
+    leaf = os.path.basename(checkout)
+    if leaf.endswith("-implement"):
+        repo = leaf[:-len("-implement")]
+        shared = os.path.join(os.path.dirname(os.path.dirname(checkout)), repo)
+        if os.path.isdir(shared):
+            bases.append(shared)
+    return bases
+
+
 def _find_pipeline_state(checkout: str, iid: int) -> tuple:
     """(path, contents) of the pipeline's state.md for issue `iid` -- state
     dirs are slugged `<iid>-<words>` (pla-pipeline skill convention). ("",
-    None) when absent."""
-    root = os.path.join(checkout, ".claude", "state", "pla-pipelines")
-    try:
-        names = sorted(os.listdir(root))
-    except OSError:
-        return "", None
-    for name in names:
-        if re.match(rf"{iid}(\D|$)", name):
-            path = os.path.join(root, name, "state.md")
-            try:
-                with open(path) as f:
-                    return path, f.read()
-            except OSError:
-                continue
+    None) when absent. Searches every base a session may have anchored the
+    relative state path to (see _pipeline_state_bases)."""
+    for base in _pipeline_state_bases(checkout):
+        root = os.path.join(base, ".claude", "state", "pla-pipelines")
+        try:
+            names = sorted(os.listdir(root))
+        except OSError:
+            continue
+        for name in names:
+            if re.match(rf"{iid}(\D|$)", name):
+                path = os.path.join(root, name, "state.md")
+                try:
+                    with open(path) as f:
+                        return path, f.read()
+                except OSError:
+                    continue
     return "", None
 
 

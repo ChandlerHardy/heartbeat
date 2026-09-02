@@ -205,25 +205,34 @@ def test_default_config_keeps_legacy_rubric_do_path(tmp_path):
 # --- f-021 / f-022: the pipeline path must PROVE, not assume ---------------
 
 def test_a_stale_state_file_is_never_read_as_this_runs_work(tmp_path):
-    """f-021. The worktree is permanent and `_find_pipeline_state` takes the
-    first matching issue directory. A run that exits zero without writing
-    state was therefore reported against a PREVIOUS run's MR -- a completed
-    queue item pointing at somebody else's work."""
+    """f-021, relocated to a FRESHNESS gate. The checkpoint now survives
+    between claims (it is the resume state), so the guard moved to
+    completion: an MR is only this claim's result if the state file was
+    written during this claim. A back-dated checkpoint naming an MR, plus a
+    run that writes nothing, must refuse -- not report yesterday's MR."""
+    import os as _os
+    import time as _time
     edges = _Edges(write_state=None)          # this run leaves nothing behind
     (tmp_path / "pb-www").mkdir(exist_ok=True)
     stale_dir = (tmp_path / ".worktrees" / "pb-www-implement" / ".claude"
                  / "state" / "pla-pipelines" / "1775-yesterdays-run")
     stale_dir.mkdir(parents=True)
-    (stale_dir / "state.md").write_text(
+    stale = stale_dir / "state.md"
+    stale.write_text(
         "- [x] 7. MR — https://gitlab.com/x/-/merge_requests/4001 (draft)\n")
+    old = _time.time() - 3600
+    _os.utime(stale, (old, old))
 
     with pytest.raises(RunnerError) as e:
         _run(tmp_path, edges=edges)
-    assert "no state file" in str(e.value)
+    assert "predates this claim" in str(e.value)
 
 
-def test_the_stale_state_is_actually_removed_before_the_run(tmp_path):
-    """Not merely ignored: cleared, so nothing downstream can find it."""
+def test_a_surviving_checkpoint_is_kept_and_a_fresh_write_wins(tmp_path):
+    """The wipe is GONE on purpose: the checkpoint is what a resumed claim
+    picks up (wiping it forced every resume to re-discover its own progress
+    from artifacts). A fresh state written during the claim completes the
+    run; the old checkpoint file is left in place."""
     edges = _Edges()
     (tmp_path / "pb-www").mkdir(exist_ok=True)
     root = (tmp_path / ".worktrees" / "pb-www-implement" / ".claude"
@@ -234,12 +243,12 @@ def test_the_stale_state_is_actually_removed_before_the_run(tmp_path):
 
     result, _ = _run(tmp_path, edges=edges)
     assert result.mr_iid == 4099              # THIS run's MR, not 4001
-    assert not (stale / "state.md").exists()
+    assert (stale / "state.md").exists()      # the checkpoint survives
 
 
 def test_state_for_another_issue_is_left_alone(tmp_path):
-    """Only this issue's state is cleared -- a concurrent or earlier run for a
-    different issue is none of our business."""
+    """A concurrent or earlier run for a different issue is none of our
+    business -- its state is neither read nor touched."""
     edges = _Edges()
     (tmp_path / "pb-www").mkdir(exist_ok=True)
     root = (tmp_path / ".worktrees" / "pb-www-implement" / ".claude"
@@ -250,6 +259,33 @@ def test_state_for_another_issue_is_left_alone(tmp_path):
 
     _run(tmp_path, edges=edges)
     assert (other / "state.md").exists()
+
+
+def test_state_anchored_at_the_shared_clone_is_still_found(tmp_path):
+    """2026-09-02: four overnight sessions anchored the skill's relative
+    state path at the SHARED CLONE instead of the implement worktree, and
+    hours of real progress read back as 'left no state file'. The finder
+    now searches both bases."""
+
+    class _SharedCloneEdges(_Edges):
+        def run(self, cmd, **kw):
+            c = list(cmd)
+            if c[0] == "claude" and self.write_state is not None:
+                d = os.path.join(os.path.dirname(os.path.dirname(self.checkout)),
+                                 "pb-www", ".claude", "state",
+                                 "pla-pipelines", self.state_slug)
+                os.makedirs(d, exist_ok=True)
+                with open(os.path.join(d, "state.md"), "w") as f:
+                    f.write(self.write_state)
+                saved, self.write_state = self.write_state, None
+                out = super().run(cmd, **kw)
+                self.write_state = saved
+                return out
+            return super().run(cmd, **kw)
+
+    edges = _SharedCloneEdges()
+    result, _ = _run(tmp_path, edges=edges)
+    assert result.mr_iid == 4099
 
 
 def test_a_failed_dev_box_probe_fails_the_run(tmp_path):
