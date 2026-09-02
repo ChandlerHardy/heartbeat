@@ -501,3 +501,91 @@ def test_a_halt_on_a_resumed_attempt_still_parks(tmp_path):
     with pytest.raises(NeedsInputError):
         _run(tmp_path, edges=edges)
     assert edges.claude_calls == 2
+
+
+# --- session resume (2026-09-01): legs reopen their own session -------------
+#
+# The dominant resume cost was re-orientation: every fresh `claude -p` leg
+# spent 10-20 minutes re-deriving its working set from artifacts. A resumed
+# leg reopens the previous leg's session (--resume <id>) and remembers
+# everything; the session id travels via --output-format json.
+
+import json as _json
+
+
+def _leg_json(text, session="sess-1"):
+    return _json.dumps({"type": "result", "result": text,
+                        "session_id": session})
+
+
+class _ScriptedEdges(_Edges):
+    """Each claude call takes the next (stdout, rc, state) triple."""
+
+    def __init__(self, legs, **kw):
+        super().__init__(**kw)
+        self.legs = list(legs)
+        self.claude_argvs = []
+
+    def run(self, cmd, **kw):
+        c = list(cmd)
+        if c[0] == "claude":
+            self.claude_argvs.append(c)
+            stdout, rc, state = self.legs[
+                min(len(self.claude_argvs) - 1, len(self.legs) - 1)]
+            self.claude_out, self.claude_rc, self.write_state = stdout, rc, state
+        return super().run(cmd, **kw)
+
+
+def test_a_resumed_leg_reopens_the_previous_session(tmp_path):
+    """FALSIFYING for the whole feature: leg 2 must carry --resume with leg
+    1's session id, not restart cold with the full prompt."""
+    edges = _ScriptedEdges([
+        (_leg_json("ended early", "sess-abc"), 0, _STATE_PHASE3),
+        (_leg_json("done", "sess-abc"), 0, _STATE),
+    ])
+    result, edges = _run(tmp_path, edges=edges)
+    assert result.mr_iid == 4099
+    assert len(edges.claude_argvs) == 2
+    leg2 = edges.claude_argvs[1]
+    assert leg2[1:3] == ["--resume", "sess-abc"]
+    assert "Continue." in leg2[4]
+
+
+def test_a_plain_text_leg_yields_no_session_and_fresh_legs(tmp_path):
+    """Backwards compatibility: output that isn't the JSON envelope degrades
+    to the old behaviour — raw transcript, cold resume legs."""
+    edges = _ScriptedEdges([
+        ("just plain text\n", 0, _STATE_PHASE3),
+        ("plain again\n", 0, _STATE),
+    ])
+    result, edges = _run(tmp_path, edges=edges)
+    assert result.mr_iid == 4099
+    leg2 = edges.claude_argvs[1]
+    assert "--resume" not in leg2
+    assert leg2[1] == "-p"          # the full prompt, cold
+
+
+def test_halt_markers_survive_the_json_envelope(tmp_path):
+    """detect_halt must read the RESULT TEXT, not the JSON blob — a halt
+    inside an escaped JSON string still parks the row."""
+    edges = _ScriptedEdges([
+        (_leg_json("...\nHALT_INSUFFICIENT_CONTEXT: which sheet?\n"), 1,
+         _STATE_PHASE3),
+    ])
+    with pytest.raises(NeedsInputError):
+        _run(tmp_path, edges=edges)
+
+
+def test_a_vanished_session_retries_the_leg_fresh(tmp_path):
+    """A --resume whose session is gone is a broken RESUME, not a broken
+    pipeline: the same leg retries cold instead of failing the claim."""
+    edges = _ScriptedEdges([
+        (_leg_json("ended early", "sess-gone"), 0, _STATE_PHASE3),
+        ("No conversation found with session ID sess-gone", 1, None),
+        (_leg_json("done", "sess-new"), 0, _STATE),
+    ])
+    result, edges = _run(tmp_path, edges=edges)
+    assert result.mr_iid == 4099
+    assert len(edges.claude_argvs) == 3
+    assert edges.claude_argvs[1][1] == "--resume"
+    assert edges.claude_argvs[2][1] == "-p"      # the cold retry
