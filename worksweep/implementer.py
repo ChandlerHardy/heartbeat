@@ -537,6 +537,7 @@ def _execute_pipeline(cfg, iid: int, slot: DevBox, checkout: str,
     started = time.monotonic()
     state_path = state = None
     last_progress = (-1, -1)
+    session_id = None
     for attempt in range(1, attempts + 1):
         if attempt == 1:
             timeout = cfg.implement_timeout
@@ -545,13 +546,42 @@ def _execute_pipeline(cfg, iid: int, slot: DevBox, checkout: str,
                           - (time.monotonic() - started))
             if timeout < _RESUME_MIN_REMAINING_SECONDS:
                 break              # not enough budget left for a useful leg
+        # A resumed leg REOPENS the previous leg's session (`--resume`): the
+        # transcript comes back whole, so the leg remembers its working set,
+        # dead ends and next step instead of spending 10-20 minutes
+        # re-deriving them from artifacts (the dominant resume cost measured
+        # 2026-09-01). `--output-format json` is what carries the session id
+        # out of a leg; a leg whose output doesn't parse simply yields no id
+        # and the next leg starts fresh against the state file.
+        if session_id:
+            argv = [cfg.claude_bin, "--resume", session_id, "-p",
+                    _RESUME_PROMPT.format(command=cfg.pipeline_command,
+                                          iid=iid),
+                    "--output-format", "json"]
+        else:
+            argv = [cfg.claude_bin, "-p", prompt, "--output-format", "json"]
         try:
-            proc = _run([cfg.claude_bin, "-p", prompt], run_subprocess,
-                        cwd=checkout, timeout=timeout)
+            proc = _run(argv, run_subprocess, cwd=checkout, timeout=timeout)
         except subprocess.TimeoutExpired:
             raise RunnerError(f"{cfg.pipeline_command} #{iid} exceeded "
                               f"{cfg.implement_timeout}s")
-        transcript = f"{proc.stdout or ''}\n{proc.stderr or ''}"
+        if session_id and proc.returncode != 0 and _looks_like_resume_failure(
+                f"{proc.stderr or ''}{proc.stdout or ''}"):
+            # The session vanished (cleaned cache, another machine) — that is
+            # a broken RESUME, not a broken PIPELINE. Retry this same leg
+            # fresh; it still consumes the attempt.
+            session_id = None
+            argv = [cfg.claude_bin, "-p", prompt, "--output-format", "json"]
+            try:
+                proc = _run(argv, run_subprocess, cwd=checkout,
+                            timeout=timeout)
+            except subprocess.TimeoutExpired:
+                raise RunnerError(f"{cfg.pipeline_command} #{iid} exceeded "
+                                  f"{cfg.implement_timeout}s")
+        result_text, leg_session = _parse_leg_output(proc.stdout or "")
+        if leg_session:
+            session_id = leg_session
+        transcript = f"{result_text}\n{proc.stderr or ''}"
         halt = detect_halt(transcript)
         if halt:
             raise NeedsInputError(halt)
@@ -628,6 +658,47 @@ def _execute_pipeline(cfg, iid: int, slot: DevBox, checkout: str,
 # to be worth launching; below it the loop stops and the honest no-MR error
 # reports instead of burning a doomed claude run.
 _RESUME_MIN_REMAINING_SECONDS = 600
+
+# What a resumed leg is told. Deliberately terse: the reopened session
+# carries the whole prior transcript, so the leg already knows the plan —
+# the prompt only has to say "you stopped early, keep going" and re-anchor
+# the completion contract.
+_RESUME_PROMPT = (
+    "Continue. You are the same session that was driving "
+    "{command} #{iid} and it ended before Phase 8. Briefly re-verify the "
+    "repo/worktree state matches what you remember (a step you thought "
+    "finished may not have committed), consult the state file's RESUME HERE "
+    "section if present, then continue the pipeline from exactly where you "
+    "left off through Phase 8. All constraints from the original "
+    "instructions still apply.")
+
+
+def _looks_like_resume_failure(output: str) -> bool:
+    """A --resume that cannot find its session fails FAST with an error
+    naming the session/conversation — distinguishable from a pipeline leg
+    that genuinely ran and failed."""
+    low = (output or "").lower()
+    return ("no conversation found" in low or "session not found" in low
+            or "could not resume" in low or "unknown session" in low)
+
+
+def _parse_leg_output(stdout: str):
+    """(result_text, session_id) from a `--output-format json` leg.
+
+    Anything that doesn't parse as the expected envelope degrades to the raw
+    stdout with no session id — the halt/error checks then read exactly what
+    they always read, and the next leg starts fresh.
+    """
+    try:
+        data = json.loads(stdout)
+    except ValueError:
+        return stdout, None
+    if not isinstance(data, dict):
+        return stdout, None
+    result = data.get("result")
+    session = data.get("session_id")
+    return (result if isinstance(result, str) else stdout,
+            session if isinstance(session, str) and session else None)
 
 
 def _pipeline_mr_of(state: str):
