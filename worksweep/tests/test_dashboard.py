@@ -1,3 +1,4 @@
+import re
 import ast, contextlib, dataclasses, http.client, json, os, re, socket, struct, sys, threading, time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 import pytest  # noqa: E402
@@ -939,7 +940,11 @@ def test_page_is_self_contained():
     """AC #28: zero external assets."""
     page = _page([_rec(1)])
     assert "<script src=" not in page
-    assert "<link" not in page
+    # Self-contained still allows a data:-URI favicon -- the ban is on
+    # anything the browser would fetch over the network.
+    for m in re.finditer(r"<link[^>]*>", page):
+        tag = m.group(0)
+        assert 'rel="icon"' in tag and 'href="data:' in tag, tag
     css = _style(page)
     assert "@import" not in css
     assert not re.search(r"url\(\s*['\"]?(https?:)?//", css)
