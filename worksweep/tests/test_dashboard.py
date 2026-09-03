@@ -944,7 +944,10 @@ def test_page_is_self_contained():
     # anything the browser would fetch over the network.
     for m in re.finditer(r"<link[^>]*>", page):
         tag = m.group(0)
-        assert 'rel="icon"' in tag and 'href="data:' in tag, tag
+        ok_favicon = 'rel="icon"' in tag and 'href="data:' in tag
+        ok_touch = ('rel="apple-touch-icon"' in tag
+                    and 'href="/apple-touch-icon.png"' in tag)
+        assert ok_favicon or ok_touch, tag
     css = _style(page)
     assert "@import" not in css
     assert not re.search(r"url\(\s*['\"]?(https?:)?//", css)
@@ -1212,7 +1215,8 @@ def test_grouping_is_pure_and_makes_no_network_call():
     (or an import of the CLI, keepcurrent or runner) breaks the test.
     """
     assert _imported_modules(_dashboard_tree()) == {
-        "datetime", "html", "ipaddress", "json", "os", "re", "subprocess",
+        "datetime", "html", "ipaddress", "json", "os",
+        "pathlib", "re", "subprocess",
         "sys", "threading", "time",
         "urllib.parse",          # pure string parsing, not network
         "dataclasses", "http.server", "typing", "__future__",
