@@ -41,9 +41,12 @@ class WorksweepConfig:
     feedback_timeout: int = 3600
     # 2026-09-04 (hold for review): when true, a feedback run commits locally
     # and posts nothing; the row parks needs-input with the diff + proposed
-    # replies on the dashboard, and Publish/Discard is the operator's call. A
-    # reply under Chandler's name cannot be unsent, so the default is to hold.
-    feedback_hold: bool = True
+    # replies on the dashboard, and Publish/Discard is the operator's call.
+    # Default OFF (same day): the review Chandler wanted before a reply goes
+    # out is the SUBSTANTIVE tier's ceremony (implementer + tribunal round +
+    # domain-check + receipt) in feedback.py, not a manual gate -- "I don't
+    # really want to look it over". Opt in per box with runner.feedback_hold.
+    feedback_hold: bool = False
     # 2026-08-31 domain guard: where the domain-check registry (domains.json)
     # lives on THIS machine. "" -> models.DEFAULT_DOMAIN_REGISTRY (the
     # ferdinand checkout). The mini has no ferdinand checkout, so its config
@@ -126,7 +129,7 @@ def load_config(path: str | None = None) -> WorksweepConfig:
         raise RuntimeError(
             f"config runner.implement_timeout must be an integer, "
             f"got {implement_raw!r}")
-    hold_raw = rn.get("feedback_hold", True)
+    hold_raw = rn.get("feedback_hold", False)
     if not isinstance(hold_raw, bool):
         raise RuntimeError(
             f"config runner.feedback_hold must be a boolean, got {hold_raw!r}")
