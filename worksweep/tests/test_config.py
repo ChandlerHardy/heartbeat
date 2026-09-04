@@ -228,15 +228,17 @@ def test_load_config_non_integer_feedback_timeout_raises_runtime_error():
         assert "runner.feedback_timeout" in str(exc.value)
 
 
-# 2026-09-04 (held for review) — runner.feedback_hold defaults ON (a reply
-# under Chandler's name cannot be unsent), reads a bool, rejects anything else.
-def test_load_config_feedback_hold_defaults_on_and_reads_false():
+# 2026-09-04 (held for review) — runner.feedback_hold defaults OFF: the
+# pre-reply review is the SUBSTANTIVE tier's ceremony, not an operator gate
+# (Chandler: "I don't really want to look it over"). Opt-in reads a bool,
+# rejects anything else.
+def test_load_config_feedback_hold_defaults_off_and_reads_true():
     with tempfile.TemporaryDirectory() as tmp:
         p = _write(tmp, {"gitlab": {"username": "x", "repos": []}})
-        assert load_config(p).feedback_hold is True
-        p = _write(tmp, {"gitlab": {"username": "x", "repos": []},
-                         "runner": {"feedback_hold": False}})
         assert load_config(p).feedback_hold is False
+        p = _write(tmp, {"gitlab": {"username": "x", "repos": []},
+                         "runner": {"feedback_hold": True}})
+        assert load_config(p).feedback_hold is True
 
 
 def test_load_config_non_bool_feedback_hold_raises_runtime_error():
