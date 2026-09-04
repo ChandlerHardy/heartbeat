@@ -201,13 +201,25 @@ def worktree(tmp_path):
 _DEFAULT_REPLY = "addressed in"
 
 
-def _report(addressed=(), replied=(), escalated=(), reply=_DEFAULT_REPLY):
-    def entry(e):
+# Every `addressed` claim must carry a test receipt (2026-09-04, tiered
+# feedback: no receipt, no push). The fixture supplies one so the existing
+# commit-claim tests keep exercising what they exercise; the receipt tests
+# below supply their own or strip it.
+_DEFAULT_RECEIPT = "vitest 30/30"
+
+
+def _report(addressed=(), replied=(), escalated=(), reply=_DEFAULT_REPLY,
+            receipt=_DEFAULT_RECEIPT):
+    def entry(e, fixed):
         if isinstance(e, dict):
-            return {**e, "reply": e.get("reply", reply)}
-        return {"thread": e, "reply": reply}
-    return {"addressed": [entry(a) for a in addressed],
-            "replied": [entry(r) for r in replied],
+            out = {**e, "reply": e.get("reply", reply)}
+        else:
+            out = {"thread": e, "reply": reply}
+        if fixed and "receipt" not in out:
+            out["receipt"] = receipt
+        return out
+    return {"addressed": [entry(a, True) for a in addressed],
+            "replied": [entry(r, False) for r in replied],
             "escalated": list(escalated)}
 
 
@@ -270,6 +282,88 @@ def test_feedback_prompt_carries_pbwww_hygiene():
     assert "www/home/php/templates/tab_bar_common_logic.php" in prompt
     assert f"git push origin {BRANCH}" in prompt
     assert "Available on" in prompt          # the dev-box sync condition
+
+
+# --- 2026-09-04: tiered fixes with the implement lane's ceremony ------------
+
+def test_feedback_prompt_tiers_fixable_threads_and_names_the_ceremony():
+    """A FIXABLE thread is TRIVIAL (inline + the covering tests) or
+    SUBSTANTIVE (implementer dispatch, a tribunal round, domain-check, the
+    ship gate). The old one-liner "make the change, commit it" was the lane's
+    quality gap: a Vue-store promise fix went from a single model's edit
+    straight to a push with no review lens (!4110)."""
+    prompt = feedback.render_prompt(
+        "pb-www", 3997, BRANCH, _unaddressed(_payload(_thread("t1"))))
+    assert "TRIVIAL" in prompt and "SUBSTANTIVE" in prompt
+    assert "@pla-eng:implementer" in prompt and "Task tool" in prompt
+    assert "magi:magi-review" in prompt
+    assert "never `--lite`" in prompt
+    assert "chandler-personal:domain-check" in prompt
+    assert "proportionat" in prompt
+    assert "NO RECEIPT, NO PUSH" in prompt
+    assert '"tier": "trivial" | "substantive"' in prompt
+    assert '"receipt":' in prompt
+
+
+def test_feedback_prompt_pins_the_dev_box_path_and_fences_off_production():
+    """The !4110 run spent seven ssh round-trips hunting for dev5 and read
+    git state out of /project/performancebeef -- the production clone -- on
+    the way. The path convention is stated; the clone is named as forbidden."""
+    prompt = feedback.render_prompt(
+        "pb-www", 3997, BRANCH, _unaddressed(_payload(_thread("t1"))))
+    assert "/home/chandlerhardy/dev{N}.chandlerhardy-dev/pb-www" in prompt
+    assert "/project/performancebeef" in prompt
+    assert "production-clone" in prompt
+    assert "never `git stash`" in prompt.lower() or "Never `git stash`" in prompt
+    assert "~/scratch/pb-www-3997" in prompt          # per-issue scratch, iid-keyed
+    assert "rm -rf ~/scratch/pb-www-3997" in prompt   # and cleaned after
+    assert "cattle-breed" in prompt
+
+
+def test_a_fix_claimed_without_a_receipt_fails_the_run(tmp_path, worktree):
+    """No receipt, no push: a run that edited and pushed without running the
+    covering tests used to be indistinguishable from one that did."""
+    sub = _Subprocess(worktree,
+                      report=_report(addressed=[{"thread": "t1",
+                                                 "sha": "deadbee",
+                                                 "receipt": ""}]),
+                      remote_shas=(PRE_SHA, POST_SHA))
+    glab = _Glab(_payload(_thread("t1")), _payload(_thread("t1", last=ME)))
+    with pytest.raises(RunnerError) as e:
+        feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                         run_glab=glab, now=lambda: RUN_START)
+    assert "without a test receipt" in str(e.value)
+    assert "t1" in str(e.value)
+
+
+def test_a_fix_with_a_receipt_completes_and_the_receipt_is_kept(
+        tmp_path, worktree):
+    sub = _Subprocess(worktree,
+                      report=_report(addressed=[{"thread": "t1",
+                                                 "sha": "deadbee",
+                                                 "tier": "substantive",
+                                                 "receipt": "UnitTests 2008 green"}]),
+                      remote_shas=(PRE_SHA, POST_SHA))
+    glab = _Glab(_payload(_thread("t1")), _payload(_thread("t1", last=ME)))
+    result = feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                              run_glab=glab, now=lambda: RUN_START)
+    assert result.addressed == 1
+    claims = feedback._claims([{"thread": "t1", "sha": "deadbee",
+                                "tier": "substantive",
+                                "receipt": "UnitTests 2008 green",
+                                "reply": "x"}])
+    assert claims["t1"]["receipt"] == "UnitTests 2008 green"
+    assert claims["t1"]["tier"] == "substantive"
+
+
+def test_a_reply_only_thread_needs_no_receipt(tmp_path, worktree):
+    """The receipt rule is for FIXES. A QUESTION answered with a reply and
+    no commit has nothing to test."""
+    sub = _Subprocess(worktree, report=_report(replied=["t1"]))
+    glab = _Glab(_payload(_thread("t1")), _payload(_thread("t1", last=ME)))
+    result = feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                              run_glab=glab, now=lambda: RUN_START)
+    assert result.replied == 1
 
 
 def test_feedback_prompt_posts_replies_to_the_notes_endpoint():
@@ -431,22 +525,31 @@ def test_feedback_zero_unaddressed_at_run_time_is_a_normal_result(tmp_path,
 
 # --- AC #18: the timeout comes from cfg -------------------------------------
 
-def test_feedback_run_uses_the_cfg_timeout(tmp_path, worktree):
-    from worksweep.runner import STALE_RUNNING_MINUTES
+def test_feedback_run_uses_its_own_budget_inside_its_own_reap_window(
+        tmp_path, worktree):
+    """2026-09-04: a substantive fix runs the implement lane's ceremony, so
+    the lane no longer borrows runner_timeout inside the 45-minute window --
+    it has feedback_timeout, and the runner's reap window for it is that
+    budget plus grace, so a healthy long run is never reaped mid-flight."""
+    from worksweep.runner import (FEEDBACK_REAP_GRACE_SECONDS,
+                                  STALE_RUNNING_MINUTES)
     sub = _Subprocess(worktree, report=_report(replied=["t1"]))
     glab = _Glab(_payload(_thread("t1")), _payload(_thread("t1", last=ME)))
     cfg = _cfg(tmp_path)
     feedback.execute(_item(), cfg, run_subprocess=sub, run_glab=glab, now=lambda: RUN_START)
-    assert sub.claude_kw["timeout"] == cfg.runner_timeout == 1800
+    assert sub.claude_kw["timeout"] == cfg.feedback_timeout == 3600
     assert sub.claude_kw["cwd"] == worktree
-    # inside the reap window, or healthy runs get killed mid-flight
-    assert cfg.runner_timeout < STALE_RUNNING_MINUTES * 60
+    assert cfg.feedback_timeout != cfg.runner_timeout
+    assert cfg.feedback_timeout > STALE_RUNNING_MINUTES * 60, (
+        "the budget outgrew the generic window on purpose; reap_stale must "
+        "give address-feedback its own")
+    assert FEEDBACK_REAP_GRACE_SECONDS > 0
 
 
-def test_a_shorter_configured_timeout_is_honoured(tmp_path, worktree):
+def test_a_shorter_configured_feedback_timeout_is_honoured(tmp_path, worktree):
     sub = _Subprocess(worktree, report=_report(replied=["t1"]))
     glab = _Glab(_payload(_thread("t1")), _payload(_thread("t1", last=ME)))
-    feedback.execute(_item(), _cfg(tmp_path, runner_timeout=600),
+    feedback.execute(_item(), _cfg(tmp_path, feedback_timeout=600),
                      run_subprocess=sub, run_glab=glab, now=lambda: RUN_START)
     assert sub.claude_kw["timeout"] == 600
 
@@ -670,7 +773,10 @@ def test_the_claude_run_is_tool_scoped(tmp_path, worktree):
     argv = [c for c in sub.calls if c[0] == "claude"][0]
     assert "--allowedTools" in argv
     allowed = argv[argv.index("--allowedTools") + 1].split(",")
-    assert set(allowed) == {"Bash", "Read", "Edit", "Write", "Grep", "Glob"}
+    assert set(allowed) == {"Bash", "Read", "Edit", "Write", "Grep", "Glob",
+                            "Task", "Skill"}, (
+        "Task and Skill are the ceremony: without them a substantive fix can "
+        "neither dispatch the implementer nor invoke the tribunal")
     assert "--dangerously-skip-permissions" not in argv
 
 

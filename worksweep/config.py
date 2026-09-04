@@ -32,6 +32,13 @@ class WorksweepConfig:
     # rather than borrowing `runner_timeout` -- which is also address-feedback's,
     # and that one is contractually inside the 45-minute reap window.
     magi_timeout: int = 4500
+    # 2026-09-04 (tiered feedback): address-feedback used to borrow
+    # `runner_timeout` and live inside the generic 45-minute reap window --
+    # fine while a FIXABLE thread meant a one-line edit. A substantive fix now
+    # runs the implement lane's ceremony (implementer dispatch, a tribunal
+    # round, the dev-box ship gate), so the executor gets its own budget and
+    # its own reap window (feedback_timeout + grace), like implement and magi.
+    feedback_timeout: int = 3600
     # 2026-08-31 domain guard: where the domain-check registry (domains.json)
     # lives on THIS machine. "" -> models.DEFAULT_DOMAIN_REGISTRY (the
     # ferdinand checkout). The mini has no ferdinand checkout, so its config
@@ -100,6 +107,13 @@ def load_config(path: str | None = None) -> WorksweepConfig:
     except (TypeError, ValueError):
         raise RuntimeError(
             f"config runner.magi_timeout must be an integer, got {magi_raw!r}")
+    feedback_raw = rn.get("feedback_timeout", 3600)
+    try:
+        feedback_timeout = int(feedback_raw)
+    except (TypeError, ValueError):
+        raise RuntimeError(
+            f"config runner.feedback_timeout must be an integer, "
+            f"got {feedback_raw!r}")
     implement_raw = rn.get("implement_timeout", 5400)
     try:
         implement_timeout = int(implement_raw)
@@ -144,6 +158,7 @@ def load_config(path: str | None = None) -> WorksweepConfig:
         runner_timeout=runner_timeout,
         implement_timeout=implement_timeout,
         magi_timeout=magi_timeout,
+        feedback_timeout=feedback_timeout,
         domain_registry_path=str(rn.get("domain_registry_path", "") or ""),
         pipeline_resume_attempts=int(
             rn.get("pipeline_resume_attempts", 3) or 3),

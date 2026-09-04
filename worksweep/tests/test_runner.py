@@ -177,17 +177,38 @@ def test_a_genuinely_stuck_tribunal_is_still_reaped():
     assert updated[0].item.status == "error"
 
 
-def test_the_wider_window_is_magis_alone():
-    """address-feedback deliberately runs on cfg.runner_timeout INSIDE the
-    45-minute window -- widening magi must not widen that too, or a stuck
-    feedback claim sits for an extra half hour holding its branch."""
+def test_the_wider_windows_are_the_long_executors_alone():
+    """magi-review, implement and (since 2026-09-04) address-feedback each
+    have their own budget and window; keep-current and park stay on the
+    generic 45 minutes -- a stuck short op must not sit on its branch for an
+    extra half hour."""
     from worksweep.runner import reap_stale
     recs = [_running(1, "magi-review", _at(0)),
             _running(2, "address-feedback", _at(0)),
             _running(3, "keep-current", _at(0)),
             _running(4, "park", _at(0))]
     _, reaped = reap_stale(recs, _at(50))
-    assert sorted(r.number for r in reaped) == [2, 3, 4]
+    assert sorted(r.number for r in reaped) == [3, 4]
+
+
+def test_a_feedback_claim_is_reaped_only_past_its_own_budget_plus_grace():
+    """A substantive feedback fix runs the implement ceremony, so its window
+    is feedback_timeout + grace -- inside it the claim is healthy, past it
+    it is stuck."""
+    from worksweep.runner import (FEEDBACK_REAP_GRACE_SECONDS, reap_stale)
+    recs = [_running(2, "address-feedback", _at(0))]
+    budget_min = 3600 // 60
+    grace_min = FEEDBACK_REAP_GRACE_SECONDS // 60
+    _, healthy = reap_stale(recs, _at(budget_min + grace_min - 1),
+                            feedback_timeout=3600)
+    assert healthy == []
+    _, stuck = reap_stale(recs, _at(budget_min + grace_min + 1),
+                          feedback_timeout=3600)
+    assert [r.number for r in stuck] == [2]
+    # and the configured budget moves the window with it
+    _, still_healthy = reap_stale(recs, _at(budget_min + grace_min + 1),
+                                  feedback_timeout=7200)
+    assert still_healthy == []
 
 
 def test_a_configured_magi_timeout_moves_the_reap_window_with_it():
