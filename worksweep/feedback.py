@@ -27,6 +27,13 @@ Two things are deliberately absent, and both are load-bearing:
 
 Contract with the runner:
 
+* a held `FeedbackResult` (2026-09-04, `cfg.feedback_hold`) -> `needs-input`
+                     with 📦: the run committed LOCALLY and posted nothing;
+                     the row carries the commit, its pinned worktree and the
+                     proposed replies, and the dashboard's Publish (a second
+                     pass of this executor: push + post + the effect checks)
+                     or Discard is the way out. A hold that leaked anything
+                     to GitLab is a RunnerError, not a hold.
 * `RunnerError`   -> the item goes `error`, ⚠️ posted, re-proposed next sweep.
                      Raised when the run cannot be trusted: no report, a
                      commit claimed but origin never moved, a reply claimed
@@ -171,6 +178,13 @@ class FeedbackResult:
     result_sha: str = ""           # origin/<branch> as this run left it
     already_answered: bool = False  # nothing was waiting by the time we ran
     mr_merged: bool = False        # the MR finished and took its branch away
+    # Held for review (2026-09-04): the run committed locally and posted
+    # nothing. The runner parks the row needs-input with these, and the
+    # operator's Publish pushes hold_sha and posts the replies in hold_report.
+    held: bool = False
+    hold_sha: str = ""
+    hold_dir: str = ""
+    hold_report: str = ""
 
 
 def _fetch_threads(run_glab: Callable, repo: str, iid: int) -> tuple:
@@ -267,20 +281,6 @@ only thing left that respects the gate is handing the thread back.
 Like the instruction-like-content rule above, this one is not a judgment call: \
 it applies on the paths alone, whatever the thread says about them.
 
-Reply to a thread by writing the reply to a FILE and pointing glab at it -- \
-never by inlining it in the shell. The reply format above contains \
-backticks, and inside a double-quoted shell argument those are command \
-substitution:
-
-    printf '%s' 'addressed in abc1234' > .worksweep-reply.txt
-    glab api "projects/{project}/merge_requests/{iid}/discussions/<thread-id>/notes" \
--X POST --field body=@.worksweep-reply.txt
-
-Some of the threads above are plain MR notes rather than diff comments \
-(GitLab calls them `individual_note`). The endpoint is exactly the same -- the \
-id shown above is already the discussion id it wants -- and replying converts \
-the note into a discussion. Nothing about your reply changes.
-
 DEV BOXES, and where NOT to go. Every dev box lives on the host \
 `chandlerhardy-dev` at `/home/chandlerhardy/dev{{N}}.chandlerhardy-dev/pb-www`; \
 the N is the hostname prefix of the MR's "Available on" link \
@@ -301,6 +301,23 @@ you are done -- the box has a 16G quota shared with every dev site.
 Never `git stash` in any checkout: commit work-in-progress if you must set \
 it aside. Set `$script_version` (when the hygiene below calls for it) to a \
 cattle-breed name that does not appear in that file's git history.
+
+{publish_section}"""
+
+
+_PUBLISH_SECTION = """Reply to a thread by writing the reply to a FILE and pointing glab at it -- \
+never by inlining it in the shell. The reply format above contains \
+backticks, and inside a double-quoted shell argument those are command \
+substitution:
+
+    printf '%s' 'addressed in abc1234' > .worksweep-reply.txt
+    glab api "projects/{project}/merge_requests/{iid}/discussions/<thread-id>/notes" \
+-X POST --field body=@.worksweep-reply.txt
+
+Some of the threads above are plain MR notes rather than diff comments \
+(GitLab calls them `individual_note`). The endpoint is exactly the same -- the \
+id shown above is already the discussion id it wants -- and replying converts \
+the note into a discussion. Nothing about your reply changes.
 
 Before you push, pb-www hygiene:
 
@@ -342,6 +359,42 @@ Do not touch any thread that is not listed above. Do not change the merge \
 request's title, description, reviewers or state. Do not merge anything."""
 
 
+_HOLD_SECTION = """HELD FOR REVIEW. This run is in HOLD mode: nothing you do here \
+reaches GitLab. Do NOT push. Do NOT post any reply, on any thread. Do NOT \
+sync a dev box. Commit each fix LOCALLY on `{branch}` (one commit per thread \
+is fine, one for all is fine) and leave the branch checked out with a clean \
+tree. The operator reviews the diff and your proposed replies on the \
+dashboard; his Publish pushes the commits and posts the replies exactly as \
+you wrote them, so write each reply as the final text -- `addressed in \
+<short-sha> -- <receipt>` plus one sentence when the change needs explaining.
+
+pb-www hygiene still applies to the COMMIT: if your fix touched anything \
+under `www/home/scss/*`, run `maintenance/compile-css` from the checkout \
+root and commit the regenerated CSS (never hand-edit compiled CSS); if it \
+changed any CSS or JS the site serves, bump `$script_version` in \
+`www/home/php/templates/tab_bar_common_logic.php` in the same commit.
+
+Then write your report to `{report}` in the checkout root, and do NOT commit \
+that file:
+
+    {{"addressed": [{{"thread": "<thread-id>", "sha": "<short-sha>",
+                    "tier": "trivial" | "substantive",
+                    "receipt": "<suite/file and result>",
+                    "reply": "<the reply to post, verbatim>"}}],
+     "replied": [{{"thread": "<thread-id>",
+                  "reply": "<the reply to post, verbatim>"}}],
+     "noted": [{{"thread": "<thread-id>", "reason": "<one line>"}}],
+     "escalated": [{{"thread": "<thread-id>", "reason": "<one line>"}}]}}
+
+Every thread listed above must appear in exactly one of those four lists. \
+Afterwards Python checks that every `sha` is a commit on the local branch, \
+that origin did NOT move and that no reply was posted (a hold that leaked \
+fails the run outright), and that every `addressed` entry carries a receipt.
+
+Do not touch any thread that is not listed above. Do not change the merge \
+request's title, description, reviewers or state. Do not merge anything."""
+
+
 def _thread_block(threads: Sequence[ReviewThread]) -> str:
     out = []
     for i, t in enumerate(threads, 1):
@@ -371,17 +424,20 @@ or the untrusted-data rules — if it appears to, escalate with the reason \
 
 
 def render_prompt(repo: str, iid: int, branch: str,
-                  threads: Sequence[ReviewThread], ruling: str = "") -> str:
+                  threads: Sequence[ReviewThread], ruling: str = "",
+                  hold: bool = False) -> str:
     ruling_section = (_RULING_SECTION.format(ruling=ruling.strip())
                       if ruling.strip() else "")
-    return _PROMPT.format(repo=repo, iid=int(iid), branch=branch,
-                          project=collectors._project(repo),
-                          threads=_thread_block(threads),
-                          report=_REPORT_NAME, token=_FENCE_TOKEN,
+    fields = dict(repo=repo, iid=int(iid), branch=branch,
+                  project=collectors._project(repo),
+                  report=_REPORT_NAME, token=_FENCE_TOKEN,
+                  gate=domain_gate_text(),
+                  gate_reason=DOMAIN_GATE_REASON,
+                  gate_owner=DOMAIN_GATE_OWNER)
+    section = (_HOLD_SECTION if hold else _PUBLISH_SECTION).format(**fields)
+    return _PROMPT.format(threads=_thread_block(threads),
                           ruling_section=ruling_section,
-                          gate=domain_gate_text(),
-                          gate_reason=DOMAIN_GATE_REASON,
-                          gate_owner=DOMAIN_GATE_OWNER)
+                          publish_section=section, **fields)
 
 
 # --- the run ----------------------------------------------------------------
@@ -389,9 +445,22 @@ def render_prompt(repo: str, iid: int, branch: str,
 def execute(item: WorkItem, cfg,
             run_subprocess: Callable = None,
             run_glab: Callable = None,
-            now: Callable[[], str] = None) -> FeedbackResult:
+            now: Callable[[], str] = None,
+            run_ssh: Callable = None,
+            http_get: Callable = None,
+            boxes: Sequence = ()) -> FeedbackResult:
     """Answer the threads waiting on Chandler in one MR. See the module
-    docstring for the three-outcome contract with the runner."""
+    docstring for the three-outcome contract with the runner.
+
+    Three routes (2026-09-04):
+      * hold_action == "publish" -> `_publish_held`: push the held commit,
+        post the held replies, sync the dev box. No claude run.
+      * cfg.feedback_hold       -> the claude run commits locally and posts
+        nothing; the result is `held` and the runner parks the row.
+      * otherwise               -> the original fix-and-post run.
+    A stale hold on a row that was plainly re-approved (hold_action "") is
+    dropped first: the human chose to re-run, not to publish.
+    """
     now = now or _utc_now
     if run_subprocess is None or run_glab is None:
         raise RunnerError("address-feedback executor is wired without a "
@@ -402,10 +471,17 @@ def execute(item: WorkItem, cfg,
         raise RunnerError(f"no source branch recorded for !{iid} "
                           f"(WorkItem.branch was not set by the assessor)")
 
+    if getattr(item, "hold_action", "") == "publish" and item.hold_sha:
+        return _publish_held(item, cfg, iid, branch, run_subprocess, run_glab,
+                             now, run_ssh, http_get, boxes)
+    if item.hold_dir:
+        _drop_hold(item.hold_dir, cfg, run_subprocess)
+
     checkout = checkouts.worktree_for(cfg, item.repo, EXECUTOR, run_subprocess)
     try:
         return _execute_in(item, cfg, checkout, iid, branch, run_subprocess,
-                           run_glab, now)
+                           run_glab, now, hold=bool(getattr(cfg, "feedback_hold",
+                                                            False)))
     finally:
         # These worktrees are permanent, so a run that keeps its branch
         # checked out blocks the NEXT executor that wants the same branch in a
@@ -416,7 +492,7 @@ def execute(item: WorkItem, cfg,
 
 def _execute_in(item: WorkItem, cfg, checkout: str, iid: int, branch: str,
                 run_subprocess: Callable, run_glab: Callable,
-                now: Callable[[], str]) -> FeedbackResult:
+                now: Callable[[], str], hold: bool = False) -> FeedbackResult:
     # Reused worktree: a claim that timed out mid-run can leave it dirty, and
     # can leave its own report file behind. Both are wiped here, so nothing
     # from a previous run can be mistaken for this one's work.
@@ -460,7 +536,8 @@ def _execute_in(item: WorkItem, cfg, checkout: str, iid: int, branch: str,
     run_start = now()
     _claude(run_subprocess, cfg, checkout,
             render_prompt(item.repo, iid, branch, given,
-                          ruling=getattr(item, "ruling", "") or ""))
+                          ruling=getattr(item, "ruling", "") or "",
+                          hold=hold))
     report = _read_report(report_path, iid)
 
     # A thread belongs to exactly one outcome. A run that lists the same one
@@ -481,6 +558,14 @@ def _execute_in(item: WorkItem, cfg, checkout: str, iid: int, branch: str,
     handled = set(addressed) | set(replied) | set(noted)
     escalated, escalated_ids = _escalations(report.get("escalated"), given,
                                             handled)
+
+    if hold and handled:
+        # (nothing handled falls through to the NeedsInput path below: there
+        # is nothing to hold, only a question)
+        return _hold(run_subprocess, run_glab, cfg, item.repo, iid, branch,
+                     checkout, given, overflow, addressed, replied, noted,
+                     escalated, escalated_ids, handled, pre_refs, run_start,
+                     claims, report, len(before))
 
     after = _verify(run_subprocess, run_glab, cfg, item.repo, iid, branch,
                     checkout, given, addressed, replied, pre_refs, run_start,
@@ -510,6 +595,295 @@ def _execute_in(item: WorkItem, cfg, checkout: str, iid: int, branch: str,
         replies=tuple(_replies_posted(after, addressed + replied, cfg.username,
                                       run_start)),
         result_sha=_ls_remote(run_subprocess, checkout).get(_ref(branch), ""))
+
+
+# --- held for review (2026-09-04) -------------------------------------------
+
+_HOLD_DIR_PREFIX = "hold-"
+
+
+def _hold_dir_for(cfg, repo: str, iid: int) -> str:
+    return os.path.join(cfg.checkouts_root, ".worktrees",
+                        f"{_HOLD_DIR_PREFIX}{repo}-{iid}")
+
+
+def _hold(run_subprocess: Callable, run_glab: Callable, cfg, repo: str,
+          iid: int, branch: str, checkout: str, given: Sequence[ReviewThread],
+          overflow: Sequence[ReviewThread], addressed: List[str],
+          replied: List[str], noted: List[str], escalated: List[str],
+          escalated_ids, handled: set, pre_refs: dict, run_start: str,
+          claims: dict, report: dict, waiting: int) -> FeedbackResult:
+    """Verify a HOLD-mode run and pin its commit for the operator's review.
+
+    A hold is the inverse contract of `_verify`: nothing may have reached
+    GitLab. Origin must not have moved on ANY pushable ref (the MR's own
+    branch included -- that is the leak this mode exists to prevent), no note
+    of Chandler's may have appeared on any given thread during the run, and
+    every claimed sha must be on the LOCAL branch and clear of the domain
+    gate. The commit is then pinned in a detached worktree of its own, because
+    the shared address-feedback worktree is wiped by the next claim's
+    preflight, and the report + diffstat ride along on the row so the
+    dashboard can show exactly what Publish would do.
+    """
+    known = {t.id for t in given}
+    claimed = list(addressed) + list(replied)
+    stray = [t for t in claimed + list(noted) if t not in known]
+    if stray:
+        raise RunnerError(
+            f"the address-feedback run on !{iid} claims thread(s) it was "
+            f"never given: {', '.join(sorted(stray))}")
+    unverified = sorted(tid for tid in addressed
+                        if not str(claims.get(tid, {}).get("receipt", "")
+                                   or "").strip())
+    if unverified:
+        raise RunnerError(
+            f"the address-feedback run on !{iid} claims it fixed thread(s) "
+            f"{', '.join(unverified[:_MAX_LISTED])} without a test receipt — "
+            f"a fix whose tests did not run is not addressed")
+    for tid in claimed:
+        if not str(claims.get(tid, {}).get("reply", "") or "").strip():
+            raise RunnerError(
+                f"the address-feedback run on !{iid} holds thread {tid} with "
+                f"no reply text — there is nothing for Publish to post")
+
+    # 1. The hold leaked nothing to origin: NO pushable ref moved at all.
+    post_refs = _ls_remote(run_subprocess, checkout)
+    moved = sorted(ref for ref in set(pre_refs) | set(post_refs)
+                   if pre_refs.get(ref) != post_refs.get(ref)
+                   and ref.startswith(_PUSHABLE_NAMESPACES))
+    if moved:
+        raise RunnerError(
+            f"the address-feedback run on !{iid} was HELD but origin moved: "
+            f"{', '.join(moved[:_MAX_LISTED])} — a hold that pushes is a "
+            f"leak, not a hold")
+
+    # 2. ...and nothing to the threads: silence is the contract.
+    after = {t.id: t for t in collectors.parse_threads(
+        _fetch_threads(run_glab, repo, iid))}
+    spoke = sorted(tid for tid in known
+                   if after.get(tid) is not None
+                   and _my_notes_since(after[tid], cfg.username, run_start))
+    if spoke:
+        raise RunnerError(
+            f"the address-feedback run on !{iid} was HELD but posted on "
+            f"thread(s) {', '.join(spoke[:_MAX_LISTED])} — a reply under "
+            f"Chandler's name cannot be unsent, so this run is not trusted")
+    closed = sorted(tid for tid in known
+                    if after.get(tid) is not None
+                    and after[tid].resolved_by == cfg.username)
+    if closed:
+        raise RunnerError(
+            f"the address-feedback run on !{iid} closed thread(s) that are "
+            f"not its to close: {', '.join(closed)}")
+
+    # 3. Every claimed commit is on the LOCAL branch, and clear of the gate.
+    for tid in addressed:
+        sha = claims.get(tid, {}).get("sha", "")
+        if not sha:
+            raise RunnerError(
+                f"the address-feedback run on !{iid} holds thread {tid} as "
+                f"fixed but reported no commit for it")
+        _enforce_domain_gate(run_subprocess, checkout, iid, tid, sha)
+        proc = _run(["git", "-C", checkout, "merge-base", "--is-ancestor",
+                     sha, "HEAD"], run_subprocess, timeout=_FETCH_TIMEOUT)
+        if proc.returncode != 0:
+            raise RunnerError(
+                f"the address-feedback run on !{iid} says thread {tid} was "
+                f"fixed in {sha}, but that commit is not on the local branch")
+
+    head = _run(["git", "-C", checkout, "rev-parse", "HEAD"], run_subprocess,
+                timeout=_FETCH_TIMEOUT)
+    head_sha = (head.stdout or "").strip()
+    if head.returncode != 0 or not head_sha:
+        raise RunnerError(f"could not read the held HEAD for !{iid}")
+    stat = _run(["git", "-C", checkout, "diff", "--stat",
+                 f"origin/{branch}..HEAD"], run_subprocess,
+                timeout=_FETCH_TIMEOUT)
+    hold_dir = _hold_dir_for(cfg, repo, iid)
+    _drop_hold(hold_dir, cfg, run_subprocess)
+    pin = _run(["git", "-C", checkout, "worktree", "add", "--detach",
+                hold_dir, head_sha], run_subprocess, timeout=_FETCH_TIMEOUT)
+    if pin.returncode != 0:
+        raise RunnerError(f"could not pin the held commit for !{iid}: "
+                          f"{_tail(f'{pin.stderr or ''}{pin.stdout or ''}')}")
+
+    hold_report = json.dumps({
+        "base": pre_refs.get(_ref(branch), ""),
+        "diffstat": (stat.stdout or "").strip(),
+        "addressed": [{"thread": tid, **claims.get(tid, {})}
+                      for tid in addressed],
+        "replied": [{"thread": tid, "reply": claims.get(tid, {}).get("reply", "")}
+                    for tid in replied],
+        "noted": list(noted),
+        "escalated": list(escalated)
+                     + [_escalation_line(t, "unaccounted by the run")
+                        for t in given
+                        if t.id not in handled and t.id not in escalated_ids]
+                     + [_escalation_line(t, "over the per-run thread cap")
+                        for t in overflow],
+    }, ensure_ascii=False)
+    return FeedbackResult(
+        iid=iid, waiting=waiting, addressed=len(addressed),
+        replied=len(replied), noted=len(noted),
+        escalated=tuple(json.loads(hold_report)["escalated"]),
+        result_sha=pre_refs.get(_ref(branch), ""),
+        held=True, hold_sha=head_sha, hold_dir=hold_dir,
+        hold_report=hold_report)
+
+
+def _drop_hold(hold_dir: str, cfg, run_subprocess: Callable) -> None:
+    """Remove a hold worktree, if it exists. Best-effort and quiet: a hold
+    that is gone already is the outcome wanted."""
+    if not hold_dir or not os.path.isdir(hold_dir):
+        return
+    _run(["git", "-C", hold_dir, "worktree", "remove", "--force", hold_dir],
+         run_subprocess, timeout=_FETCH_TIMEOUT)
+
+
+def gc_holds(records, cfg, run_subprocess: Callable) -> List[int]:
+    """Drop the hold worktrees of rows that are no longer waiting on a review
+    (discarded, dismissed, signal-cleared, re-proposed). Returns the numbers
+    whose directories were removed. The dashboard's Discard cannot touch the
+    filesystem, so this runs at the top of every feedback pass."""
+    dropped = []
+    for r in records:
+        it = r.item
+        if not it.hold_dir:
+            continue
+        waiting = (it.status == "needs-input"
+                   or (it.status in ("approved", "running")
+                       and it.hold_action == "publish"))
+        if waiting:
+            continue
+        if os.path.isdir(it.hold_dir):
+            _drop_hold(it.hold_dir, cfg, run_subprocess)
+            dropped.append(r.number)
+    return dropped
+
+
+def _publish_held(item: WorkItem, cfg, iid: int, branch: str,
+                  run_subprocess: Callable, run_glab: Callable,
+                  now: Callable[[], str], run_ssh: Callable,
+                  http_get: Callable, boxes: Sequence) -> FeedbackResult:
+    """The operator pressed Publish: push the held commit, post the held
+    replies, sync the dev box -- and then hold the result to the SAME effect
+    checks as a fix-and-post run (`_verify`), because a Publish is exactly
+    that run's second half.
+    """
+    hold_dir = item.hold_dir
+    try:
+        report = json.loads(item.hold_report or "{}")
+    except ValueError:
+        raise RunnerError(f"the held report for !{iid} is unreadable — "
+                          f"Discard it and re-run")
+    if not hold_dir or not os.path.isdir(hold_dir):
+        raise RunnerError(f"the held commit for !{iid} is gone from disk "
+                          f"({hold_dir or 'no hold dir'}) — Discard the row "
+                          f"and re-run")
+    head = _run(["git", "-C", hold_dir, "rev-parse", "HEAD"], run_subprocess,
+                timeout=_FETCH_TIMEOUT)
+    if head.returncode != 0 or (head.stdout or "").strip() != item.hold_sha:
+        raise RunnerError(f"the held worktree for !{iid} is not at the held "
+                          f"commit {item.hold_sha[:10]} — Discard and re-run")
+
+    run_start = now()
+    pre_refs = _ls_remote(run_subprocess, hold_dir)
+    fetch = _run(["git", "-C", hold_dir, "fetch", "origin", branch],
+                 run_subprocess, timeout=_FETCH_TIMEOUT)
+    if fetch.returncode != 0:
+        out = f"{fetch.stderr or ''}{fetch.stdout or ''}"
+        if keepcurrent.branch_is_gone(out) and collectors.is_closed_state(
+                collectors.mr_state(run_glab, item.repo, iid)):
+            _drop_hold(hold_dir, cfg, run_subprocess)
+            return FeedbackResult(iid=iid, mr_merged=True)
+        raise RunnerError(f"git fetch failed: {_tail(out)}")
+    # The branch may have moved while the hold waited (keep-current merging
+    # master, a human push). Fold it in rather than force over it.
+    behind = _run(["git", "-C", hold_dir, "merge-base", "--is-ancestor",
+                   f"origin/{branch}", "HEAD"], run_subprocess,
+                  timeout=_FETCH_TIMEOUT)
+    if behind.returncode != 0:
+        merge = _run(["git", "-C", hold_dir, "merge", "--no-edit",
+                      f"origin/{branch}"], run_subprocess,
+                     timeout=_FETCH_TIMEOUT)
+        if merge.returncode != 0:
+            _run(["git", "-C", hold_dir, "merge", "--abort"], run_subprocess,
+                 timeout=_FETCH_TIMEOUT)
+            raise RunnerError(
+                f"the held fix for !{iid} no longer merges onto origin/"
+                f"{branch} — Discard it and re-run against the moved branch")
+    push = _run(["git", "-C", hold_dir, "push", "origin",
+                 f"HEAD:refs/heads/{branch}"], run_subprocess,
+                timeout=_FETCH_TIMEOUT)
+    if push.returncode != 0:
+        raise RunnerError(f"push of the held fix for !{iid} failed: "
+                          f"{_tail(f'{push.stderr or ''}{push.stdout or ''}')}")
+
+    # Post the held replies exactly as reviewed, each from a file (backticks).
+    project = collectors._project(item.repo)
+    claims = {}
+    for entry in list(report.get("addressed") or []) + list(report.get("replied") or []):
+        tid = entry.get("thread"); body = entry.get("reply") or ""
+        if not tid or not body:
+            continue
+        path = os.path.join(hold_dir, ".worksweep-reply.txt")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(body)
+        run_glab(["api", f"projects/{project}/merge_requests/{iid}/"
+                         f"discussions/{tid}/notes",
+                  "-X", "POST", "--field", f"body=@{path}"])
+        claims[tid] = {"reply": body, "sha": str(entry.get("sha") or ""),
+                       "receipt": str(entry.get("receipt") or "")}
+        _forget(path)
+
+    threads = {t.id: t for t in collectors.parse_threads(
+        _fetch_threads(run_glab, item.repo, iid))}
+    given = [threads[t] for t in claims if t in threads]
+    addressed = [e.get("thread") for e in (report.get("addressed") or [])
+                 if e.get("thread") in claims]
+    replied = [e.get("thread") for e in (report.get("replied") or [])
+               if e.get("thread") in claims and e.get("thread") not in addressed]
+    after = _verify(run_subprocess, run_glab, cfg, item.repo, iid, branch,
+                    hold_dir, given, addressed, replied, pre_refs, run_start,
+                    claims, list(report.get("noted") or []))
+
+    _sync_dev_box(item, cfg, iid, branch, run_glab, run_ssh, http_get, boxes)
+    result_sha = _ls_remote(run_subprocess, hold_dir).get(_ref(branch), "")
+    _drop_hold(hold_dir, cfg, run_subprocess)
+    return FeedbackResult(
+        iid=iid, waiting=len(claims), addressed=len(addressed),
+        replied=len(replied), noted=len(report.get("noted") or []),
+        escalated=tuple(report.get("escalated") or []),
+        replies=tuple(_replies_posted(after, addressed + replied,
+                                      cfg.username, run_start)),
+        result_sha=result_sha)
+
+
+def _sync_dev_box(item: WorkItem, cfg, iid: int, branch: str,
+                  run_glab: Callable, run_ssh: Callable, http_get: Callable,
+                  boxes: Sequence) -> str:
+    """Put the published branch on the dev box the MR advertises, if this
+    run was wired with the ssh/http edges and a configured box matches the
+    description's dev link. Returns the synced sha, or "" when nothing was
+    synced (no link, no matching box, no edges) -- a Publish without a dev
+    sync is still a Publish; the reviewer's link just lags one push."""
+    if run_ssh is None or http_get is None or not boxes:
+        return ""
+    from . import implementer, park
+    from .models import dev_urls, same_dev_url
+    try:
+        description = park.fetch_description(run_glab, item.repo, iid)
+    except Exception:
+        return ""
+    links = dev_urls(description)
+    if not links:
+        return ""
+    for box in boxes:
+        if any(same_dev_url(u, box.url) for u in links):
+            return implementer.sync_to_box(box, branch, run_ssh, http_get,
+                                           claim_branch=box.branch,
+                                           claim_sha=box.sha)
+    return ""
 
 
 def _claude(run_subprocess: Callable, cfg, checkout: str, prompt: str) -> None:

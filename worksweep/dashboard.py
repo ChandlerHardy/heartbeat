@@ -52,6 +52,8 @@ from .formatter import DISCORD_MAX_CHARS, _truncate_bytes
 from .seennotes import record_seen
 from .models import RUNNABLE_EXECUTORS, QueueRecord, WorkItem
 from .queue import (_TERMINAL, accept_rec as accept_rec_record,
+                    publish_hold as publish_hold_record,
+                    discard_hold as discard_hold_record,
                     dismiss as dismiss_record, is_dismissable, load_queue,
                     request_consult as request_consult_record, save_queue,
                     write_lock)
@@ -643,6 +645,11 @@ button.cnt:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
   border:1px solid var(--line);border-left:2px solid var(--violet);
   border-radius:6px;background:var(--panel-2);white-space:pre-wrap}
 .rec-failed{font-size:11px;color:var(--danger)}
+.hold{font-size:12px;color:var(--ink-2);margin-top:6px;padding:6px 8px;
+  border-left:2px solid var(--violet);white-space:pre-wrap;word-break:break-word}
+.hold-reply{margin-top:4px;padding-left:8px;border-left:1px solid var(--line)}
+.hold-actions{margin-top:6px;display:flex;gap:6px}
+.btn-discard{background:transparent;color:var(--danger);border:1px solid var(--danger)}
 .btn-consult{
   appearance:none;font:inherit;font-size:10px;font-weight:650;
   letter-spacing:.04em;text-transform:uppercase;display:inline-flex;
@@ -1174,6 +1181,16 @@ _BODY_SCRIPT = """
       if(!inflight){send('/accept-rec',{number:parseInt(a.getAttribute('data-accept-rec'),10)});}
       return;
     }
+    var p=e.target.closest('[data-publish]');
+    if(p){
+      if(!inflight){send('/publish',{number:parseInt(p.getAttribute('data-publish'),10)});}
+      return;
+    }
+    var x=e.target.closest('[data-discard-hold]');
+    if(x){
+      if(!inflight){send('/discard-hold',{number:parseInt(x.getAttribute('data-discard-hold'),10)});}
+      return;
+    }
     if(e.target.closest('#approve-selected')){approveSelected();return;}
     if(e.target.closest('#approve-all')){approveAll();return;}
     if(e.target.closest('#sync')){kickSweep();return;}
@@ -1274,6 +1291,49 @@ def _dismiss_button(number: int, title: str) -> str:
             f'title="{_e(title)}">Dismiss</button>')
 
 
+def _hold_html(record: QueueRecord) -> str:
+    """The held-for-review strip on a parked feedback row (2026-09-04): the
+    diffstat, each proposed reply with its receipt, and Publish / Discard.
+    Everything shown is exactly what Publish posts -- the run wrote the
+    replies as final text and the runner refused the hold if anything had
+    already leaked to GitLab. Status flips live in queue.publish_hold /
+    queue.discard_hold; this only renders and maps clicks to POSTs."""
+    item = record.item
+    n = record.number
+    try:
+        report = json.loads(item.hold_report or "{}")
+    except ValueError:
+        report = {}
+    parts = [f'<div class="hold">📦 held commit {_e(item.hold_sha[:10])}']
+    if report.get("diffstat"):
+        parts.append(f'\n{_e(report["diffstat"])}')
+    for entry in report.get("addressed") or []:
+        parts.append(
+            f'<div class="hold-reply"><b>fix</b> · thread '
+            f'{_e(str(entry.get("thread", ""))[:12])}'
+            f'{" · " + _e(entry["receipt"]) if entry.get("receipt") else ""}'
+            f'<br>{_e(entry.get("reply", ""))}</div>')
+    for entry in report.get("replied") or []:
+        parts.append(
+            f'<div class="hold-reply"><b>reply</b> · thread '
+            f'{_e(str(entry.get("thread", ""))[:12])}'
+            f'<br>{_e(entry.get("reply", ""))}</div>')
+    for line in report.get("escalated") or []:
+        parts.append(f'<div class="hold-reply"><b>escalated</b> · {_e(line)}</div>')
+    parts.append('</div>')
+    parts.append(
+        f'<div class="hold-actions">'
+        f'<button type="button" class="btn-consult" data-publish="{_e(n)}" '
+        f'aria-label="publish held fix for item {_e(n)}" '
+        f'title="push the held commit and post these replies">Publish</button>'
+        f'<button type="button" class="btn-consult btn-discard" '
+        f'data-discard-hold="{_e(n)}" '
+        f'aria-label="discard held fix for item {_e(n)}" '
+        f'title="drop the held commit and replies; nothing is posted">'
+        f'Discard</button></div>')
+    return "".join(parts)
+
+
 def _consult_html(record: QueueRecord) -> str:
     """The Send-to-Fable strip on a parked row.
 
@@ -1344,7 +1404,10 @@ def _section_row(record: QueueRecord, now: str, section: str) -> str:
             # was asked (#238, 2026-09-01).
             if item.error_summary:
                 detail.append(f'<div class="ask">{_e(item.error_summary)}</div>')
-            detail.append(_consult_html(record))
+            if item.hold_sha:
+                detail.append(_hold_html(record))
+            else:
+                detail.append(_consult_html(record))
 
     age = _age(record, now)
     meta = f'<div class="meta">{_e(age)}</div>' if age else ""
@@ -2115,7 +2178,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:                                 # noqa: N802
         path = self._path()
         if path not in ("/approve", "/approve-all", "/sweep", "/dismiss",
-                        "/consult", "/accept-rec"):
+                        "/consult", "/accept-rec", "/publish",
+                        "/discard-hold"):
             self._reject(404, "not found")
             return
         if not self._csrf_ok():
@@ -2160,7 +2224,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._json(500, {"dismissed": False, "error": "dismiss failed"})
             return
 
-        if path in ("/consult", "/accept-rec"):
+        if path in ("/consult", "/accept-rec", "/publish", "/discard-hold"):
             number = _valid_number(payload)
             if number is None:
                 self._reject(400, "bad request")
@@ -2168,6 +2232,10 @@ class DashboardHandler(BaseHTTPRequestHandler):
             try:
                 if path == "/consult":
                     self._consult_request(number)
+                elif path == "/publish":
+                    self._publish_hold(number, _valid_actor(payload))
+                elif path == "/discard-hold":
+                    self._discard_hold(number)
                 else:
                     self._accept_rec(number, _valid_actor(payload))
             except Exception as e:                 # never crash the agent
@@ -2270,6 +2338,47 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self._record_reviewed_sha(target.item, number)
         self._audit_dismiss(number, target.item, actor)
         self._json(200, {"dismissed": True, "number": number})
+
+    def _publish_hold(self, number: int, actor: str = "") -> None:
+        """Publish a held feedback fix: queue.publish_hold flips the row to
+        approved with hold_action="publish", and the runner's next feedback
+        pass pushes the commit and posts the replies. The one approval path
+        whose consent is a REVIEWED diff, so the audit line says so."""
+        with _WRITE_LOCK, write_lock(self.server.queue_path):
+            records = load_queue(self.server.queue_path)
+            updated, outcome = publish_hold_record(records, number,
+                                                   self.server.now())
+            if outcome != "queued":
+                self._json(400, {"ok": False,
+                                 "error": f"#{number} has no held fix to "
+                                          f"publish"})
+                return
+            save_queue(self.server.queue_path, updated)
+        suffix = (" (dashboard · claude · published held fix)"
+                  if actor == _ACTOR else " (dashboard · published held fix)")
+        post, webhook = self.server.post, self.server.webhook
+        if post and webhook:
+            try:
+                post(webhook, f"✅ Publish: #{number}{suffix}")
+            except Exception as e:
+                print(f"worksweep: dashboard publish post failed: {e}",
+                      file=sys.stderr)
+        self._json(200, {"ok": True, "publish": "queued"})
+
+    def _discard_hold(self, number: int) -> None:
+        """Drop a held feedback fix: queue.discard_hold retires the row; the
+        runner's next feedback pass removes the worktree."""
+        with _WRITE_LOCK, write_lock(self.server.queue_path):
+            records = load_queue(self.server.queue_path)
+            updated, discarded = discard_hold_record(records, number,
+                                                     self.server.now())
+            if not discarded:
+                self._json(400, {"ok": False,
+                                 "error": f"#{number} has no held fix to "
+                                          f"discard"})
+                return
+            save_queue(self.server.queue_path, updated)
+        self._json(200, {"ok": True, "discarded": True})
 
     def _consult_request(self, number: int) -> None:
         """Queue a Send-to-Fable consult on a parked row. The flip itself

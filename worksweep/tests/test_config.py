@@ -226,3 +226,23 @@ def test_load_config_non_integer_feedback_timeout_raises_runtime_error():
         with pytest.raises(RuntimeError) as exc:
             load_config(p)
         assert "runner.feedback_timeout" in str(exc.value)
+
+
+# 2026-09-04 (held for review) — runner.feedback_hold defaults ON (a reply
+# under Chandler's name cannot be unsent), reads a bool, rejects anything else.
+def test_load_config_feedback_hold_defaults_on_and_reads_false():
+    with tempfile.TemporaryDirectory() as tmp:
+        p = _write(tmp, {"gitlab": {"username": "x", "repos": []}})
+        assert load_config(p).feedback_hold is True
+        p = _write(tmp, {"gitlab": {"username": "x", "repos": []},
+                         "runner": {"feedback_hold": False}})
+        assert load_config(p).feedback_hold is False
+
+
+def test_load_config_non_bool_feedback_hold_raises_runtime_error():
+    with tempfile.TemporaryDirectory() as tmp:
+        p = _write(tmp, {"gitlab": {"username": "x", "repos": []},
+                         "runner": {"feedback_hold": "yes"}})
+        with pytest.raises(RuntimeError) as exc:
+            load_config(p)
+        assert "runner.feedback_hold" in str(exc.value)

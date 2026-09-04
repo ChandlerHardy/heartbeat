@@ -149,6 +149,28 @@ def needs_input(records: List[QueueRecord], number: int, question: str,
             if r.number == number else r for r in records]
 
 
+def hold_for_review(records: List[QueueRecord], number: int, summary: str,
+                    now: str, hold_sha: str = "", hold_dir: str = "",
+                    hold_report: str = "") -> List[QueueRecord]:
+    """Park a held feedback fix: running -> needs-input, carrying the local
+    commit, its worktree and the report the dashboard renders. Publish and
+    Discard (queue.publish_hold / queue.discard_hold) are the ways out."""
+    return [_replace(r, now, status="needs-input",
+                     error_summary=(summary or "")[:_ERROR_SUMMARY_MAX],
+                     hold_sha=hold_sha, hold_dir=hold_dir,
+                     hold_report=hold_report, hold_action="")
+            if r.number == number else r for r in records]
+
+
+def _clear_hold(records: List[QueueRecord], number: int,
+                now: str) -> List[QueueRecord]:
+    """A published (or re-run) row carries no hold any more."""
+    return [_replace(r, now, hold_sha="", hold_dir="", hold_report="",
+                     hold_action="")
+            if r.number == number and r.item.hold_sha else r
+            for r in records]
+
+
 def fail(records: List[QueueRecord], number: int, error_summary: str,
          now: str) -> List[QueueRecord]:
     return [_replace(r, now, status="error",
@@ -624,6 +646,13 @@ def _run_address_feedback_pass(cfg, deps: Dict[str, Callable],
     if not acquire_lock(lock_path):
         return 0    # another address-feedback run is live under this lock
     try:
+        gc = deps.get("gc_holds")
+        if gc is not None:
+            try:
+                gc(deps["load"](), cfg)
+            except Exception as e:      # GC is hygiene, never the outcome
+                _post(deps, cfg, f"⚠️ Worksweep runner: hold GC failed — "
+                                 f"{type(e).__name__}: {e}")
         with _queue_lock(deps):
             records = deps["load"]()
             target = pick_claim(records, (_ADDRESS_FEEDBACK,))
@@ -752,13 +781,32 @@ def _run_address_feedback_claim(cfg, deps: Dict[str, Callable],
         _fail_and_post(deps, cfg, number, f"{type(e).__name__}: {e}",
                        _ADDRESS_FEEDBACK)
         return 1
+    if getattr(result, "held", False):
+        # Held for review (2026-09-04): the run committed locally and posted
+        # nothing. Park the row with everything Publish needs; the dashboard
+        # renders the diff and the proposed replies, and its Publish/Discard
+        # are the only ways forward.
+        summary = (f"Held for review — {result.addressed} fix(es), "
+                   f"{result.replied} repl(ies), {len(result.escalated)} "
+                   f"escalated. Publish or Discard on the dashboard.")
+        if _apply_to_fresh(
+                deps, cfg, number,
+                lambda fresh: hold_for_review(
+                    fresh, number, summary, deps["now"](),
+                    hold_sha=result.hold_sha, hold_dir=result.hold_dir,
+                    hold_report=result.hold_report)) is not None:
+            _post(deps, cfg, _clamped(
+                f"📦 #{number} held for review — {summary}"))
+        return 0
     merged = bool(getattr(result, "mr_merged", False))
     updated = _apply_to_fresh(
         deps, cfg, number,
         lambda fresh: _chain_magi_review(
-            complete(fresh, number, result.result_sha, "", deps["now"](),
-                     done_reason=("mr-merged" if merged
-                                  else "executor-completed")),
+            _clear_hold(complete(fresh, number, result.result_sha, "",
+                                 deps["now"](),
+                                 done_reason=("mr-merged" if merged
+                                              else "executor-completed")),
+                        number, deps["now"]()),
             target.item, result, deps["now"]()))
     if updated is not None:
         from . import feedback as _feedback   # local: feedback imports runner

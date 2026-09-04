@@ -21,7 +21,8 @@ def _cfg(tmp_path, **kw):
     base = dict(repos=("pb-www",), username="chandler.hardy",
                 discord_webhook="https://discord.com/api/webhooks/x/y",
                 checkouts_root=str(tmp_path), claude_bin="claude",
-                runner_timeout=1800, stale_threshold=5)
+                runner_timeout=1800, stale_threshold=5,
+                feedback_hold=False)
     base.update(kw)
     return WorksweepConfig(**base)
 
@@ -565,3 +566,63 @@ def test_the_chained_row_is_blanket_safe_and_not_a_zombie(tmp_path):
     it = _magi_rows(state["records"])[0].item
     assert it.executor in RUNNABLE_EXECUTORS
     assert is_dismissable(it) is False
+
+
+# --- 2026-09-04: held for review ---------------------------------------------
+
+def test_a_held_result_parks_the_row_with_everything_publish_needs(tmp_path):
+    """The run committed locally and posted nothing. The runner parks the row
+    needs-input carrying the commit, its worktree and the report, and says so
+    with a 📦 -- never a ⚠️, never `done`."""
+    held = _result(addressed=1, replied=1, replies=(), result_sha="base0",
+                   held=True, hold_sha="deadbeef", hold_dir="/wt/hold-pb-www-3997",
+                   hold_report='{"addressed": [{"thread": "t1"}]}')
+    deps, posts, _, state = _deps([_rec(7)], execute=lambda i, c: held)
+    rc = run_once(_cfg(tmp_path, feedback_hold=True), deps, **_locks(tmp_path))
+    assert rc == 0
+    row = state["records"][0].item
+    assert row.status == "needs-input"
+    assert row.hold_sha == "deadbeef" and row.hold_dir == "/wt/hold-pb-www-3997"
+    assert row.hold_report == '{"addressed": [{"thread": "t1"}]}'
+    assert row.hold_action == ""
+    assert "Held for review" in row.error_summary
+    assert "1 fix(es), 1 repl(ies)" in row.error_summary
+    assert [p for p in posts if p.startswith("📦")]
+    assert not [p for p in posts if p.startswith("⚠️")]
+    assert not [p for p in posts if p.startswith("💬")]
+
+
+def test_a_published_row_completes_with_its_hold_cleared(tmp_path):
+    """After Publish the executor returns an ordinary result; the row goes
+    done and no hold bookkeeping survives to be published twice."""
+    import dataclasses
+    queued = _rec(7)
+    queued = dataclasses.replace(queued, item=dataclasses.replace(
+        queued.item, hold_sha="deadbeef", hold_dir="/wt/h",
+        hold_report="{}", hold_action="publish"))
+    deps, posts, _, state = _deps([queued], execute=lambda i, c: _result())
+    run_once(_cfg(tmp_path, feedback_hold=True), deps, **_locks(tmp_path))
+    row = state["records"][0].item
+    assert row.status == "done"
+    assert row.hold_sha == "" and row.hold_dir == ""
+    assert row.hold_report == "" and row.hold_action == ""
+    assert [p for p in posts if p.startswith("💬")]
+
+
+def test_the_feedback_pass_gcs_holds_before_claiming(tmp_path):
+    seen = []
+    deps, _, _, _ = _deps([_rec(7)])
+    deps["gc_holds"] = lambda records, cfg: seen.append(len(records)) or []
+    run_once(_cfg(tmp_path), deps, **_locks(tmp_path))
+    assert seen == [1]
+
+
+def test_a_gc_failure_never_blocks_the_pass(tmp_path):
+    def boom(records, cfg):
+        raise OSError("disk went away")
+    deps, posts, _, state = _deps([_rec(7)])
+    deps["gc_holds"] = boom
+    rc = run_once(_cfg(tmp_path), deps, **_locks(tmp_path))
+    assert rc == 0
+    assert state["records"][0].item.status == "done"      # the claim still ran
+    assert any("hold GC failed" in p for p in posts)

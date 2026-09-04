@@ -455,3 +455,61 @@ def test_accept_rec_refuses_a_row_without_a_rec():
     out, accepted = accept_rec([_parked()], 3, NOW)
     assert accepted is None
     assert out[0].item.status == "needs-input"
+
+
+# --- 2026-09-04: held for review (publish_hold / discard_hold / carry) -------
+from worksweep.queue import discard_hold, publish_hold  # noqa: E402
+
+
+def _held(number=3, hold_action=""):
+    p = _parked(number)
+    return _dc.replace(p, item=_dc.replace(
+        p.item, hold_sha="abc123def", hold_dir="/wt/hold-pb-www-4082",
+        hold_report='{"addressed": []}', hold_action=hold_action))
+
+
+def test_publish_hold_approves_the_row_with_the_publish_action():
+    out, outcome = publish_hold([_held()], 3, NOW)
+    assert outcome == "queued"
+    row = out[0].item
+    assert row.status == "approved" and row.hold_action == "publish"
+    assert row.hold_sha == "abc123def" and row.hold_report   # what to publish
+    assert row.error_summary == ""
+
+
+def test_publish_hold_refuses_a_parked_row_that_holds_nothing():
+    """FALSIFYING: approving a plain question as a publish would run the
+    executor's publish route against no commit."""
+    out, outcome = publish_hold([_parked()], 3, NOW)
+    assert outcome == "not-held"
+    assert out[0].item.status == "needs-input"
+    assert publish_hold([_held()], 99, NOW)[1] == "not-found"
+
+
+def test_discard_hold_retires_the_row_and_keeps_the_dir_for_gc():
+    out, discarded = discard_hold([_held()], 3, NOW)
+    assert discarded is True
+    row = out[0].item
+    assert row.status == "done" and row.done_reason == "discarded"
+    assert row.hold_dir == "/wt/hold-pb-www-4082"       # the runner GCs it
+    assert row.hold_report == "" and row.hold_action == ""
+    assert discard_hold([_parked()], 3, NOW)[1] is False
+
+
+def test_a_held_row_carries_its_hold_across_a_sweep():
+    """A sweep between the hold and the human's click must not drop the
+    commit or the proposed replies -- on the parked row, and on the approved
+    row once Publish was pressed."""
+    parked = _held()
+    fresh = _dc.replace(parked.item, status="proposed", hold_sha="",
+                        hold_dir="", hold_report="", hold_action="")
+    out = reconcile([parked], [fresh], T1)
+    row = out[0].item
+    assert row.status == "needs-input"
+    assert row.hold_sha == "abc123def" and row.hold_dir and row.hold_report
+
+    queued, _ = publish_hold([parked], 3, NOW)
+    out = reconcile(queued, [fresh], T1)
+    row = out[0].item
+    assert row.status == "approved" and row.hold_action == "publish"
+    assert row.hold_sha == "abc123def" and row.hold_report
