@@ -206,3 +206,23 @@ def test_load_config_auto_approve_non_list_raises():
                          "runner": {"auto_approve": "keep-current"}})
         with pytest.raises(RuntimeError, match="auto_approve"):
             load_config(p)
+
+
+# 2026-09-04 (tiered feedback) — address-feedback has its own budget, read
+# from runner.feedback_timeout, default 3600, non-integer rejected loudly.
+def test_load_config_feedback_timeout_defaults_and_reads():
+    with tempfile.TemporaryDirectory() as tmp:
+        p = _write(tmp, {"gitlab": {"username": "x", "repos": []}})
+        assert load_config(p).feedback_timeout == 3600
+        p = _write(tmp, {"gitlab": {"username": "x", "repos": []},
+                         "runner": {"feedback_timeout": 5400}})
+        assert load_config(p).feedback_timeout == 5400
+
+
+def test_load_config_non_integer_feedback_timeout_raises_runtime_error():
+    with tempfile.TemporaryDirectory() as tmp:
+        p = _write(tmp, {"gitlab": {"username": "x", "repos": []},
+                         "runner": {"feedback_timeout": "an hour"}})
+        with pytest.raises(RuntimeError) as exc:
+            load_config(p)
+        assert "runner.feedback_timeout" in str(exc.value)

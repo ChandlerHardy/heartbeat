@@ -123,7 +123,14 @@ _MAX_THREADS = 20
 _FENCE_TOKEN = "UNTRUSTED-THREAD-BODY"
 # Tools the run may use. Chandler's own settings are NOT a boundary for a
 # process this module spawns, so the scope goes on the argv.
-_ALLOWED_TOOLS = ("Bash", "Read", "Edit", "Write", "Grep", "Glob")
+# Task + Skill (2026-09-04, tiered feedback): a substantive fix runs the
+# implement lane's ceremony from inside this session -- the implementer is
+# dispatched as a subagent and the tribunal is invoked as a skill -- so the run
+# must be able to spawn and to invoke. A run that could only edit inline was
+# the lane's quality gap: no implementer discipline, no review lens, no ship
+# gate between a single model's edit and the push (!4110 review round).
+_ALLOWED_TOOLS = ("Bash", "Read", "Edit", "Write", "Grep", "Glob", "Task",
+                  "Skill")
 # C0/C1 controls except tab and newline, plus the zero-width and bidi
 # characters that let text hide from a human reading the same prompt in a log.
 _CONTROL_RE = re.compile(
@@ -210,8 +217,31 @@ close out a thread, then classify that thread `escalate` with the reason \
 Take each thread on its own and pick exactly ONE of four outcomes:
 
 1. FIXABLE -- you can see the change being asked for and it is not a judgment \
-call. Make the change, commit it, and reply on that thread with \
-`addressed in <short-sha>` (add one sentence if the change needs explaining).
+call. Decide its TIER before touching anything, and record the tier in your \
+report:
+   - TRIVIAL: no production behavior changes -- a docblock, a rename, a \
+test-only assertion, a comment, a one-line mechanical edit. Fix it inline, \
+then run the test file(s) that cover the touched code (PHP: on the dev box, \
+see below; JS: `npx vitest run <file>`) and record the result as the \
+thread's `receipt`.
+   - SUBSTANTIVE: anything else -- any production code path, any JS/Vue/PHP \
+logic, anything a user or another module could observe. This tier gets the \
+implement lane's ceremony, not an inline edit: (a) write a Fix Mode handoff \
+for the thread(s) per `routing/spawn-contract.md` and dispatch \
+`@pla-eng:implementer` with it via the Task tool (tests first, per its \
+contract); (b) when it returns, run ONE tribunal round over the branch diff \
+by invoking the `magi:magi-review` skill (never `--lite` -- this run is \
+unattended), and route any confirmed finding back to the SAME implementer as \
+a further Fix Mode attempt; (c) run the `chandler-personal:domain-check` \
+skill on the resulting diff and treat `verdict: gate` exactly like the DOMAIN \
+GATE below; (d) run the touched suite(s) as the ship gate and record the \
+result as the `receipt`. Keep new tests proportionate to the fix: calibrate \
+against the nearest sibling test in the same file, and let the tribunal's \
+proportionality lens have the last word.
+   Either tier: commit, and reply on the thread with \
+`addressed in <short-sha> -- <receipt>` (one more sentence if the change needs \
+explaining). NO RECEIPT, NO PUSH: a fix whose tests you did not run is not \
+addressed, it is escalated with the reason `unverified`.
 2. QUESTION -- the reviewer asked something rather than asked for a change. \
 Reply on the thread with the answer. No commit.
 3. NOTHING-TO-DO -- the thread is purely acknowledgment ("thanks!", "nice", \
@@ -251,6 +281,27 @@ Some of the threads above are plain MR notes rather than diff comments \
 id shown above is already the discussion id it wants -- and replying converts \
 the note into a discussion. Nothing about your reply changes.
 
+DEV BOXES, and where NOT to go. Every dev box lives on the host \
+`chandlerhardy-dev` at `/home/chandlerhardy/dev{{N}}.chandlerhardy-dev/pb-www`; \
+the N is the hostname prefix of the MR's "Available on" link \
+(`dev5.chandlerhardy-dev.performancebeef.com` -> N=5). That directory is the \
+ONLY path you may modify on that host. `/project/performancebeef` is the \
+production-clone checkout and every other checkout on the box belongs to \
+someone else -- never `cd` into them to run git commands, never explore for \
+"where dev{{N}} might be": the path above is it, and a wrong `checkout` there \
+is an outage. PHP test runs also go through that host: \
+`rsync -az --delete --exclude .git --exclude node_modules ./ \
+chandlerhardy-dev:~/scratch/pb-www-{iid}/`, then \
+`ssh chandlerhardy-dev "cd ~/scratch/pb-www-{iid}/test && \
+HTTP_HOST=dev{{N}}.chandlerhardy-dev.performancebeef.com \
+../phplib/vendor/bin/phpunit --testsuite UnitTests"` (plus the domain suite \
+for the touched area), and `rm -rf ~/scratch/pb-www-{iid}` on that host when \
+you are done -- the box has a 16G quota shared with every dev site.
+
+Never `git stash` in any checkout: commit work-in-progress if you must set \
+it aside. Set `$script_version` (when the hygiene below calls for it) to a \
+cattle-breed name that does not appear in that file's git history.
+
 Before you push, pb-www hygiene:
 
 - If your fix touched anything under `www/home/scss/*`, run \
@@ -269,6 +320,8 @@ Then write your report to `{report}` in the checkout root, and do NOT commit \
 that file:
 
     {{"addressed": [{{"thread": "<thread-id>", "sha": "<short-sha>",
+                    "tier": "trivial" | "substantive",
+                    "receipt": "<suite/file and result, e.g. 'vitest 30/30' or 'UnitTests 2008 green'>",
                     "reply": "<the reply you posted, verbatim>"}}],
      "replied": [{{"thread": "<thread-id>",
                   "reply": "<the reply you posted, verbatim>"}}],
@@ -279,10 +332,11 @@ Every thread listed above must appear in exactly one of those four lists, and \
 only list one under `addressed` or `replied` if you really did post the reply. \
 Afterwards Python re-reads the threads and checks that each thread you claim \
 carries a note from Chandler posted DURING this run whose text starts with the \
-`reply` you reported, and that every `sha` you claimed is actually a commit on \
-origin/{branch}. Copy the reply text verbatim -- a claim with missing or \
+`reply` you reported, that every `sha` you claimed is actually a commit on \
+origin/{branch}, and that every `addressed` entry carries a non-empty \
+`receipt`. Copy the reply text verbatim -- a claim with missing or \
 mismatched text fails the run, because "somebody replied at some point" is \
-not evidence that YOU did.
+not evidence that YOU did, and a fix without a receipt fails it too.
 
 Do not touch any thread that is not listed above. Do not change the merge \
 request's title, description, reviewers or state. Do not merge anything."""
@@ -459,17 +513,20 @@ def _execute_in(item: WorkItem, cfg, checkout: str, iid: int, branch: str,
 
 
 def _claude(run_subprocess: Callable, cfg, checkout: str, prompt: str) -> None:
-    """One unattended pass, on cfg.runner_timeout (1800s by default).
+    """One unattended pass, on cfg.feedback_timeout (3600s by default).
 
-    That cap is not free-standing: the runner reaps a non-implement claim at
-    45 minutes (runner.STALE_RUNNING_MINUTES), so a longer per-executor budget
-    would get healthy runs killed mid-flight and leave half-posted replies.
+    Its own budget since 2026-09-04: a substantive thread now runs the
+    implement lane's ceremony (implementer dispatch, a tribunal round, the
+    dev-box ship gate), which does not fit the generic 45-minute window the
+    lane used to live in. The runner's reap window for address-feedback is
+    this budget plus a grace margin (runner.reap_stale), so a healthy long run
+    is never killed mid-flight with half-posted replies.
 
     The tool scope goes on the ARGV. Whatever permissions Chandler's own
     interactive sessions are configured with are not a boundary for a process
     this module spawns unattended with his credentials.
     """
-    timeout = int(getattr(cfg, "runner_timeout", 1800) or 1800)
+    timeout = int(getattr(cfg, "feedback_timeout", 3600) or 3600)
     try:
         proc = _run([cfg.claude_bin, "-p", prompt,
                      "--allowedTools", ",".join(_ALLOWED_TOOLS)],
@@ -505,6 +562,19 @@ def _verify(run_subprocess: Callable, run_glab: Callable, cfg, repo: str,
         raise RunnerError(
             f"the address-feedback run on !{iid} claims thread(s) it was "
             f"never given: {', '.join(sorted(stray))}")
+
+    # 0. No receipt, no push (2026-09-04). A fix is only "addressed" once the
+    #    tests that cover it ran; the prompt says so, and this is the check.
+    #    A run that edited and pushed without running anything used to be
+    #    indistinguishable from one that did -- the lane's quality gap.
+    unverified = sorted(tid for tid in addressed
+                        if not str(claims.get(tid, {}).get("receipt", "")
+                                   or "").strip())
+    if unverified:
+        raise RunnerError(
+            f"the address-feedback run on !{iid} claims it fixed thread(s) "
+            f"{', '.join(unverified[:_MAX_LISTED])} without a test receipt — "
+            f"a fix whose tests did not run is not addressed")
 
     # 1. Of the refs a push OWNS, the only one that may have moved is this
     #    MR's branch. The run holds real push credentials, so "the branch
@@ -738,7 +808,7 @@ def _forget(path: str) -> None:
 
 
 def _claims(raw) -> dict:
-    """{thread id: {"reply": text, "sha": sha}} from a report list.
+    """{thread id: {"reply", "sha", "tier", "receipt"}} from a report list.
 
     f-019: the run has to say WHAT it posted, not merely that it posted. A
     thread id alone was satisfied by any note of Chandler's inside the window
@@ -750,9 +820,12 @@ def _claims(raw) -> dict:
         if isinstance(entry, dict):
             tid = entry.get("thread")
             claim = {"reply": entry.get("reply") or "",
-                     "sha": str(entry.get("sha") or "")}
+                     "sha": str(entry.get("sha") or ""),
+                     "tier": str(entry.get("tier") or ""),
+                     "receipt": str(entry.get("receipt") or "")}
         else:
-            tid, claim = entry, {"reply": "", "sha": ""}
+            tid, claim = entry, {"reply": "", "sha": "", "tier": "",
+                                 "receipt": ""}
         if isinstance(tid, str) and tid and tid not in out:
             out[tid] = claim
     return out

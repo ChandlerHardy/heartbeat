@@ -30,6 +30,10 @@ IMPLEMENT_REAP_GRACE_SECONDS = 900
 # its own budget, and a reap window that is that budget plus a grace margin.
 MAGI_TIMEOUT_SECONDS = 4500
 MAGI_REAP_GRACE_SECONDS = 900
+# 2026-09-04 (tiered feedback): a substantive feedback fix runs the implement
+# lane's ceremony, so address-feedback gets its own budget and reap window too.
+FEEDBACK_TIMEOUT_SECONDS = 3600
+FEEDBACK_REAP_GRACE_SECONDS = 900
 _ERROR_SUMMARY_MAX = 500
 _LOCK_DEFAULT = os.path.expanduser("~/.worksweep/runner.lock")
 _IMPLEMENT_LOCK_NAME = "runner-implement.lock"
@@ -154,34 +158,40 @@ def fail(records: List[QueueRecord], number: int, error_summary: str,
 
 def reap_stale(records: List[QueueRecord], now: str,
                implement_timeout: int = 5400,
-               magi_timeout: int = MAGI_TIMEOUT_SECONDS
+               magi_timeout: int = MAGI_TIMEOUT_SECONDS,
+               feedback_timeout: int = FEEDBACK_TIMEOUT_SECONDS
                ) -> Tuple[List[QueueRecord], List[QueueRecord]]:
     """Flip `running` claims that outlived their executor's window to error.
 
-    Three windows, because the executors have very different runtimes:
+    Four windows, because the executors have very different runtimes:
 
-      implement    `implement_timeout` + 15 min  (a 90-min /rubric:do run)
-      magi-review  `magi_timeout` + 15 min       (a 40-60 min full tribunal)
-      everything else            45 min          (short ops, one claude pass)
+      implement         `implement_timeout` + 15 min  (a 90-min pipeline run)
+      magi-review       `magi_timeout` + 15 min       (a 40-60 min full tribunal)
+      address-feedback  `feedback_timeout` + 15 min   (a tiered fix round that
+                                                       may dispatch the
+                                                       implementer + a tribunal)
+      everything else            45 min               (short ops, one claude pass)
 
     Each long-running executor gets a window WIDER than its own budget, so the
     reap only ever catches a claim that is genuinely stuck rather than one
     that is merely slow. Reaping a healthy run loses the work AND re-proposes
     it, which for magi means burning another hour of tokens on the next fire.
 
-    The 45-minute default is deliberately kept for the rest: address-feedback
-    runs on `cfg.runner_timeout` specifically so it finishes inside that
-    window, and widening it would leave a stuck feedback claim sitting on its
-    branch for an extra half hour.
+    The 45-minute default is deliberately kept for the rest (keep-current,
+    park, consult): short ops, and a stuck one should not sit on its branch
+    for an extra half hour.
     """
     implement_limit = implement_timeout + IMPLEMENT_REAP_GRACE_SECONDS
     magi_limit = magi_timeout + MAGI_REAP_GRACE_SECONDS
+    feedback_limit = feedback_timeout + FEEDBACK_REAP_GRACE_SECONDS
     updated, reaped = [], []
     for r in records:
         if r.item.executor == _IMPLEMENT:
             limit = implement_limit
         elif r.item.executor == _MAGI:
             limit = magi_limit
+        elif r.item.executor == _ADDRESS_FEEDBACK:
+            limit = feedback_limit
         else:
             limit = STALE_RUNNING_MINUTES * 60
         if r.item.status == "running" and _stale(r.item.claimed_at, now, limit):
@@ -467,7 +477,8 @@ def _run_magi_pass(cfg, deps: Dict[str, Callable], lock_path: str) -> int:
             records = deps["load"]()
             records, reaped = reap_stale(
                 records, now, implement_timeout=_implement_timeout(cfg),
-                magi_timeout=_magi_timeout(cfg))
+                magi_timeout=_magi_timeout(cfg),
+                feedback_timeout=_feedback_timeout(cfg))
             if reaped:
                 deps["save"](records)
             target = pick_claim(records, (_MAGI, _KEEP_CURRENT, _PARK))
@@ -906,6 +917,11 @@ def _implement_timeout(cfg) -> int:
 def _magi_timeout(cfg) -> int:
     return int(getattr(cfg, "magi_timeout", MAGI_TIMEOUT_SECONDS)
                or MAGI_TIMEOUT_SECONDS)
+
+
+def _feedback_timeout(cfg) -> int:
+    return int(getattr(cfg, "feedback_timeout", FEEDBACK_TIMEOUT_SECONDS)
+               or FEEDBACK_TIMEOUT_SECONDS)
 
 
 def _implement_claim_message(iid: int, slot, branch: str) -> str:
