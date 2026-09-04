@@ -348,8 +348,14 @@ def execute(item: WorkItem, cfg,
         # defines is an unknown-argument error, not a no-op.
         drafts = (" --draft-findings"
                   if item.kind in ("review_request", "re_review") else "")
+        # `--advisory` (2026-09-04, #256 on !4110): ONE tribunal round, report
+        # only, no fix loop. Without it the skill dispatches an implementer
+        # into THIS shared checkout to fix its own findings -- and nothing in
+        # this lane pushes, posts, or even keeps that work (the checkout is
+        # documented read-only; see checkouts.py). Fixes to our own MRs are a
+        # separate, consented row, never a side effect of a review.
         proc = run_subprocess(
-            [cfg.claude_bin, "-p", f"/magi:magi-review !{iid}{drafts}"],
+            [cfg.claude_bin, "-p", f"/magi:magi-review !{iid} --advisory{drafts}"],
             cwd=checkout, capture_output=True, text=True,
             stdin=subprocess.DEVNULL,  # claude -p blocks/exits 1 waiting on a non-TTY stdin
             timeout=timeout)

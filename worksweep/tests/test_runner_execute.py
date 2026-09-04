@@ -57,7 +57,7 @@ def test_execute_invokes_fetch_then_claude(tmp_path):
     assert sha == "s1" and report.endswith("tribunal-report-mr-4020-2026-08-07.md")
     assert calls[0][0][:3] == ("git", "-C", str(tmp_path / "pb-www"))
     assert calls[1][0][0] == "claude"
-    assert "/magi:magi-review !4020 --draft-findings" in calls[1][0]
+    assert "/magi:magi-review !4020 --advisory --draft-findings" in calls[1][0]
     assert calls[1][1] == str(tmp_path / "pb-www")
 
 
@@ -321,7 +321,7 @@ def test_the_magi_invocation_no_longer_suppresses_rebuttal(tmp_path):
      ).write_text("## Verdict\nSHIP\n")
     execute(_approved().item, _cfg(tmp_path), run_subprocess=fake_run)
     prompt = calls[1][0][2]
-    assert prompt == "/magi:magi-review !4020 --draft-findings"
+    assert prompt == "/magi:magi-review !4020 --advisory --draft-findings"
     assert "--no-rebuttal" not in prompt
 
 
@@ -388,11 +388,17 @@ def _approved_own_mr(number=1):
                       sha="s1", status="approved"))
 
 
-def test_an_authored_mr_review_never_stages_drafts(tmp_path):
+def test_an_authored_mr_review_is_advisory_and_never_stages_drafts(tmp_path):
     """Chandler, 2026-08-26: "we don't review our own MRs, we just fix the
     problems" -- a magi run on an authored MR (kind="mr": assessed OR
     post-feedback-chained) produces the report ONLY. `--draft-findings`
-    would stage self-addressed review comments on our own MR."""
+    would stage self-addressed review comments on our own MR.
+
+    2026-09-04 (#256, !4110): without `--advisory` the skill runs its FULL
+    fix loop -- it dispatched an implementer into the shared, read-only
+    magi checkout to fix eleven of its own fresh Warnings, and nothing in
+    this lane pushes or posts that work. One round, report only; the fix
+    is a separate, consented row."""
     calls = []
 
     def fake_run(cmd, **kw):
@@ -405,5 +411,5 @@ def test_an_authored_mr_review_never_stages_drafts(tmp_path):
      ).write_text("## Verdict\nSHIP\n")
     execute(_approved_own_mr().item, _cfg(tmp_path), run_subprocess=fake_run)
     prompt = calls[1][0][2]
-    assert prompt == "/magi:magi-review !4020"
+    assert prompt == "/magi:magi-review !4020 --advisory"
     assert "--draft-findings" not in prompt
