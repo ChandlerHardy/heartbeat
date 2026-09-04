@@ -32,7 +32,10 @@ def _cfg(tmp_path, **kw):
     base = dict(repos=("pb-www",), username=ME,
                 discord_webhook="https://discord.com/api/webhooks/x/y",
                 checkouts_root=str(tmp_path), claude_bin="claude",
-                runner_timeout=1800)
+                runner_timeout=1800,
+                # the fix-and-post contract these fixtures were written for;
+                # the hold tests below opt in explicitly
+                feedback_hold=False)
     base.update(kw)
     return WorksweepConfig(**base)
 
@@ -242,10 +245,12 @@ def test_feedback_prompt_never_resolves():
     assert "/resolve" not in src
     assert '"resolved"' not in src
     assert "resolved=" not in src
-    # and the tally has no room to count one: three outcomes, no fourth
+    # and the tally has no room to count one: the outcomes plus the hold
+    # bookkeeping (2026-09-04) -- none of which is a "resolved" count
     assert set(feedback.FeedbackResult.__dataclass_fields__) == {
         "iid", "waiting", "addressed", "replied", "noted", "escalated",
-        "replies", "result_sha", "already_answered", "mr_merged"}
+        "replies", "result_sha", "already_answered", "mr_merged",
+        "held", "hold_sha", "hold_dir", "hold_report"}
 
 
 def _unaddressed(payload, username=ME):
@@ -1919,3 +1924,232 @@ def test_the_gate_is_checked_before_the_run_is_reported_done(tmp_path,
                          run_glab=glab, now=lambda: RUN_START)
     assert sub.ran("claude")               # the run happened
     # ...and no result was returned to be completed
+
+
+# --- 2026-09-04: held for review ---------------------------------------------
+#
+# With feedback_hold on, the run commits locally and posts nothing; the row
+# parks with the diff + proposed replies, and Publish is a second executor
+# pass that pushes + posts + re-runs the effect checks.
+
+def _hold_cfg(tmp_path, **kw):
+    return _cfg(tmp_path, feedback_hold=True, **kw)
+
+
+def _still_reviewer(*tids):
+    """A threads payload where the reviewer still has the last word on every
+    thread -- what a HOLD must leave behind."""
+    return _payload(*[_thread(t) for t in tids])
+
+
+def test_a_hold_run_commits_locally_posts_nothing_and_parks(tmp_path, worktree):
+    sub = _Subprocess(worktree,
+                      report=_report(addressed=[{"thread": "t1", "sha": "deadbee",
+                                                 "tier": "substantive",
+                                                 "receipt": "vitest 30/30",
+                                                 "reply": "addressed in deadbee -- vitest 30/30"}],
+                                     replied=[{"thread": "t2", "reply": "yes, by design"}]),
+                      remote_shas=(PRE_SHA, PRE_SHA))     # origin never moves
+    glab = _Glab(_still_reviewer("t1", "t2"), _still_reviewer("t1", "t2"))
+    result = feedback.execute(_item(), _hold_cfg(tmp_path), run_subprocess=sub,
+                              run_glab=glab, now=lambda: RUN_START)
+    assert result.held is True
+    assert result.addressed == 1 and result.replied == 1
+    assert result.hold_sha == PRE_SHA                 # the local HEAD
+    assert result.hold_dir.endswith(os.path.join(".worktrees", "hold-pb-www-3997"))
+    report = json.loads(result.hold_report)
+    assert report["addressed"][0]["reply"] == "addressed in deadbee -- vitest 30/30"
+    assert report["addressed"][0]["receipt"] == "vitest 30/30"
+    assert report["replied"][0]["reply"] == "yes, by design"
+    assert report["base"] == PRE_SHA
+    # the commit is pinned in its own detached worktree, because the shared
+    # feedback worktree is wiped by the next claim's preflight
+    assert sub.ran("worktree", "add", "--detach")
+    # and the run was told it was holding: no push instruction reached it
+    prompt = [c for c in sub.calls if c[0] == "claude"][0][2]
+    assert "HELD FOR REVIEW" in prompt and "Do NOT push" in prompt
+    assert f"git push origin {BRANCH}" not in prompt
+    # no reply was posted: no glab POST happened at all
+    assert not any("POST" in c[0] for c in glab.calls)
+
+
+def test_a_hold_that_pushed_is_a_leak_and_fails(tmp_path, worktree):
+    sub = _Subprocess(worktree,
+                      report=_report(addressed=[{"thread": "t1", "sha": "deadbee"}]),
+                      remote_shas=(PRE_SHA, POST_SHA))      # the branch moved
+    glab = _Glab(_still_reviewer("t1"), _still_reviewer("t1"))
+    with pytest.raises(RunnerError) as e:
+        feedback.execute(_item(), _hold_cfg(tmp_path), run_subprocess=sub,
+                         run_glab=glab, now=lambda: RUN_START)
+    assert "HELD but origin moved" in str(e.value)
+    assert not sub.ran("worktree", "add", "--detach")
+
+
+def test_a_hold_that_posted_a_reply_fails(tmp_path, worktree):
+    sub = _Subprocess(worktree,
+                      report=_report(addressed=[{"thread": "t1", "sha": "deadbee"}]),
+                      remote_shas=(PRE_SHA, PRE_SHA))
+    # after the run, Chandler's note IS on the thread: the hold leaked words
+    glab = _Glab(_still_reviewer("t1"), _payload(_thread("t1", last=ME)))
+    with pytest.raises(RunnerError) as e:
+        feedback.execute(_item(), _hold_cfg(tmp_path), run_subprocess=sub,
+                         run_glab=glab, now=lambda: RUN_START)
+    assert "HELD but posted" in str(e.value)
+
+
+def test_a_hold_without_a_receipt_fails(tmp_path, worktree):
+    sub = _Subprocess(worktree,
+                      report=_report(addressed=[{"thread": "t1", "sha": "deadbee",
+                                                 "receipt": ""}]),
+                      remote_shas=(PRE_SHA, PRE_SHA))
+    glab = _Glab(_still_reviewer("t1"), _still_reviewer("t1"))
+    with pytest.raises(RunnerError) as e:
+        feedback.execute(_item(), _hold_cfg(tmp_path), run_subprocess=sub,
+                         run_glab=glab, now=lambda: RUN_START)
+    assert "without a test receipt" in str(e.value)
+
+
+def test_a_hold_with_only_escalations_is_still_a_question(tmp_path, worktree):
+    """Nothing handled -> NeedsInputError, exactly as in fix-and-post mode:
+    there is nothing to hold, only a question."""
+    sub = _Subprocess(worktree,
+                      report=_report(escalated=[{"thread": "t1", "reason": "judgment"}]),
+                      remote_shas=(PRE_SHA, PRE_SHA))
+    glab = _Glab(_still_reviewer("t1"), _still_reviewer("t1"))
+    with pytest.raises(NeedsInputError):
+        feedback.execute(_item(), _hold_cfg(tmp_path), run_subprocess=sub,
+                         run_glab=glab, now=lambda: RUN_START)
+
+
+class _PublishGlab(_Glab):
+    """A POST to the notes endpoint is recorded, not served as a round."""
+
+    def __call__(self, args, body=None):
+        if "-X" in args and "POST" in args:
+            self.calls.append((list(args), body))
+            return "{}"
+        return super().__call__(args, body)
+
+
+def _after_publish():
+    """The threads as GitLab shows them once Publish has posted: the reviewed
+    reply text is OUR last word on each, exactly as the hold report said."""
+    return json.dumps([
+        {"id": "t1", "notes": [_note("leyang", "q"),
+                               _note(ME, "addressed in deadbee -- vitest 30/30")]},
+        {"id": "t2", "notes": [_note("leyang", "q"),
+                               _note(ME, "yes, by design")]}])
+
+
+def _held_item(tmp_path, hold_action="publish", report=None):
+    hold_dir = tmp_path / ".worktrees" / "hold-pb-www-3997"
+    hold_dir.mkdir(parents=True, exist_ok=True)
+    if report is None:
+        report = {"base": PRE_SHA, "diffstat": " 1 file changed",
+                  "addressed": [{"thread": "t1", "sha": "deadbee",
+                                 "receipt": "vitest 30/30",
+                                 "reply": "addressed in deadbee -- vitest 30/30"}],
+                  "replied": [{"thread": "t2", "reply": "yes, by design"}],
+                  "noted": [], "escalated": []}
+    import dataclasses
+    return dataclasses.replace(_item(), hold_sha=PRE_SHA, hold_dir=str(hold_dir),
+                               hold_report=json.dumps(report),
+                               hold_action=hold_action)
+
+
+def test_publish_pushes_the_held_commit_posts_the_replies_and_completes(
+        tmp_path, worktree):
+    item = _held_item(tmp_path)
+    sub = _Subprocess(worktree, remote_shas=(PRE_SHA, POST_SHA))
+    # after Publish, each thread carries OUR note with the reviewed text
+    after = _after_publish()
+    glab = _PublishGlab(after)
+    result = feedback.execute(item, _hold_cfg(tmp_path), run_subprocess=sub,
+                              run_glab=glab, now=lambda: RUN_START)
+    assert result.held is False
+    assert result.addressed == 1 and result.replied == 1
+    assert result.result_sha == POST_SHA
+    # no claude run: Publish is a Python pass over reviewed content
+    assert not [c for c in sub.calls if c[0] == "claude"]
+    # pushed from the hold worktree, to the MR's branch only
+    push = sub.ran("push", "origin", f"HEAD:refs/heads/{BRANCH}")
+    assert push and push[0][2] == item.hold_dir
+    # each reply posted from a file, verbatim
+    posts = [c for c in glab.calls if "POST" in c[0]]
+    assert len(posts) == 2
+    assert all(any(a.startswith("body=@") for a in c[0]) for c in posts)
+    # and the hold is gone afterwards
+    assert sub.ran("worktree", "remove", "--force")
+
+
+def test_publish_folds_in_a_branch_that_moved_while_the_hold_waited(
+        tmp_path, worktree):
+    """keep-current merged master into the branch while the row sat parked:
+    Publish merges origin/<branch> in rather than forcing over it."""
+    item = _held_item(tmp_path)
+
+    class _MovedSub(_Subprocess):
+        def __call__(self, cmd, **kw):
+            # the "is origin/<branch> already in HEAD?" probe is the one with
+            # origin first and HEAD last; _verify's ancestry check has the
+            # claimed sha first and must keep passing
+            if (cmd[-3:-1] == ["--is-ancestor", f"origin/{BRANCH}"]
+                    and cmd[-1] == "HEAD"):
+                self.calls.append(list(cmd))
+                return _Proc(1)          # origin/<branch> is NOT behind HEAD
+            return super().__call__(cmd, **kw)
+
+    sub = _MovedSub(worktree, remote_shas=(PRE_SHA, POST_SHA))
+    after = _after_publish()
+    feedback.execute(item, _hold_cfg(tmp_path), run_subprocess=sub,
+                     run_glab=_PublishGlab(after), now=lambda: RUN_START)
+    assert sub.ran("merge", "--no-edit", f"origin/{BRANCH}")
+
+
+def test_a_publish_whose_hold_is_gone_from_disk_fails_clearly(tmp_path, worktree):
+    item = _held_item(tmp_path)
+    os.rmdir(item.hold_dir)
+    sub = _Subprocess(worktree)
+    with pytest.raises(RunnerError) as e:
+        feedback.execute(item, _hold_cfg(tmp_path), run_subprocess=sub,
+                         run_glab=_PublishGlab("[]"), now=lambda: RUN_START)
+    assert "gone from disk" in str(e.value)
+    assert "Discard" in str(e.value)
+
+
+def test_a_plain_reapprove_drops_the_stale_hold_and_reruns(tmp_path, worktree):
+    """A ✅ on a held row (not Publish) means "run it again": the old hold is
+    dropped first so it cannot be published later by mistake."""
+    item = _held_item(tmp_path, hold_action="")
+    sub = _Subprocess(worktree, report=_report(replied=["t1"]),
+                      remote_shas=(PRE_SHA, PRE_SHA))
+    glab = _Glab(_payload(_thread("t1")), _payload(_thread("t1", last=ME)))
+    feedback.execute(item, _cfg(tmp_path), run_subprocess=sub, run_glab=glab,
+                     now=lambda: RUN_START)
+    removes = sub.ran("worktree", "remove", "--force")
+    assert removes and removes[0][2] == item.hold_dir
+    assert [c for c in sub.calls if c[0] == "claude"]     # and it ran
+
+
+def test_gc_drops_holds_of_rows_no_longer_waiting(tmp_path):
+    import dataclasses
+    from worksweep.models import QueueRecord
+    live = tmp_path / "hold-live"; live.mkdir()
+    dead = tmp_path / "hold-dead"; dead.mkdir()
+    queued = tmp_path / "hold-queued"; queued.mkdir()
+    recs = [
+        QueueRecord(1, dataclasses.replace(_item(), status="needs-input",
+                                           hold_sha="a", hold_dir=str(live)), "t", "t"),
+        QueueRecord(2, dataclasses.replace(_item(), status="done",
+                                           done_reason="discarded",
+                                           hold_sha="b", hold_dir=str(dead)), "t", "t"),
+        QueueRecord(3, dataclasses.replace(_item(), status="approved",
+                                           hold_action="publish",
+                                           hold_sha="c", hold_dir=str(queued)), "t", "t"),
+    ]
+    calls = []
+    def sub(cmd, **kw):
+        calls.append(list(cmd)); return _Proc(0)
+    dropped = feedback.gc_holds(recs, _cfg(tmp_path), sub)
+    assert dropped == [2]
+    assert [c for c in calls if "remove" in c][0][2] == str(dead)

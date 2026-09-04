@@ -892,8 +892,26 @@ def _execute_address_feedback(item, cfg):
     it did.
     """
     from . import feedback
-    return feedback.execute(item, cfg, run_subprocess=subprocess.run,
-                            run_glab=_run_glab_api, now=_now)
+    # Publish (2026-09-04) also syncs the dev box the MR advertises, so the
+    # ssh/http edges and the probed boxes ride along. They are only used on
+    # the publish route; a fix-and-post or hold run never touches them, and
+    # the probe is skipped entirely unless the row is being published.
+    publishing = (getattr(item, "hold_action", "") == "publish"
+                  and bool(getattr(item, "hold_sha", "")))
+    return feedback.execute(
+        item, cfg, run_subprocess=subprocess.run, run_glab=_run_glab_api,
+        now=_now,
+        run_ssh=(lambda host, command: run_ssh(
+            host, command, timeout=_SSH_SYNC_TIMEOUT_SECONDS))
+        if publishing else None,
+        http_get=http_status if publishing else None,
+        boxes=_implement_boxes(cfg) if publishing else ())
+
+
+def _gc_holds(records, cfg):
+    """Drop the hold worktrees of rows no longer waiting on a review."""
+    from . import feedback
+    return feedback.gc_holds(records, cfg, subprocess.run)
 
 
 def _dry_run_address_feedback(item, cfg):
@@ -1033,6 +1051,8 @@ def main(argv=None) -> int:
                                          else _execute_address_feedback),
             "execute_consult": (_dry_run_consult if args.dry_run
                                 else _execute_consult),
+            # Held-fix worktree hygiene; a --dry-run touches no filesystem.
+            "gc_holds": (lambda records, c: []) if args.dry_run else _gc_holds,
             # --dry-run never saves, so it never needs to exclude anyone.
             "queue_lock": (null_lock if args.dry_run
                            else (lambda: write_lock(_queue_path()))),

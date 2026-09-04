@@ -3694,3 +3694,71 @@ def test_consult_routes_demand_the_csrf_header(serve_queue):
                              {"Content-Type": "application/json"})
     assert status == 403
     assert load_queue(qpath)[0].item.consult == ""
+
+
+# --- 2026-09-04: held for review (Publish / Discard) --------------------------
+
+_HOLD_REPORT = json.dumps({
+    "base": "b0", "diffstat": " www/x.js | 12 +++---",
+    "addressed": [{"thread": "t1abcdef0123", "sha": "deadbee",
+                   "receipt": "vitest 30/30",
+                   "reply": "addressed in deadbee -- vitest 30/30"}],
+    "replied": [{"thread": "t2abcdef0123", "reply": "yes, <by design>"}],
+    "noted": [], "escalated": ["leyang: judgment call"]})
+
+
+def _held_rec(n=7, **kw):
+    return _parked_rec(n, error_summary="Held for review — 1 fix(es)",
+                       hold_sha="deadbeefcafe0123", hold_dir="/wt/hold",
+                       hold_report=_HOLD_REPORT, **kw)
+
+
+def test_a_held_row_shows_the_diff_the_replies_and_publish_discard(serve_queue):
+    """The whole point of the hold: the human sees EXACTLY what Publish will
+    post -- diffstat, each reply with its receipt -- before anything reaches
+    GitLab. Reply text is tenant/reviewer-shaped and must render escaped."""
+    s, _ = serve_queue([_held_rec()])
+    html = _markup(s.request("GET", "/")[2].decode("utf-8"))
+    assert "held commit deadbeefca" in html
+    assert "www/x.js | 12" in html
+    assert "vitest 30/30" in html
+    assert "addressed in deadbee" in html
+    assert "yes, &lt;by design&gt;" in html and "<by design>" not in html
+    assert "judgment call" in html
+    assert 'data-publish="7"' in html and 'data-discard-hold="7"' in html
+    # a held row is not offered the consult button: the review IS the answer
+    assert 'data-consult="7"' not in html
+
+
+def test_post_publish_queues_the_held_fix(serve_queue):
+    s, qpath = serve_queue([_held_rec()])
+    status, _, body = _consult_post(s, "/publish", 7)
+    assert status == 200 and json.loads(body)["publish"] == "queued"
+    row = load_queue(qpath)[0].item
+    assert row.status == "approved" and row.hold_action == "publish"
+    assert row.hold_sha == "deadbeefcafe0123"
+
+
+def test_post_publish_refuses_a_row_that_holds_nothing(serve_queue):
+    s, qpath = serve_queue([_parked_rec()])
+    status, _, body = _consult_post(s, "/publish", 7)
+    assert status == 400 and json.loads(body)["ok"] is False
+    assert load_queue(qpath)[0].item.status == "needs-input"
+
+
+def test_post_discard_hold_retires_the_row(serve_queue):
+    s, qpath = serve_queue([_held_rec()])
+    status, _, body = _consult_post(s, "/discard-hold", 7)
+    assert status == 200 and json.loads(body)["discarded"] is True
+    row = load_queue(qpath)[0].item
+    assert row.status == "done" and row.done_reason == "discarded"
+    assert row.hold_report == ""
+
+
+def test_publish_and_discard_need_the_csrf_header(serve_queue):
+    s, qpath = serve_queue([_held_rec()])
+    for path in ("/publish", "/discard-hold"):
+        status, _, _ = s.request("POST", path, json.dumps({"number": 7}),
+                                 {"Content-Type": "application/json"})
+        assert status == 403, path
+    assert load_queue(qpath)[0].item.status == "needs-input"

@@ -415,6 +415,18 @@ class WorkItem:
     # becomes the ruling). Empty means no ruling: the executor re-derives
     # everything itself, exactly as before this field existed.
     ruling: str = ""
+    # --- Held for review (2026-09-04) -- address-feedback rows only ----------
+    # With runner.feedback_hold on, a feedback run commits LOCALLY and posts
+    # nothing: the row parks needs-input carrying exactly what it would
+    # publish, and nothing reaches GitLab until the operator's Publish
+    # (dashboard) pushes the commit and posts the replies; Discard drops it.
+    hold_sha: str = ""        # the local commit the held fix landed at
+    hold_dir: str = ""        # detached worktree pinning that commit
+    hold_report: str = ""     # JSON: the run's report + diffstat, rendered
+                              # on the dashboard for the review
+    hold_action: str = ""     # "" | "publish" -- set by the dashboard's
+                              # Publish; the runner's next feedback pass then
+                              # publishes instead of re-running the claude pass
 
 
 @dataclass(frozen=True)

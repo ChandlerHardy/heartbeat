@@ -39,6 +39,11 @@ class WorksweepConfig:
     # round, the dev-box ship gate), so the executor gets its own budget and
     # its own reap window (feedback_timeout + grace), like implement and magi.
     feedback_timeout: int = 3600
+    # 2026-09-04 (hold for review): when true, a feedback run commits locally
+    # and posts nothing; the row parks needs-input with the diff + proposed
+    # replies on the dashboard, and Publish/Discard is the operator's call. A
+    # reply under Chandler's name cannot be unsent, so the default is to hold.
+    feedback_hold: bool = True
     # 2026-08-31 domain guard: where the domain-check registry (domains.json)
     # lives on THIS machine. "" -> models.DEFAULT_DOMAIN_REGISTRY (the
     # ferdinand checkout). The mini has no ferdinand checkout, so its config
@@ -121,6 +126,10 @@ def load_config(path: str | None = None) -> WorksweepConfig:
         raise RuntimeError(
             f"config runner.implement_timeout must be an integer, "
             f"got {implement_raw!r}")
+    hold_raw = rn.get("feedback_hold", True)
+    if not isinstance(hold_raw, bool):
+        raise RuntimeError(
+            f"config runner.feedback_hold must be a boolean, got {hold_raw!r}")
     curate_raw = rn.get("curate", True)
     if not isinstance(curate_raw, bool):
         raise RuntimeError(
@@ -159,6 +168,7 @@ def load_config(path: str | None = None) -> WorksweepConfig:
         implement_timeout=implement_timeout,
         magi_timeout=magi_timeout,
         feedback_timeout=feedback_timeout,
+        feedback_hold=hold_raw,
         domain_registry_path=str(rn.get("domain_registry_path", "") or ""),
         pipeline_resume_attempts=int(
             rn.get("pipeline_resume_attempts", 3) or 3),

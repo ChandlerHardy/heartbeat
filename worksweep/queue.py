@@ -378,6 +378,58 @@ def request_consult(records: List[QueueRecord], number: int,
     return out, outcome
 
 
+def publish_hold(records: List[QueueRecord], number: int,
+                 now: str) -> Tuple[List[QueueRecord], str]:
+    """Publish a held feedback fix: needs-input -> approved with
+    hold_action="publish", so the runner's next feedback pass pushes the held
+    commit and posts the held replies instead of re-running the claude pass.
+
+    Outcomes: "queued", "not-held" (the row is not a parked hold), "not-found".
+    Lives here, beside accept_rec, for the same reason: a status flip belongs
+    to the queue, and the dashboard writes no status of its own.
+    """
+    out: List[QueueRecord] = []
+    outcome = "not-found"
+    for r in records:
+        if r.number == number:
+            if r.item.status == _NEEDS_INPUT and r.item.hold_sha:
+                out.append(QueueRecord(
+                    number=r.number, first_seen=r.first_seen, last_seen=now,
+                    item=dataclasses.replace(r.item, status="approved",
+                                             hold_action="publish",
+                                             error_summary="")))
+                outcome = "queued"
+            else:
+                out.append(r)
+                outcome = "not-held"
+        else:
+            out.append(r)
+    return out, outcome
+
+
+def discard_hold(records: List[QueueRecord], number: int,
+                 now: str) -> Tuple[List[QueueRecord], bool]:
+    """Drop a held feedback fix without publishing: needs-input -> done,
+    done_reason "discarded". The hold worktree is left for the runner's next
+    feedback pass to garbage-collect (the dashboard touches no filesystem);
+    hold_sha/hold_dir stay on the record until then so the GC can find it.
+    """
+    out: List[QueueRecord] = []
+    discarded = False
+    for r in records:
+        if (r.number == number and r.item.status == _NEEDS_INPUT
+                and r.item.hold_sha):
+            out.append(QueueRecord(
+                number=r.number, first_seen=r.first_seen, last_seen=now,
+                item=dataclasses.replace(r.item, status="done",
+                                         done_reason="discarded",
+                                         hold_action="", hold_report="")))
+            discarded = True
+        else:
+            out.append(r)
+    return out, discarded
+
+
 def accept_rec(records: List[QueueRecord], number: int,
                now: str) -> Tuple[List[QueueRecord], Optional[QueueRecord]]:
     """Accept a consult recommendation: needs-input -> approved, and the rec
@@ -465,7 +517,14 @@ def reconcile(existing: List[QueueRecord], fresh: List[WorkItem],
                                          # the PARKED question, so it rides
                                          # with the hold, not with the sweep
                                          consult=prior.item.consult,
-                                         consult_rec=prior.item.consult_rec)
+                                         consult_rec=prior.item.consult_rec,
+                                         # and so does a held fix: the commit
+                                         # and its proposed replies belong to
+                                         # the parked review, not the sweep
+                                         hold_sha=prior.item.hold_sha,
+                                         hold_dir=prior.item.hold_dir,
+                                         hold_report=prior.item.hold_report,
+                                         hold_action=prior.item.hold_action)
         elif ps == "error":
             merged = dataclasses.replace(it, status="proposed")
         elif ps == "done":
@@ -488,7 +547,15 @@ def reconcile(existing: List[QueueRecord], fresh: List[WorkItem],
                                          # WITH content: it must reach the
                                          # executor even if a sweep runs
                                          # between Accept and the claim
-                                         ruling=prior.item.ruling)
+                                         ruling=prior.item.ruling,
+                                         # a Publish is consent WITH content
+                                         # too: the held commit and replies
+                                         # must survive a sweep between the
+                                         # button and the claim
+                                         hold_sha=prior.item.hold_sha,
+                                         hold_dir=prior.item.hold_dir,
+                                         hold_report=prior.item.hold_report,
+                                         hold_action=prior.item.hold_action)
         else:
             # Fresh wins: the ask changed (the sha moved, or for a why-keyed
             # executor the thread ask did), so the queue's view is stale.
