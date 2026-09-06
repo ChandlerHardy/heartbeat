@@ -1148,3 +1148,33 @@ def test_a_failed_reviewed_state_read_never_takes_the_sweep_down():
         raise OSError("sidecar unreadable")
     deps["reviewed_state"] = boom
     assert run_sweep(_cfg(), deps) == 0
+
+
+def test_sweep_posts_a_loud_auth_alert_when_the_curator_llm_is_logged_out():
+    """2026-09-05: seven sweeps ran with an expired OAuth session and the only
+    trace was a stderr line. The digest still goes out (raw fallback), and a
+    separate 🔴 alert names the failure and the fix."""
+    from worksweep.curator import AuthError
+    posts = []
+    deps = _deps(posts, _gql(review_nodes=[_node()]))
+    def logged_out(prompt):
+        raise AuthError("curator LLM exited 1: Failed to authenticate: OAuth session expired and could not be refreshed")
+    deps["llm"] = logged_out
+    rc = run_sweep(_cfg(), deps)
+    assert rc == 0
+    texts = [p for p in posts if isinstance(p, str)]
+    alerts = [t for t in texts if t.startswith("🔴")]
+    assert len(alerts) == 1
+    assert "OAuth session expired" in alerts[0] and "/login" in alerts[0]
+    # the digest itself still posted (raw fallback), so the alert is additive
+    assert any("review" in t.lower() and not t.startswith("🔴") for t in texts)
+
+
+def test_sweep_stays_quiet_about_auth_on_an_ordinary_curator_failure():
+    posts = []
+    deps = _deps(posts, _gql(review_nodes=[_node()]))
+    def boom(prompt):
+        raise RuntimeError("claude timed out")
+    deps["llm"] = boom
+    assert run_sweep(_cfg(), deps) == 0
+    assert not [p for p in posts if isinstance(p, str) and p.startswith("🔴")]
