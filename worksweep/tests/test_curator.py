@@ -530,3 +530,64 @@ def test_prompt_rule_2_names_both_feedback_executors():
     assert "address-feedback" in prompt
     assert "✅ to address" in prompt
     assert "ci_red" in prompt
+
+
+# --- auth failure is a first-class outcome (2026-09-05) ----------------------
+#
+# The mini's OAuth session expired on 2026-09-04 ~16:00; for 31 hours every sweep's
+# run_llm exited 1 with "Failed to authenticate: OAuth session expired and could not
+# be refreshed", curate() printed "curator LLM call failed" to stderr, fell back to
+# the raw digest, and nobody was told. An expired login stops every unattended lane
+# on that box, so it must be classified and surfaced, not swallowed.
+
+def test_make_run_llm_raises_auth_error_on_the_oauth_signature():
+    import subprocess
+    from worksweep.curator import make_run_llm, AuthError
+    def fake_run(cmd, **kw):
+        return subprocess.CompletedProcess(
+            cmd, 1, stdout="", stderr="Failed to authenticate: OAuth session expired and could not be refreshed\n")
+    run = make_run_llm(_Cfg(), run_subprocess=fake_run)
+    with pytest.raises(AuthError):
+        run("prompt")
+
+
+def test_make_run_llm_raises_auth_error_on_not_logged_in():
+    import subprocess
+    from worksweep.curator import make_run_llm, AuthError
+    def fake_run(cmd, **kw):
+        return subprocess.CompletedProcess(cmd, 1, stdout="Not logged in · Please run /login\n", stderr="")
+    with pytest.raises(AuthError):
+        make_run_llm(_Cfg(), run_subprocess=fake_run)("prompt")
+
+
+def test_make_run_llm_plain_failure_is_not_an_auth_error():
+    import subprocess
+    from worksweep.curator import make_run_llm, AuthError
+    def fake_run(cmd, **kw):
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="fetch failed\n")
+    with pytest.raises(RuntimeError) as exc:
+        make_run_llm(_Cfg(), run_subprocess=fake_run)("prompt")
+    assert not isinstance(exc.value, AuthError)
+
+
+def test_curate_reports_an_auth_failure_through_the_callback_and_still_returns_none():
+    from worksweep.curator import AuthError
+    recs = _queue()
+    seen = []
+    def boom(prompt):
+        raise AuthError("curator LLM exited 1: Not logged in · Please run /login")
+    assert curate(recs, NOW, run_llm=boom, on_auth_failure=seen.append) is None
+    assert len(seen) == 1 and "Not logged in" in seen[0]
+
+
+def test_curate_does_not_invoke_the_auth_callback_for_other_failures():
+    recs = _queue()
+    seen = []
+    def boom(prompt):
+        raise RuntimeError("claude timed out")
+    assert curate(recs, NOW, run_llm=boom, on_auth_failure=seen.append) is None
+    assert seen == []
+
+
+class _Cfg:
+    claude_bin = "claude"

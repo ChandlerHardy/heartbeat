@@ -539,6 +539,18 @@ def _retained_feedback(prior: WorkItem) -> WorkItem:
     return dataclasses.replace(prior, why=why)
 
 
+def _auth_alert(err: str) -> str:
+    """The sweep's own 🔴 when `claude -p` is logged out on this box. The
+    hourly claude-auth-check sentinel is the primary alarm; this is the
+    in-band one, so the sweep that hit it never reads as merely 'uncurated'
+    (2026-09-04: seven sweeps, 31 hours, zero alerts)."""
+    tail = (err or "").strip().splitlines()[-1][:160] if (err or "").strip() else ""
+    return ("🔴 **Claude auth is DOWN on this box** — the curator's `claude -p` was refused: "
+            f"`{tail}`. Every unattended lane here (sweeps, implement, address-feedback, "
+            "magi-review, consult) fails until a human runs `claude` → `/login` in the "
+            "mini's GUI session (screen share, not ssh; a laptop login does not propagate).")
+
+
 def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
     """One sweep under the message contract: digest, 🔍 heartbeat, or ⚠️ error —
     never silence. All I/O arrives via `deps` so tests stay hermetic."""
@@ -776,7 +788,9 @@ def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
             run_llm = deps.get("llm")
             if cfg.curate and run_llm is not None:
                 curated = curator.curate(actionable, deps["now"](), run_llm,
-                                         preamble=slot_line)
+                                         preamble=slot_line,
+                                         on_auth_failure=lambda err: _post_all([
+                                             _auth_alert(err)]))
             if curated is not None:
                 curated = curator.linkify(curated, actionable)  # deterministic, post-validation
                 n, m = curator.partition_counts(actionable)

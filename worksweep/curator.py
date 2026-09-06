@@ -289,7 +289,9 @@ def validate(output: str, records: List[QueueRecord]) -> bool:
 
 def curate(records: List[QueueRecord], now: str,
           run_llm: Callable[[str], str],
-          preamble: Optional[str] = None) -> Optional[str]:
+          preamble: Optional[str] = None,
+          on_auth_failure: Optional[Callable[[str], None]] = None
+          ) -> Optional[str]:
     """Ask `run_llm` to curate `records` into a Discord-ready briefing.
 
     Never raises. Returns None (fall back to the raw digest) when: there are
@@ -299,7 +301,12 @@ def curate(records: List[QueueRecord], now: str,
     variance (a hallucinated number), and a fresh sample tends to pass.
 
     `preamble` (M4 Task F) is forwarded to build_prompt as dev-slot context
-    -- see build_prompt's docstring."""
+    -- see build_prompt's docstring.
+
+    `on_auth_failure` (2026-09-05) is called with the error text when run_llm
+    raises AuthError -- the box is logged out and EVERY claude-backed lane on
+    it is dead, which is a different thing from "curation failed, use the
+    raw digest". The sweep posts a loud alert from it. Still returns None."""
     if not records:
         return None
     try:
@@ -320,6 +327,11 @@ def curate(records: List[QueueRecord], now: str,
     except Exception as e:
         print(f"worksweep: curator LLM call failed: "
               f"{type(e).__name__}: {e}", file=sys.stderr)
+        if isinstance(e, AuthError) and on_auth_failure is not None:
+            try:
+                on_auth_failure(str(e))
+            except Exception as e2:  # the alert must never break the sweep
+                print(f"worksweep: auth-failure alert failed: {e2}", file=sys.stderr)
         return None
 
 
@@ -343,6 +355,25 @@ def partition_counts(records: List[QueueRecord]) -> Tuple[int, int]:
     return n, len(records) - n
 
 
+class AuthError(RuntimeError):
+    """`claude -p` refused because the box is logged out (expired OAuth, no
+    credential). Distinct from a timeout or a model error: nothing on this
+    box that calls claude will work until a human runs /login in the GUI
+    session, so the caller must SAY SO, not fall back quietly (2026-09-04:
+    31 hours, seven sweeps, one stderr line each)."""
+
+
+# What claude -p prints when the credential is gone or unrefreshable. Matched
+# against stdout+stderr because the CLI has put it on either.
+_AUTH_FAILURE_RE = re.compile(
+    r"Not logged in|OAuth session expired|Failed to authenticate"
+    r"|Please run /login|Invalid API key|authentication_error", re.I)
+
+
+def is_auth_failure(text: str) -> bool:
+    return bool(_AUTH_FAILURE_RE.search(text or ""))
+
+
 def make_run_llm(cfg, run_subprocess: Callable = subprocess.run
                  ) -> Callable[[str], str]:
     """Production run_llm edge: `<claude_bin> -p <prompt>` run from the
@@ -359,9 +390,13 @@ def make_run_llm(cfg, run_subprocess: Callable = subprocess.run
         except subprocess.TimeoutExpired:
             raise RuntimeError(
                 f"curator LLM exceeded {_LLM_TIMEOUT_SECONDS}s")
-        if proc.returncode != 0:
+        combined = (proc.stderr or "") + "\n" + (proc.stdout or "")
+        if proc.returncode != 0 or is_auth_failure(combined):
             tail = "\n".join((proc.stderr or proc.stdout or "").splitlines()[-15:])
-            raise RuntimeError(f"curator LLM exited {proc.returncode}: {tail}")
+            msg = f"curator LLM exited {proc.returncode}: {tail}"
+            if is_auth_failure(combined):
+                raise AuthError(msg)
+            raise RuntimeError(msg)
         return proc.stdout
     return _run
 
