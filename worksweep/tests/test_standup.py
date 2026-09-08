@@ -127,20 +127,34 @@ def test_facts_text_puts_work_under_its_mr_and_marks_freshening_only_branches_pa
     assert "commented on | Apply timezone" in text
 
 
+def test_facts_text_names_a_stacked_mr_and_its_parent():
+    f = _facts()
+    f.mrs.append(dict(_mr(4109, "Draft: fix(#1814): default dashboard CAS", branch="fix/1814", draft=True), repo="pb-www",
+                      target_branch="fix/1650"))
+    f.work_pushes.append(("2026-09-03", "fix/1814", "fix(#1814): follow the identity move"))
+    text = build_facts_text(f)
+    assert "!4109 | in progress (draft)" in text and "STACKED on !4085 (un-drafts when that merges)" in text
+
+
 def test_prompt_carries_the_format_rules_and_the_facts():
     p = build_prompt(_facts())
     assert p.startswith("Chandler:") is False and "Chandler:" in p
-    for word in ("merged", "in review", "parked awaiting", "freshening"):
+    for word in ("merged", "in review", "parked", "freshening"):
         assert word in p
+    # 2026-09-08 format: plain-English titles, issue after the title, MR after the status
+    assert "<Plain-English title> (#issue) - <status> (!MR)" in p
+    assert "never internal jargon" in p and "conventional-commit" in p
     assert "!4085" in p
     assert "NEVER" in p or "never" in p
 
 
 # --- validate --------------------------------------------------------------
 
-GOOD = ("Chandler:\nsafe_div production fatals (#1828) - merged\n!4103 merged Sep 3.\n"
-        "Demo yard-sheet CAS (#1650) - in review\n!4085 round 3 addressed.\n"
-        "Yard sheets ranch data (#1599) - parked awaiting pb-api endpoints\n"
+GOOD = ("Chandler:\nsafe_div no longer fatals on non-numeric input (#1828) - merged (!4103)\n"
+        "Closes out the 28 August production fatals.\n"
+        "Demo yard sheets can't be created twice (#1650) - in review (!4085)\n"
+        "Addressed feedback: randywu round 3 on the merge and teardown tests.\n"
+        "Yard sheets ranch data (#1599) - parked (draft !3985), kept current with master, awaiting pb-api endpoints\n"
         "Reviews: timezone signup MR.\n")
 
 
@@ -171,17 +185,19 @@ def test_validate_rejects_invented_mr_or_issue_numbers():
 def test_validate_rejects_missing_header_urls_and_a_missing_merged_mr():
     assert not validate(GOOD.replace("Chandler:\n", ""), _facts())
     assert not validate(GOOD + "see https://gitlab.com/x\n", _facts())
-    assert not validate(GOOD.replace("!4103 merged Sep 3.\n", ""), _facts())
+    assert not validate(GOOD.replace(" (!4103)", ""), _facts())
     assert not validate("", _facts())
 
 
 # --- fallback + posting ----------------------------------------------------
 
-def test_fallback_is_deterministic_and_passes_validation():
+def test_fallback_is_deterministic_in_the_agreed_shape_and_passes_validation():
     out = render_fallback(_facts())
     assert out.startswith("Chandler:")
-    assert "!4103" in out and "merged" in out
-    assert "parked awaiting" in out
+    assert "safe_div weak-casts (#1828) - merged (!4103, 2026-09-03)" in out
+    assert "CAS uniqueness (#1650) - in review (!4085)" in out
+    assert "parked (drafts !3985), kept current with master" in out
+    assert "Reviews: Apply timezone" in out
     assert validate(out, _facts())
 
 
