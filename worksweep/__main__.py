@@ -988,10 +988,12 @@ def _dry_run_implement(item, cfg, boxes):
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="worksweep")
-    ap.add_argument("command", nargs="?", choices=["intake", "run", "dashboard"],
+    ap.add_argument("command", nargs="?", choices=["intake", "run", "dashboard", "standup"],
                     help="`intake` polls Discord for approval replies; "
                          "`run` executes one approved magi-review item; "
-                         "`dashboard` serves the queue view + approval buttons")
+                         "`dashboard` serves the queue view + approval buttons; "
+                         "`standup` posts the Monday standup notes from the "
+                         "week's GitLab activity")
     ap.add_argument("--dry-run", action="store_true", help="print to stdout, no Discord")
     ap.add_argument("--discord", action="store_true", help="post digest to Discord")
     ap.add_argument("--port", type=int, default=8787,
@@ -999,6 +1001,8 @@ def main(argv=None) -> int:
     ap.add_argument("--bind", default="auto",
                     help="dashboard bind address; `auto` resolves the Tailscale "
                          "IP and falls back to 127.0.0.1")
+    ap.add_argument("--days", type=int, default=7,
+                    help="standup: window in days (default 7)")
     ap.add_argument("--families", default="all",
                     help="run: comma list of pass families to serve "
                          "(short,feedback,consult,implement; default all). "
@@ -1021,6 +1025,20 @@ def main(argv=None) -> int:
 
     if args.command == "intake":
         return _run_intake(cfg)
+
+    if args.command == "standup":
+        from . import standup as _standup
+        from .collectors import _run_glab
+        after = (datetime.datetime.now(datetime.timezone.utc)
+                 - datetime.timedelta(days=args.days)).strftime("%Y-%m-%d")
+        dry = args.dry_run or not args.discord
+        deps = {
+            "collect": lambda: _standup.collect(_run_glab, cfg.username, cfg.repos, after),
+            "llm": curator.make_run_llm(cfg),
+            "post": ((lambda hook, content: print(content)) if dry else _post_discord),
+            "now": _now,
+        }
+        return _standup.run_standup(cfg, deps)
 
     if args.command == "dashboard":
         from . import dashboard as _dashboard
