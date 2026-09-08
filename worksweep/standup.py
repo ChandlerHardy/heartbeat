@@ -138,8 +138,14 @@ def build_facts_text(facts: Facts) -> str:
         merged = f", merged {m['merged_at'][:10]}" if m.get("merged_at") else ""
         reviewers = ",".join(r.get("username", "") for r in m.get("reviewers") or []) or "none"
         status = _status_word(m, facts)
+        target = m.get("target_branch") or ""
+        stacked = ""
+        if target and target not in ("master", "main"):
+            parent = by_branch.get(target)
+            stacked = (f" | STACKED on !{parent['iid']} (un-drafts when that merges)"
+                       if parent else f" | STACKED on branch {target}")
         lines.append(f"- {m['repo']} !{m['iid']} | {status}{merged} | {m.get('title', '')} "
-                     f"| branch {m.get('source_branch', '')} | reviewers: {reviewers}")
+                     f"| branch {m.get('source_branch', '')} | reviewers: {reviewers}{stacked}")
         for day, ref, title in facts.work_pushes:
             if ref == (m.get("source_branch") or ""):
                 lines.append(f"    work {day}: {title}")
@@ -160,22 +166,32 @@ def build_facts_text(facts: Facts) -> str:
 def build_prompt(facts: Facts) -> str:
     return f"""Write Chandler's Monday standup notes from the FACTS below. Output ONLY the notes, nothing else.
 
-FORMAT (exact):
+FORMAT (exact — one item per line, narrative lines directly under the item they explain):
 Chandler:
-<Item title> - <status>
-<optional 1-3 line narrative: what changed / feedback addressed / why it mattered>
-<Item title> - <status>
+<Plain-English title> (#issue) - <status> (!MR)
+<0-3 lines: what changed and why it mattered; "Addressed feedback:" + what, when a listed work commit answers a review>
+<Plain-English title> (#issue) - <status> (!MR)
 ...
+<Parked stack title> (#a/#b/#c) - parked (drafts !N–!M), kept current with master, awaiting <blocker>
 Reviews: <one line: approvals + review passes on others' MRs, or "none">
-Parked/blocked: <one line naming what is parked and on what, if anything>
+
+EXAMPLE of the voice and shape (Chandler's own, 2026-09-08 — copy the SHAPE, not the content):
+Health growth metrics served from cache (#1705) - merged (!4066)
+Hardening done before merge: cache hits and legacy fallbacks now agree on weight units and deads variant, and the bare deads row is only trusted when the Yardsheet display matches the ADG model.
+Demo yard-sheet uniqueness (#1650) - in review (!4085)
+Addressed feedback: deterministic ids were guessable cross-tenant, so the derivation is now HMAC-salted; duplicate-key races now converge instead of failing; publish skips/failures surface end-to-end in the admin UI.
+Add-Cost removeEvent tri-state (#1607) - closed (!4083), pending architecture discussion
+Leif flagged that the Mongo read-option work belongs behind pb-api rather than in pb-www; paused per his ask, consolidated the reasoning into #1820, and we'll re-cut after that discussion.
+Ranch data point stack (#1588/#1590/#1597/#1598/#1599) - parked (drafts !3981–!3985), kept current with master, awaiting pb-api ranch endpoints
 
 RULES:
-- Status vocabulary ONLY: merged, in review, in progress (draft), parked awaiting <blocker>, closed !N — superseded by !M.
+- TITLES are plain English for a teammate who has not read the MR: what the change does or fixes, 4-9 words. Never a conventional-commit title, never file names, never internal jargon (no "CAS", "seam", "mutant", "wiring guard", "deterministic-_id"); say the outcome instead ("duplicate demo sheets can't be created twice", "safe_div no longer fatals on non-numeric input"). Put the issue number in parentheses after the title and the MR number in parentheses after the status.
+- Status vocabulary ONLY: merged, in review, in progress (draft), parked, closed. EVERY item line ends with its MR number in parentheses. Qualify inline when it matters: "in progress (draft !4109, stacked on !4085 — un-drafts when that merges)", "closed (!4083), pending architecture discussion".
 - Merged MRs lead. Every merged MR in the facts MUST appear.
+- Narrative lines earn their place: a merged item gets one line on why it mattered or what hardening happened before merge; "Addressed feedback:" appears ONLY when a listed `work` commit answers a review, and says what changed in plain words. Skip the narrative when there is nothing real to say.
 - Work items only. Never mention worksweep, heartbeat, infra, or personal tooling.
-- The facts already classify pushes. Freshening / stack-rebase merges are NOT work: a branch whose only activity is freshening is PARKED — say so with its blocker (ranch-data drafts are parked awaiting pb-api endpoints), never as "updates" or "progress". At most ONE line for maintenance overall, or none.
-- "Feedback addressed" is earned ONLY by a listed `work` commit that responds to review — never by the MR merely having reviewer activity.
-- Cite MR numbers as !NNNN and issues as #NNNN exactly as given. NEVER invent a number, a reviewer, or a detail that is not in the facts. No URLs, no markdown links, no emojis, no section headers.
+- The facts already classify pushes. Freshening / stack-rebase merges are NOT work: a branch whose only activity is freshening is parked — say so with its blocker (ranch-data drafts await pb-api ranch endpoints) in ONE stack line, never as "updates" or "progress".
+- Cite MR numbers as !NNNN and issues as #NNNN exactly as given. NEVER invent a number, a reviewer, a person, or a detail that is not in the facts. No URLs, no markdown links, no emojis, no section headers, no bullets.
 - Keep the whole thing under 1800 characters. Plain, specific, no fluff.
 
 FACTS:
@@ -249,26 +265,39 @@ def _short_title(title: str) -> str:
     return t.strip() or title
 
 
+def _issue_of(mr: dict) -> str:
+    for text in (mr.get("title") or "", mr.get("source_branch") or ""):
+        for a, b in _ISSUE_IN_TEXT_RE.findall(text):
+            return f" (#{a or b})"
+    return ""
+
+
 def render_fallback(facts: Facts) -> str:
-    """Notes with no model in the loop: one line per MR with its status, the
-    week's work commits under it, reviews, and the parked line."""
+    """Notes with no model in the loop, in the same shape the model is asked
+    for: `<title> (#issue) - <status> (!MR)`, the week's work commits under
+    it, one parked-stack line, one reviews line. Titles are the MR titles
+    minus their conventional-commit prefix -- the model does the plain-
+    English rewrite; this path only has to be correct."""
     lines = ["Chandler:"]
     parked = []
     for m in facts.mrs:
         status = _status_word(m, facts)
         if status.startswith("PARKED"):
-            parked.append(f"!{m['iid']}")
+            parked.append(m)
             continue
-        merged = f" ({m['merged_at'][:10]})" if m.get("merged_at") else ""
-        lines.append(f"{_short_title(m.get('title', ''))} - {status}{merged} !{m['iid']}")
+        merged = f", {m['merged_at'][:10]}" if m.get("merged_at") else ""
+        lines.append(f"{_short_title(m.get('title', ''))}{_issue_of(m)} - {status} (!{m['iid']}{merged})")
         for day, ref, title in facts.work_pushes:
             if ref == (m.get("source_branch") or ""):
-                lines.append(f"  {day}: {title[:110]}")
+                lines.append(f"{day}: {title[:110]}")
     if parked:
-        lines.append(f"Parked drafts (freshening only): {', '.join(parked)} - parked awaiting their blockers")
+        issues = "/".join(_issue_of(m).strip(" ()") for m in parked if _issue_of(m))
+        iids = sorted(m["iid"] for m in parked)
+        span = f"!{iids[0]}–!{iids[-1]}" if len(iids) > 1 else f"!{iids[0]}"
+        lines.append(f"Parked drafts ({issues or 'no issue refs'}) - parked (drafts {span}), "
+                     f"kept current with master, awaiting their blockers")
     revs = sorted({t for _, _, t in _others_reviews(facts)})
     lines.append("Reviews: " + ("; ".join(revs) if revs else "none"))
-    lines.append("Parked/blocked: " + (", ".join(parked) if parked else "none"))
     return "\n".join(lines)
 
 
