@@ -1056,11 +1056,13 @@ def _run_one_implement_claim(cfg, deps: Dict[str, Callable]) -> Optional[int]:
                        _IMPLEMENT)
         return 1
 
+    reason = ("completed-no-change" if getattr(result, "no_change", False)
+              else "executor-completed")
     updated = _apply_to_fresh(
         deps, cfg, number,
         lambda fresh: complete(fresh, number, result.result_sha,
                                result.report_path, deps["now"](),
-                               mr_iid=result.mr_iid))
+                               mr_iid=result.mr_iid, done_reason=reason))
     if updated is not None:
         _post(deps, cfg, _implement_done_message(result))
     return 0
@@ -1092,6 +1094,9 @@ def _implement_claim_message(iid: int, slot, branch: str) -> str:
 
 
 def _implement_done_message(result) -> str:
+    if getattr(result, "no_change", False):
+        return (f"🛠️ #{result.iid}: no change needed — {result.magi_note or 'the pipeline found nothing to do'}. "
+                f"Receipt is on the issue; close it if you agree.")
     verdict_line = (result.verdict or "").strip().splitlines()
     magi = verdict_line[0] if verdict_line else "no report"
     msg = (f"🛠️ implemented #{result.iid} → Draft !{result.mr_iid} "

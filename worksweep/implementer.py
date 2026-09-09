@@ -77,6 +77,9 @@ class ImplementResult:
     result_sha: str       # local HEAD that was pushed + synced
     reassigned_from: str = ""   # old MR iid when a handed-off box was reclaimed
     magi_note: str = ""         # non-fatal magi trouble, surfaced in the post
+    # 2026-09-09: the pipeline closed as completed_no_change (premise dead on
+    # master, receipt posted on the issue). mr_iid is 0; magi_note carries why.
+    no_change: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -552,7 +555,9 @@ def _execute_pipeline(cfg, iid: int, slot: DevBox, checkout: str,
     state_path = state = None
     last_progress = (-1, -1)
     session_id = None
+    short_retry_used = False
     for attempt in range(1, attempts + 1):
+        leg_started = time.monotonic()
         if attempt == 1:
             timeout = cfg.implement_timeout
         else:
@@ -570,10 +575,14 @@ def _execute_pipeline(cfg, iid: int, slot: DevBox, checkout: str,
         if session_id:
             argv = [cfg.claude_bin, "--resume", session_id, "-p",
                     _RESUME_PROMPT.format(command=cfg.pipeline_command,
-                                          iid=iid),
+                                          iid=iid, wait_order=_WAIT_ORDER),
                     "--output-format", "json"] + model_args(cfg)
         else:
-            argv = ([cfg.claude_bin, "-p", prompt, "--output-format", "json"]
+            # A fresh retry leg (no session to reopen) still carries the wait
+            # order: the state file tells it where it is, this tells it not
+            # to leave while an external leg is outstanding.
+            text = prompt if attempt == 1 else f"{prompt}\n\n{_WAIT_ORDER}"
+            argv = ([cfg.claude_bin, "-p", text, "--output-format", "json"]
                     + model_args(cfg))
         try:
             proc = _run(argv, run_subprocess, cwd=checkout, timeout=timeout)
@@ -617,10 +626,17 @@ def _execute_pipeline(cfg, iid: int, slot: DevBox, checkout: str,
         state_path, state = _find_pipeline_state(checkout, iid)
         if state is not None and _pipeline_mr_of(state) is not None:
             break                  # Phase 7 reached -- on to verification
+        if state is not None and _pipeline_no_change(state):
+            break                  # premise dead: a completion, handled below
         progress = _pipeline_progress(state)
         if attempt < attempts and progress > last_progress:
             last_progress = progress
             continue               # the checkpoint moved: resume in-claim
+        leg_seconds = time.monotonic() - leg_started
+        if (attempt < attempts and not short_retry_used
+                and leg_seconds < _SHORT_LEG_SECONDS):
+            short_retry_used = True
+            continue               # a sigh-and-exit leg: one more, told to wait
         if state is None:
             raise RunnerError(f"pipeline run for #{iid} left no state file "
                               f"under .claude/state/pla-pipelines/ — cannot "
@@ -634,6 +650,21 @@ def _execute_pipeline(cfg, iid: int, slot: DevBox, checkout: str,
         raise RunnerError(f"pipeline run for #{iid} left no state file under "
                           f".claude/state/pla-pipelines/ — cannot prove an MR "
                           f"exists; inspect the checkout by hand")
+    if _pipeline_no_change(state):
+        # #258 / #1829 (2026-09-09): the pipeline traced the issue, found the
+        # fix already on master, posted its receipt on the issue and closed
+        # the run. No branch, no MR, no box -- a completion with a reason,
+        # never an error.
+        note = _pipeline_no_change_note(state)
+        result = ImplementResult(
+            iid=iid, mr_iid=0, mr_url="", dev_url="", dev_box=slot.name,
+            branch="", report_path=state_path, verdict="", result_sha="",
+            magi_note=note, no_change=True)
+        if repo:
+            from . import dossier
+            dossier.record(cfg, repo, iid, "Implement — no change",
+                           note + "\n\n```\n" + (state or "").strip()[:4000] + "\n```")
+        return result
     mr = _pipeline_mr_of(state)
     if mr is None:
         raise RunnerError(f"pipeline state for #{iid} names no MR "
@@ -723,7 +754,23 @@ _RESUME_PROMPT = (
     "finished may not have committed), consult the state file's RESUME HERE "
     "section if present, then continue the pipeline from exactly where you "
     "left off through Phase 8. All constraints from the original "
-    "instructions still apply.")
+    "instructions still apply.\n\n{wait_order}")
+
+# Appended to every retry leg, resumed or fresh (2026-09-09).
+_WAIT_ORDER = (
+    "If you are waiting on an external leg (a Codex/Balthasar or "
+    "Seneschal/CodeRabbit result file), do NOT end the session to wait: "
+    "poll the result path in a Bash loop (`sleep 60` between checks, up to "
+    "40 minutes), and when it lands, or the budget is spent, continue the "
+    "round with what you have (a leg past its budget is DEGRADED, not a "
+    "blocker). Ending the session with the checkpoint unchanged is what "
+    "fails this claim.")
+
+# A resumed leg that ends this fast without moving the checkpoint did not
+# work -- it re-read the state, saw an external leg outstanding, and exited
+# (2026-09-09, #1830: 31 seconds). One more leg, with the wait order, before
+# the honest no-progress failure.
+_SHORT_LEG_SECONDS = 300
 
 
 def _looks_like_resume_failure(output: str) -> bool:
@@ -764,6 +811,21 @@ def _pipeline_mr_of(state: str):
     if bang_m:
         return int(bang_m.group(1)), ""
     return None
+
+
+def _pipeline_no_change(state: str) -> bool:
+    """The pipeline's own 'nothing to do' close: `status: completed_no_change`
+    in the state frontmatter (pla-pipeline skill, premise-dead path)."""
+    return bool(re.search(r"^status:\s*completed_no_change\b", state or "", re.M))
+
+
+def _pipeline_no_change_note(state: str) -> str:
+    """The line that says WHY (the Trace step, usually 'PREMISE DEAD ...'),
+    trimmed for a Discord post."""
+    for line in (state or "").splitlines():
+        if "PREMISE DEAD" in line.upper() or "no change" in line.lower():
+            return line.strip().lstrip("- ").strip()[:400]
+    return "pipeline closed as completed_no_change"
 
 
 def _pipeline_progress(state) -> tuple:

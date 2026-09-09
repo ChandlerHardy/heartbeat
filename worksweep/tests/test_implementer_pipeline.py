@@ -495,9 +495,18 @@ def test_an_early_exit_with_progress_resumes_inside_the_claim(tmp_path):
     assert result.mr_iid == 4099
 
 
-def test_no_progress_between_attempts_fails_instead_of_spinning(tmp_path):
+def test_no_progress_between_attempts_fails_instead_of_spinning(tmp_path, monkeypatch):
     """A pipeline that cannot move is a stuck pipeline: same checkpoint twice
-    means raise the honest error, never a third token-burning attempt."""
+    after two FULL-LENGTH legs means raise the honest error, never a third
+    token-burning attempt. (A leg that ends within seconds is a different
+    case -- see the short-leg test below.)"""
+    from worksweep import implementer as _impl
+    clock = {"t": 0.0}
+
+    def slow(*_):                 # every monotonic() read is 10 min later
+        clock["t"] += 600.0
+        return clock["t"]
+    monkeypatch.setattr(_impl.time, "monotonic", slow)
     edges = _ResumingEdges([_STATE_PHASE3, _STATE_PHASE3, _STATE_PHASE3])
     with pytest.raises(RunnerError) as e:
         _run(tmp_path, edges=edges)
@@ -649,3 +658,56 @@ def test_a_dossier_failure_never_fails_the_claim(tmp_path):
     cfg = _cfg(tmp_path, issues_root=str(tmp_path / "issues"))
     result, _ = _run(tmp_path, cfg=cfg)
     assert result.mr_iid == 4099
+
+
+# --- 2026-09-09: what #257/#258 exposed -------------------------------------
+
+_STATE_NO_CHANGE = """---
+slug: 1775-x
+status: completed_no_change
+phase: 8
+---
+- [x] 1. Trace + baseline — PREMISE DEAD ON MASTER: fixed by 155df45614 (PLA-389)
+- [x] 8. Report — receipt posted on #1775
+"""
+
+
+def test_a_pipeline_that_finds_the_premise_dead_completes_without_an_mr(tmp_path):
+    """#258 / #1829: the pipeline correctly found the fix already on master,
+    posted its receipt, and closed the run as completed_no_change -- and the
+    executor reported it as an ERROR ('names no MR'). A legitimate outcome
+    is a completion, with the reason carried to the queue and the post."""
+    result, edges = _run(tmp_path, edges=_Edges(write_state=_STATE_NO_CHANGE))
+    assert result.mr_iid == 0 and result.no_change is True
+    assert "155df45614" in result.magi_note or "PREMISE DEAD" in result.magi_note
+    assert edges.http_calls == []          # nothing was parked; no box probe
+
+
+def test_a_short_leg_that_made_no_progress_gets_one_wait_retry(tmp_path):
+    """#257 / #1830: leg 1 ended while waiting on the Codex rebuttal; the
+    resume leg lived 31 seconds, said 'still waiting', and exited. Same
+    checkpoint twice read as 'stuck' and the claim failed while the result
+    was minutes away. A leg that ends within _SHORT_LEG_SECONDS without
+    moving the checkpoint gets ONE more leg with an explicit wait order."""
+    edges = _ResumingEdges([_STATE_PHASE5, _STATE_PHASE5, _STATE])
+    result, edges = _run(tmp_path, edges=edges)
+    assert edges.claude_calls == 3
+    assert result.mr_iid == 4099
+    third = [c for c, _ in edges.calls if c[0] == "claude"][2]
+    prompt = third[third.index("-p") + 1]
+    assert "do NOT end the session" in prompt and "sleep" in prompt
+
+
+def test_a_short_leg_with_no_progress_only_gets_one_extra_leg(tmp_path):
+    edges = _ResumingEdges([_STATE_PHASE5, _STATE_PHASE5, _STATE_PHASE5, _STATE_PHASE5])
+    with pytest.raises(RunnerError) as e:
+        _run(tmp_path, edges=edges, cfg=_cfg(tmp_path, pipeline_resume_attempts=4))
+    assert edges.claude_calls == 3
+    assert "did not reach Phase 7" in str(e.value)
+
+
+def test_the_resume_prompt_orders_the_leg_to_wait_on_external_legs():
+    from worksweep.implementer import _RESUME_PROMPT, _WAIT_ORDER
+    assert "{wait_order}" in _RESUME_PROMPT
+    assert "do NOT end the session" in _WAIT_ORDER
+    assert "Codex" in _WAIT_ORDER and "sleep" in _WAIT_ORDER
