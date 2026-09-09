@@ -856,3 +856,30 @@ def test_a_system_only_thread_is_still_nobodys_question():
                                   "resolved": False,
                                   "author": {"username": "leyang"}}]}])
     assert unaddressed_threads(raw, "chandler.hardy", REVIEWERS) == ()
+
+
+# 2026-09-09 (!4105 row #253): "Re-approved.  LGTM" is two approvals, not an
+# approval plus an ask, and it kept re-proposing a feedback row for the lane
+# to classify as nothing-to-do. A body made ONLY of ack fragments is an ack.
+def test_is_pure_ack_accepts_a_body_made_only_of_ack_fragments():
+    from worksweep.collectors import is_pure_ack
+    for body in ("Re-approved.  LGTM", "Approved! LGTM.", "LGTM, ship it",
+                 "re-approved", "Looks good to me. Approved.", "LGTM 🚀"):
+        assert is_pure_ack(body), body
+
+
+def test_is_pure_ack_still_rejects_an_ack_that_carries_an_ask():
+    from worksweep.collectors import is_pure_ack
+    for body in ("LGTM, but rename X", "Approved. One nit: the docblock",
+                 "LGTM\nplease squash", "Re-approved, pending CI"):
+        assert not is_pure_ack(body), body
+
+
+def test_a_listed_reviewers_reapproval_note_is_not_unaddressed_feedback():
+    from worksweep.collectors import unaddressed_threads
+    import json
+    raw = json.dumps([{"id": "d1", "notes": [
+        {"id": 1, "system": False, "resolvable": False, "resolved": False,
+         "author": {"username": "lnxprof"}, "body": "Re-approved.  LGTM",
+         "created_at": "2026-09-09T14:03:00Z"}]}])
+    assert unaddressed_threads(raw, "chandler.hardy", reviewers=("lnxprof",)) == ()

@@ -283,7 +283,8 @@ def parse_threads(raw_json) -> tuple:
 # ask and must never match. Multi-line bodies never match for the same reason.
 _ACK_BODIES = frozenset((
     "lgtm", "looks good", "looks good to me", "looksgoodtome",
-    "approved", "approve", "ship it", "shipit", "+1",
+    "approved", "approve", "re-approved", "reapproved", "re approved",
+    "ship it", "shipit", "+1",
     "nice", "nice work", "great work", "\U0001F44D", "\U0001F680",
     "\U0001F389", "\u2705",
 ))
@@ -303,7 +304,16 @@ def is_pure_ack(body) -> bool:
     if not text or "\n" in text:
         return False
     text = text.strip(_ACK_STRIP).lower().replace(",", "")
-    return text in _ACK_BODIES or (text == "" and bool(body.strip()))
+    if text in _ACK_BODIES or (text == "" and bool(body.strip())):
+        return True
+    # "Re-approved.  LGTM" (2026-09-09, !4105): several acks in one line are
+    # still nothing but acks. Every fragment between sentence breaks must be
+    # an ack token on its own; one non-ack fragment ("but rename X",
+    # "pending CI") and the whole body is an ask.
+    parts = [f.strip(_ACK_STRIP + ",;:").lower()
+             for f in re.split(r"[.!;:,]+", body.strip())]
+    parts = [f for f in parts if f]
+    return bool(parts) and all(f in _ACK_BODIES for f in parts)
 
 
 def unaddressed_threads(raw_json, username: str, reviewers=(),
