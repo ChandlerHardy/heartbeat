@@ -185,10 +185,10 @@ def test_run_once_keep_current_without_dep_errors_loudly(tmp_path):
 
 
 def test_run_once_keep_current_and_magi_review_both_run_one_pass(tmp_path):
-    """keep-current shares magi-review's lock/pass, but pick_claim only
-    returns ONE lowest-numbered claim per invocation across both -- so a
-    magi-review item and a keep-current item present together only run the
-    lower-numbered one per pass, exactly like two magi-review items would."""
+    """keep-current shares magi-review's lock/pass. The lowest-numbered claim
+    runs first (the magi-review here); since 2026-09-09 the keep-current rows
+    behind it are drained in the same tick instead of waiting ten minutes
+    each (see _KEEP_CURRENT_DRAIN_MAX)."""
     from worksweep.models import WorkItem as WI
     magi_rec = QueueRecord(
         number=1, first_seen=NOW, last_seen=NOW,
@@ -200,7 +200,7 @@ def test_run_once_keep_current_and_magi_review_both_run_one_pass(tmp_path):
     deps, posts, saves, state = _deps([magi_rec, keep_rec])
     assert run_once(_cfg(tmp_path), deps, **_locks(tmp_path)) == 0
     final = {r.number: r.item.status for r in state["records"]}
-    assert final == {1: "done", 2: "approved"}    # keep-current waits its turn
+    assert final == {1: "done", 2: "done"}    # drained behind the magi-review
 
 
 def test_run_once_keep_current_and_implement_use_different_worktrees(tmp_path):
@@ -315,3 +315,89 @@ def test_an_ordinary_merge_still_completes_the_ordinary_way(tmp_path):
     run_once(_cfg(tmp_path), deps, **_locks(tmp_path))
     assert state["records"][0].item.done_reason == "executor-completed"
     assert [p for p in posts if p.startswith("🔄")]
+
+
+# --------------------------------------------------------------------------
+# 2026-09-09: one short pass drains EVERY keep-current claim, not one per tick
+# --------------------------------------------------------------------------
+
+def _kc(number, iid):
+    return _rec(number, iid=iid, branch=f"feat/{iid}-thing")
+
+
+def test_one_tick_drains_every_keep_current_claim(tmp_path):
+    """FALSIFYING: a dozen keep-current rows after a big master merge used to
+    take a dozen ten-minute ticks. Restore the single-claim return in
+    _run_magi_pass and only #1 is done here."""
+    ran = []
+    deps, posts, saves, state = _deps(
+        [_kc(1, 4001), _kc(2, 4002), _kc(3, 4003)],
+        execute_keep_current=lambda i, c: (ran.append(i.branch), _result(iid=int(i.id[-4:])))[1])
+    assert run_once(_cfg(tmp_path), deps, **_locks(tmp_path)) == 0
+    final = {r.number: r for r in state["records"]}
+    assert [final[n].item.status for n in (1, 2, 3)] == ["done"] * 3
+    assert ran == ["feat/4001-thing", "feat/4002-thing", "feat/4003-thing"]
+    assert sum(1 for p in posts if p.startswith("🔄")) == 3
+
+
+def test_drain_chains_keep_current_only(tmp_path):
+    """A second magi-review or park still waits for the next tick: only the
+    cheap, self-contained merge is chained."""
+    deps, posts, saves, state = _deps(
+        [_kc(1, 4001), _rec(2, executor="magi-review", iid=1, branch=""),
+         _kc(3, 4003), _rec(4, executor="magi-review", iid=2, branch="")])
+    run_once(_cfg(tmp_path), deps, **_locks(tmp_path))
+    final = {r.number: r for r in state["records"]}
+    assert final[1].item.status == "done" and final[3].item.status == "done"
+    assert final[2].item.status == "approved" and final[4].item.status == "approved"
+
+
+def test_drain_runs_after_a_magi_review_first_claim_too(tmp_path):
+    """Lowest number wins for the FIRST claim (a magi-review here); the
+    keep-current rows behind it are still drained in the same tick."""
+    deps, posts, saves, state = _deps(
+        [_rec(1, executor="magi-review", iid=1, branch=""), _kc(2, 4002),
+         _kc(3, 4003)])
+    run_once(_cfg(tmp_path), deps, **_locks(tmp_path))
+    final = {r.number: r for r in state["records"]}
+    assert [final[n].item.status for n in (1, 2, 3)] == ["done"] * 3
+    assert any(p.startswith("🧙") for p in posts)
+
+
+def test_drain_continues_past_a_failed_merge_and_reports_failure(tmp_path):
+    """A conflict on one branch flips ITS row to error with a ⚠️ and the next
+    branch still gets its merge; the pass exit code carries the failure."""
+    def execute(item, cfg):
+        if item.branch == "feat/4001-thing":
+            raise RunnerError("merge conflict in www/x.php")
+        return _result(iid=int(item.id[-4:]))
+    deps, posts, saves, state = _deps([_kc(1, 4001), _kc(2, 4002)],
+                                      execute_keep_current=execute)
+    assert run_once(_cfg(tmp_path), deps, **_locks(tmp_path)) == 1
+    final = {r.number: r for r in state["records"]}
+    assert final[1].item.status == "error" and final[2].item.status == "done"
+    assert any(p.startswith("⚠️") and "#1" in p for p in posts)
+    assert any(p.startswith("🔄") and "!4002" in p for p in posts)
+
+
+def test_drain_is_capped(tmp_path):
+    from worksweep.runner import _KEEP_CURRENT_DRAIN_MAX
+    n = _KEEP_CURRENT_DRAIN_MAX + 3
+    deps, posts, saves, state = _deps([_kc(i, 4000 + i) for i in range(1, n + 1)])
+    run_once(_cfg(tmp_path), deps, **_locks(tmp_path))
+    done = sum(1 for r in state["records"] if r.item.status == "done")
+    assert done == _KEEP_CURRENT_DRAIN_MAX + 1          # first claim + the drain
+    assert sum(1 for r in state["records"] if r.item.status == "approved") == 2
+
+
+def test_drain_skips_a_branch_another_running_claim_holds(tmp_path):
+    """The branch guard still applies inside the drain: a keep-current row on
+    a branch some other executor is working stays approved."""
+    from worksweep.runner import claim
+    live = claim([_rec(2, executor="address-feedback", iid=4002,
+                       branch="feat/4002-thing")], 2, NOW)[0]   # claimed NOW, not stale
+    deps, posts, saves, state = _deps([_kc(1, 4001), live, _kc(3, 4002)])
+    run_once(_cfg(tmp_path), deps, **_locks(tmp_path))
+    final = {r.number: r for r in state["records"]}
+    assert final[1].item.status == "done"
+    assert final[3].item.status == "approved"
