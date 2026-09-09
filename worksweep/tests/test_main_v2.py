@@ -1192,4 +1192,7 @@ def test_the_sweep_hands_the_ack_classifier_to_the_probe():
     rc = run_sweep(_cfg(), deps)
     assert rc == 0
     assert asked, "the probe never consulted the classifier"
-    assert "feedback:pb-www!3997" not in _saved_items(posts)
+    # REQUESTED_CHANGES still proposes a feedback row on its own arm; the
+    # sensor's contribution is that the suppressed thread carries no evidence.
+    item = _saved_items(posts).get("feedback:pb-www!3997")
+    assert item is None or (item.note_refs == () and "unaddressed thread" not in item.why)
