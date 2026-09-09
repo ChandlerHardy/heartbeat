@@ -511,3 +511,31 @@ def test_run_once_implement_no_change_completes_with_its_reason(tmp_path):
     item = state["records"][0].item
     assert item.status == "done" and item.done_reason == "completed-no-change"
     assert any("no change needed" in p and "155df45614" in p for p in posts)
+
+
+# 2026-09-09 (Chandler, !4172): "these decisions are the kind of thing that
+# warrants consulting fable 5.1" — a parked question is auto-sent to the
+# consult lane, so the human sees the question WITH the higher-tier
+# recommendation instead of a bare ❓.
+def test_a_parked_question_is_auto_sent_to_the_consult_lane():
+    out = needs_input([_rec(1, status="running")], 1, "harden or delete?", NOW)
+    assert out[0].item.status == "needs-input"
+    assert out[0].item.consult == "requested" and out[0].item.consult_rec == ""
+
+
+def test_needs_input_does_not_re_request_a_consult_that_already_has_a_rec():
+    import dataclasses
+    rec = _rec(1, status="running")
+    rec = dataclasses.replace(rec, item=dataclasses.replace(rec.item, consult="done",
+                                                            consult_rec="Fable: delete it"))
+    out = needs_input([rec], 1, "harden or delete?", NOW)
+    assert out[0].item.consult == "done" and out[0].item.consult_rec == "Fable: delete it"
+
+
+def test_run_once_implement_halt_message_says_the_consult_is_queued(tmp_path):
+    def halt(item, cfg, boxes):
+        raise NeedsInputError("harden or delete this endpoint?")
+    deps, posts, saves, state = _deps([_rec(1)], execute_implement=halt)
+    run_once(_cfg(tmp_path), deps, lock_path=str(tmp_path / "runner.lock"), families=("implement",))
+    assert state["records"][0].item.consult == "requested"
+    assert any(p.startswith("❓") and "Fable consult queued" in p for p in posts)

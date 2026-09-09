@@ -149,10 +149,27 @@ def complete(records: List[QueueRecord], number: int, result_sha: str,
 def needs_input(records: List[QueueRecord], number: int, question: str,
                 now: str) -> List[QueueRecord]:
     """Park `number` on the human's answer. Terminal-ish: reconcile keeps it
-    and never re-proposes it; only a Discord ✅ flips it back to approved."""
-    return [_replace(r, now, status="needs-input",
-                     error_summary=(question or "")[:_ERROR_SUMMARY_MAX])
-            if r.number == number else r for r in records]
+    and never re-proposes it; only a Discord ✅ flips it back to approved.
+
+    Auto-consult (2026-09-09): every parked question is sent to the consult
+    lane at once (consult="requested"), so the human reads it alongside the
+    higher-tier model's recommendation instead of a bare ❓ -- the call an
+    executor could not make from its seat is exactly the Send-to-Fable case,
+    and waiting for a button tap just delays it. A rec already on the row
+    (consult="done" + consult_rec) is kept: a re-park is usually the same
+    question, and replacing an unread rec would make the lane a slot
+    machine (queue.request_consult has the same rule)."""
+    out = []
+    for r in records:
+        if r.number != number:
+            out.append(r)
+            continue
+        changes = dict(status="needs-input",
+                       error_summary=(question or "")[:_ERROR_SUMMARY_MAX])
+        if not (r.item.consult == "done" and r.item.consult_rec):
+            changes.update(consult="requested", consult_rec="")
+        out.append(_replace(r, now, **changes))
+    return out
 
 
 def hold_for_review(records: List[QueueRecord], number: int, summary: str,
@@ -1046,7 +1063,8 @@ def _run_one_implement_claim(cfg, deps: Dict[str, Callable]) -> Optional[int]:
                 deps, cfg, number,
                 lambda fresh: needs_input(fresh, number, str(e),
                                           deps["now"]())) is not None:
-            _post(deps, cfg, f"❓ #{iid} needs your input: {e}")
+            _post(deps, cfg, f"❓ #{iid} needs your input: {e} "
+                             f"(Fable consult queued)")
         return 0        # a question is a handled outcome, not a failure
     except RunnerError as e:
         _fail_and_post(deps, cfg, number, str(e), _IMPLEMENT)
