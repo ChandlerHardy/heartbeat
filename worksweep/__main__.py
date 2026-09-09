@@ -56,7 +56,7 @@ _POST_BACKOFF_SECONDS = (2, 5)      # waited after attempt 1, then after 2
 # park the sweep -- 15s is well under the runner's cadence.
 _POST_RETRY_AFTER_CAP_SECONDS = 15
 
-from . import assessor, collectors, curator, devslots, implementer, keepcurrent
+from . import assessor, checkouts, collectors, curator, devslots, implementer, keepcurrent
 from .approvals import apply_approvals
 from .config import WorksweepConfig, load_config
 from .discord_read import fetch_messages
@@ -839,6 +839,12 @@ def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
         return 1
 
 
+def _gc_implement_worktrees(cfg, keep) -> None:
+    for repo in cfg.repos:
+        checkouts.gc_worktrees(cfg, repo, "implement", keep,
+                               run_subprocess=subprocess.run)
+
+
 def _execute_implement(item, cfg, boxes):
     """Real implement edge: subprocess + a longer-budget ssh + an http probe."""
     return implementer.execute(
@@ -1085,6 +1091,9 @@ def main(argv=None) -> int:
                                 else _execute_consult),
             # Held-fix worktree hygiene; a --dry-run touches no filesystem.
             "gc_holds": (lambda records, c: []) if args.dry_run else _gc_holds,
+            # Per-issue implement worktrees (2026-09-09): removed once no
+            # implement record for that issue is live. Same dry-run rule.
+            "gc_worktrees": (None if args.dry_run else _gc_implement_worktrees),
             # --dry-run never saves, so it never needs to exclude anyone.
             "queue_lock": (null_lock if args.dry_run
                            else (lambda: write_lock(_queue_path()))),

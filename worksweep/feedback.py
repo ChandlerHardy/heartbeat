@@ -900,10 +900,12 @@ def _claude(run_subprocess: Callable, cfg, checkout: str, prompt: str) -> None:
     interactive sessions are configured with are not a boundary for a process
     this module spawns unattended with his credentials.
     """
+    from .implementer import model_args    # local: implementer imports runner
     timeout = int(getattr(cfg, "feedback_timeout", 3600) or 3600)
     try:
         proc = _run([cfg.claude_bin, "-p", prompt,
-                     "--allowedTools", ",".join(_ALLOWED_TOOLS)],
+                     "--allowedTools", ",".join(_ALLOWED_TOOLS)]
+                    + model_args(cfg),
                     run_subprocess, cwd=checkout, timeout=timeout)
     except subprocess.TimeoutExpired:
         raise RunnerError(f"the address-feedback run timed out after "

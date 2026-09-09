@@ -5,6 +5,7 @@ already exist and answer `rev-parse --git-dir`?) with an injected
 `run_subprocess` edge for every git call -- so these tests use real tmp_path
 directories but a faked git binary, matching checkouts.py's own contract.
 """
+import os
 import subprocess
 
 import pytest
@@ -320,3 +321,50 @@ def test_checkout_without_a_start_point_switches_rather_than_creates(tmp_path):
     checkout_branch(_cfg(tmp_path), str(tmp_path / "mine"), BRANCH,
                     None, git.run)
     assert git.calls[0][0][3:] == ["checkout", BRANCH]
+
+
+# 2026-09-09: per-issue implement worktrees, so two implement claims can run at
+# once without one `checkout -B` landing in the other's live tree.
+def test_worktree_for_with_a_suffix_makes_a_per_issue_worktree(tmp_path):
+    calls = []
+    (tmp_path / "pb-www").mkdir()
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        import subprocess
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    from worksweep.checkouts import worktree_for
+    from worksweep.config import WorksweepConfig
+    cfg = WorksweepConfig(repos=("pb-www",), username="me",
+                          discord_webhook="", checkouts_root=str(tmp_path))
+    path = worktree_for(cfg, "pb-www", "implement", fake_run, suffix="1830")
+    assert path.endswith("/.worktrees/pb-www-implement-1830")
+    assert any("worktree" in c and "add" in c and path in c for c in calls)
+
+
+def test_gc_worktrees_removes_clean_finished_suffix_trees_and_keeps_the_rest(tmp_path):
+    import subprocess
+    from worksweep.checkouts import gc_worktrees
+    from worksweep.config import WorksweepConfig
+    root = tmp_path / "pb-www"; root.mkdir()
+    wt = tmp_path / ".worktrees"; wt.mkdir()
+    for name in ("pb-www-implement-1830", "pb-www-implement-1829",
+                 "pb-www-implement-1700", "pb-www-implement", "pb-www-keep-current"):
+        (wt / name).mkdir()
+    removed = []
+
+    def fake_run(cmd, **kw):
+        if "status" in cmd:
+            # 1700 is dirty: must be kept even though it is finished
+            dirty = "-C" in cmd and cmd[cmd.index("-C") + 1].endswith("1700")
+            return subprocess.CompletedProcess(cmd, 0, stdout=" M x.php\n" if dirty else "", stderr="")
+        if "remove" in cmd:
+            removed.append(cmd[-1])
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    cfg = WorksweepConfig(repos=("pb-www",), username="me",
+                          discord_webhook="", checkouts_root=str(tmp_path))
+    gone = gc_worktrees(cfg, "pb-www", "implement", keep={"1829"}, run_subprocess=fake_run)
+    assert sorted(os.path.basename(p) for p in gone) == ["pb-www-implement-1830"]
+    assert sorted(os.path.basename(p) for p in removed) == ["pb-www-implement-1830"]

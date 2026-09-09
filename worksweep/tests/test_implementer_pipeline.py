@@ -88,7 +88,7 @@ class _Edges:
 def _run(tmp_path, edges=None, cfg=None, boxes=None):
     (tmp_path / "pb-www").mkdir(exist_ok=True)
     edges = edges or _Edges()
-    edges.checkout = str(tmp_path / ".worktrees" / "pb-www-implement")
+    edges.checkout = str(tmp_path / ".worktrees" / "pb-www-implement-1775")
     result = execute(_item(), cfg or _cfg(tmp_path),
                      boxes if boxes is not None else [_box()],
                      run_subprocess=edges.run, run_ssh=edges.ssh,
@@ -214,7 +214,7 @@ def test_a_stale_state_file_is_never_read_as_this_runs_work(tmp_path):
     import time as _time
     edges = _Edges(write_state=None)          # this run leaves nothing behind
     (tmp_path / "pb-www").mkdir(exist_ok=True)
-    stale_dir = (tmp_path / ".worktrees" / "pb-www-implement" / ".claude"
+    stale_dir = (tmp_path / ".worktrees" / "pb-www-implement-1775" / ".claude"
                  / "state" / "pla-pipelines" / "1775-yesterdays-run")
     stale_dir.mkdir(parents=True)
     stale = stale_dir / "state.md"
@@ -235,7 +235,7 @@ def test_a_surviving_checkpoint_is_kept_and_a_fresh_write_wins(tmp_path):
     run; the old checkpoint file is left in place."""
     edges = _Edges()
     (tmp_path / "pb-www").mkdir(exist_ok=True)
-    root = (tmp_path / ".worktrees" / "pb-www-implement" / ".claude"
+    root = (tmp_path / ".worktrees" / "pb-www-implement-1775" / ".claude"
             / "state" / "pla-pipelines")
     stale = root / "1775-yesterdays-run"
     stale.mkdir(parents=True)
@@ -251,7 +251,7 @@ def test_state_for_another_issue_is_left_alone(tmp_path):
     business -- its state is neither read nor touched."""
     edges = _Edges()
     (tmp_path / "pb-www").mkdir(exist_ok=True)
-    root = (tmp_path / ".worktrees" / "pb-www-implement" / ".claude"
+    root = (tmp_path / ".worktrees" / "pb-www-implement-1775" / ".claude"
             / "state" / "pla-pipelines")
     other = root / "1701-other-issue"
     other.mkdir(parents=True)

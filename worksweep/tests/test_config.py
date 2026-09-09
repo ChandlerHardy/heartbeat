@@ -248,3 +248,28 @@ def test_load_config_non_bool_feedback_hold_raises_runtime_error():
         with pytest.raises(RuntimeError) as exc:
             load_config(p)
         assert "runner.feedback_hold" in str(exc.value)
+
+
+# 2026-09-09: concurrent implement claims + a model pin on every claude argv.
+def test_load_config_implement_concurrency_defaults_to_two_and_rejects_junk():
+    with tempfile.TemporaryDirectory() as tmp:
+        p = _write(tmp, {"gitlab": {"username": "x", "repos": []}})
+        assert load_config(p).implement_concurrency == 2
+        p = _write(tmp, {"gitlab": {"username": "x", "repos": []},
+                         "runner": {"implement_concurrency": 3}})
+        assert load_config(p).implement_concurrency == 3
+        for junk in (0, -1, "two"):
+            p = _write(tmp, {"gitlab": {"username": "x", "repos": []},
+                             "runner": {"implement_concurrency": junk}})
+            with pytest.raises(RuntimeError) as exc:
+                load_config(p)
+            assert "implement_concurrency" in str(exc.value)
+
+
+def test_load_config_model_pin_defaults_empty_and_reads_a_string():
+    with tempfile.TemporaryDirectory() as tmp:
+        p = _write(tmp, {"gitlab": {"username": "x", "repos": []}})
+        assert load_config(p).model == ""
+        p = _write(tmp, {"gitlab": {"username": "x", "repos": []},
+                         "runner": {"model": "claude-fable-5"}})
+        assert load_config(p).model == "claude-fable-5"

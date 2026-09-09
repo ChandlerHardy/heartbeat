@@ -152,6 +152,15 @@ def annotate_boxes(boxes: Sequence[DevBox], all_mrs: List[MergeRequest],
     return out
 
 
+def model_args(cfg) -> List[str]:
+    """`--model <cfg.model>` when the config pins one (2026-09-09). Every
+    claude -p this runner spawns carries it, so a hand edit to the mini's
+    ~/.claude/settings.json can never silently move a lane to another pool
+    (it did, on 09-05: `fable` alias -> the 5.1 pool)."""
+    model = (getattr(cfg, "model", "") or "").strip()
+    return ["--model", model] if model else []
+
+
 def select_slot(boxes: Sequence[DevBox]) -> Optional[DevBox]:
     """First `free` box, else first `handed_off` box, else None — in the
     order given (config order). Mirrors devslots.pick over annotated boxes."""
@@ -390,10 +399,14 @@ def execute(item: WorkItem, cfg, boxes: Sequence[DevBox],
     `checkout -B` in that same shared clone could otherwise switch the
     branch out from under this run's live `/rubric:do` (review fix C1,
     2026-08-18)."""
-    checkout = checkouts.worktree_for(cfg, item.repo, "implement", run_subprocess)
     if run_ssh is None or http_get is None:
         raise RunnerError("implement executor wired without an ssh/http edge")
     iid = issue_iid(item)
+    # Per-issue worktree (2026-09-09): concurrent claims each get their own
+    # tree, and a resumed/halted claim finds its own state file where it
+    # left it. runner._gc_finished_worktrees clears the finished ones.
+    checkout = checkouts.worktree_for(cfg, item.repo, "implement",
+                                      run_subprocess, suffix=str(iid))
     slot = select_slot(boxes)
     if slot is None:
         raise RunnerError("no dev slot available — free one or reclaim")
@@ -431,7 +444,7 @@ def _execute_in(item: WorkItem, cfg, checkout: str, iid: int, slot,
 
     # --- the long pole: full Ferdinand ceremony via /rubric:do -------------
     try:
-        proc = _run([cfg.claude_bin, "-p", f"/rubric:do #{iid}"],
+        proc = _run([cfg.claude_bin, "-p", f"/rubric:do #{iid}"] + model_args(cfg),
                     run_subprocess, cwd=checkout,
                     timeout=cfg.implement_timeout)
     except subprocess.TimeoutExpired:
@@ -557,9 +570,10 @@ def _execute_pipeline(cfg, iid: int, slot: DevBox, checkout: str,
             argv = [cfg.claude_bin, "--resume", session_id, "-p",
                     _RESUME_PROMPT.format(command=cfg.pipeline_command,
                                           iid=iid),
-                    "--output-format", "json"]
+                    "--output-format", "json"] + model_args(cfg)
         else:
-            argv = [cfg.claude_bin, "-p", prompt, "--output-format", "json"]
+            argv = ([cfg.claude_bin, "-p", prompt, "--output-format", "json"]
+                    + model_args(cfg))
         try:
             proc = _run(argv, run_subprocess, cwd=checkout, timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -571,7 +585,8 @@ def _execute_pipeline(cfg, iid: int, slot: DevBox, checkout: str,
             # a broken RESUME, not a broken PIPELINE. Retry this same leg
             # fresh; it still consumes the attempt.
             session_id = None
-            argv = [cfg.claude_bin, "-p", prompt, "--output-format", "json"]
+            argv = ([cfg.claude_bin, "-p", prompt, "--output-format", "json"]
+                    + model_args(cfg))
             try:
                 proc = _run(argv, run_subprocess, cwd=checkout,
                             timeout=timeout)
@@ -778,9 +793,16 @@ def _pipeline_state_bases(checkout: str) -> list:
     ✅s. The worktree stays first: it is where a compliant run writes."""
     bases = [checkout]
     leaf = os.path.basename(checkout)
-    if leaf.endswith("-implement"):
-        repo = leaf[:-len("-implement")]
-        shared = os.path.join(os.path.dirname(os.path.dirname(checkout)), repo)
+    m = re.match(r"^(.+)-implement(?:-[^/]+)?$", leaf)
+    if m:
+        repo = m.group(1)
+        parent = os.path.dirname(checkout)
+        # The pre-2026-09-09 per-executor tree: a claim that started there
+        # and resumes in its new per-issue tree must still find its state.
+        legacy = os.path.join(parent, f"{repo}-implement")
+        if legacy != checkout and os.path.isdir(legacy):
+            bases.append(legacy)
+        shared = os.path.join(os.path.dirname(parent), repo)
         if os.path.isdir(shared):
             bases.append(shared)
     return bases

@@ -47,6 +47,16 @@ class WorksweepConfig:
     # domain-check + receipt) in feedback.py, not a manual gate -- "I don't
     # really want to look it over". Opt in per box with runner.feedback_hold.
     feedback_hold: bool = False
+    # 2026-09-09: how many implement claims the implement pass may run at
+    # once, each in its own per-issue worktree on its own dev box. The dev
+    # slots are the real cap; this only bounds the worker count.
+    implement_concurrency: int = 2
+    # 2026-09-09: the model every claude -p this runner spawns is pinned to
+    # ("" = whatever ~/.claude/settings.json says). A hand edit to that file
+    # silently moved the mini from claude-fable-5 to the 5.1 pool on 09-05;
+    # the pin lives with the config that says which pool a lane bills to.
+    # consult_model still wins for the consult lane.
+    model: str = ""
     # 2026-08-31 domain guard: where the domain-check registry (domains.json)
     # lives on THIS machine. "" -> models.DEFAULT_DOMAIN_REGISTRY (the
     # ferdinand checkout). The mini has no ferdinand checkout, so its config
@@ -129,6 +139,15 @@ def load_config(path: str | None = None) -> WorksweepConfig:
         raise RuntimeError(
             f"config runner.implement_timeout must be an integer, "
             f"got {implement_raw!r}")
+    conc_raw = rn.get("implement_concurrency", 2)
+    if isinstance(conc_raw, bool) or not isinstance(conc_raw, int) or conc_raw < 1:
+        raise RuntimeError(
+            f"config runner.implement_concurrency must be an integer >= 1, "
+            f"got {conc_raw!r}")
+    model_raw = rn.get("model", "")
+    if not isinstance(model_raw, str):
+        raise RuntimeError(
+            f"config runner.model must be a string, got {model_raw!r}")
     hold_raw = rn.get("feedback_hold", False)
     if not isinstance(hold_raw, bool):
         raise RuntimeError(
@@ -172,6 +191,8 @@ def load_config(path: str | None = None) -> WorksweepConfig:
         magi_timeout=magi_timeout,
         feedback_timeout=feedback_timeout,
         feedback_hold=hold_raw,
+        implement_concurrency=conc_raw,
+        model=model_raw,
         domain_registry_path=str(rn.get("domain_registry_path", "") or ""),
         pipeline_resume_attempts=int(
             rn.get("pipeline_resume_attempts", 3) or 3),

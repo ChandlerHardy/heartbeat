@@ -367,7 +367,7 @@ class _Edges:
 def _worktree(tmp_path):
     """review fix C1: implement runs in its own worktree
     (<checkouts_root>/.worktrees/<repo>-implement), not the shared clone."""
-    return tmp_path / ".worktrees" / "pb-www-implement"
+    return tmp_path / ".worktrees" / "pb-www-implement-1775"
 
 
 def _run_execute(tmp_path, edges=None, boxes=None, cfg=None, item=None):

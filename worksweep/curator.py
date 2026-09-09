@@ -382,8 +382,10 @@ def make_run_llm(cfg, run_subprocess: Callable = subprocess.run
     curate() catches that and treats it as a curation failure."""
     def _run(prompt: str) -> str:
         try:
+            model = (getattr(cfg, "model", "") or "").strip()
             proc = run_subprocess(
-                [cfg.claude_bin, "-p", prompt], cwd=_REPO_ROOT,
+                [cfg.claude_bin, "-p", prompt] + (["--model", model] if model else []),
+                cwd=_REPO_ROOT,
                 capture_output=True, text=True,
                 stdin=subprocess.DEVNULL,  # claude -p exits 1 waiting on a non-TTY stdin
                 timeout=_LLM_TIMEOUT_SECONDS)
