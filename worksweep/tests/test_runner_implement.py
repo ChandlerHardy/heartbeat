@@ -417,3 +417,85 @@ def test_a_needs_input_park_does_not_stop_the_drain(tmp_path):
     assert run_once(_cfg(tmp_path), deps, **_locks(tmp_path)) == 0
     final = {r.number: r.item.status for r in state["records"]}
     assert final == {1: "needs-input", 2: "done"}
+
+
+# --------------------------------------------------------------------------
+# 2026-09-09: concurrent implement claims. "There's really no reason to do
+# things in sequential order — we can just spawn more sessions." The implement
+# pass runs up to cfg.implement_concurrency claims at once, each in its own
+# worker with its own dev box; the queue lock serialises the pick/claim and the
+# slot stamp, so two workers can never take the same record or the same box.
+# --------------------------------------------------------------------------
+import threading
+
+
+def test_pick_claim_allows_a_second_implement_under_the_concurrency_limit():
+    recs = [_rec(1, status="running", executor="implement"),
+            _rec(2, status="approved", executor="implement", iid=1830)]
+    assert pick_claim(recs, ("implement",)) is None                       # default limit 1
+    assert pick_claim(recs, ("implement",), implement_limit=2).number == 2
+    recs.append(_rec(3, status="running", executor="implement", iid=1829))
+    assert pick_claim(recs, ("implement",), implement_limit=2) is None    # 2 running = full
+
+
+def test_run_once_runs_two_implement_claims_concurrently_on_distinct_boxes(tmp_path):
+    """FALSIFYING: a sequential drain deadlocks on the barrier (each execute
+    waits for the OTHER to be running) and the test times out."""
+    barrier = threading.Barrier(2, timeout=10)
+    seen_boxes = []
+
+    def execute(item, cfg, bx):
+        seen_boxes.append(bx[0].name)
+        barrier.wait()          # both claims must be inside execute at once
+        return _result(iid=1775, dev_box=bx[0].name)
+
+    recs = [_rec(1, iid=1830), _rec(2, iid=1829)]
+    deps, posts, saves, state = _deps(recs, execute_implement=execute,
+                                      boxes=[_box("dev1"), _box("dev2")])
+    rc = run_once(_cfg(tmp_path, implement_concurrency=2), deps,
+                  lock_path=str(tmp_path / "runner.lock"), families=("implement",))
+    assert rc == 0
+    assert sorted(seen_boxes) == ["dev1", "dev2"]
+    final = {r.number: r.item for r in state["records"]}
+    assert final[1].status == "done" and final[2].status == "done"
+    assert {final[1].dev_box, final[2].dev_box} == {"dev1", "dev2"}
+
+
+def test_two_concurrent_claims_never_share_one_free_box(tmp_path):
+    """Both workers probe the same box list; the slot stamp under the queue
+    lock must hand dev1 to exactly one of them and fail the other honestly."""
+    import time
+
+    def execute(item, cfg, bx):
+        time.sleep(1.0)     # stay in flight while the second worker stamps its box
+        return _result(dev_box=bx[0].name)
+
+    recs = [_rec(1, iid=1830), _rec(2, iid=1829)]
+    deps, posts, saves, state = _deps(recs, execute_implement=execute,
+                                      boxes=[_box("dev1")])
+    rc = run_once(_cfg(tmp_path, implement_concurrency=2), deps,
+                  lock_path=str(tmp_path / "runner.lock"), families=("implement",))
+    final = {r.number: r.item for r in state["records"]}
+    statuses = sorted(i.status for i in final.values())
+    assert statuses == ["done", "error"]
+    assert [i.dev_box for i in final.values() if i.status == "done"] == ["dev1"]
+    assert any("no dev slot" in p for p in posts)
+    assert rc == 1
+
+
+def test_concurrency_one_keeps_the_old_sequential_behaviour(tmp_path):
+    order = []
+
+    def execute(item, cfg, bx):
+        order.append(("start", item.id))
+        order.append(("end", item.id))
+        return _result(dev_box=bx[0].name)
+
+    recs = [_rec(1, iid=1830), _rec(2, iid=1829)]
+    deps, posts, saves, state = _deps(recs, execute_implement=execute,
+                                      boxes=[_box("dev1"), _box("dev2")])
+    run_once(_cfg(tmp_path, implement_concurrency=1), deps,
+             lock_path=str(tmp_path / "runner.lock"), families=("implement",))
+    assert order == [("start", "issue:pb-www#1830"), ("end", "issue:pb-www#1830"),
+                     ("start", "issue:pb-www#1829"), ("end", "issue:pb-www#1829")]
+    assert all(r.item.status == "done" for r in state["records"])

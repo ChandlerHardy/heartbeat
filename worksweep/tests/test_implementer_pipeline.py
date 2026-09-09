@@ -88,7 +88,7 @@ class _Edges:
 def _run(tmp_path, edges=None, cfg=None, boxes=None):
     (tmp_path / "pb-www").mkdir(exist_ok=True)
     edges = edges or _Edges()
-    edges.checkout = str(tmp_path / ".worktrees" / "pb-www-implement")
+    edges.checkout = str(tmp_path / ".worktrees" / "pb-www-implement-1775")
     result = execute(_item(), cfg or _cfg(tmp_path),
                      boxes if boxes is not None else [_box()],
                      run_subprocess=edges.run, run_ssh=edges.ssh,
@@ -214,7 +214,7 @@ def test_a_stale_state_file_is_never_read_as_this_runs_work(tmp_path):
     import time as _time
     edges = _Edges(write_state=None)          # this run leaves nothing behind
     (tmp_path / "pb-www").mkdir(exist_ok=True)
-    stale_dir = (tmp_path / ".worktrees" / "pb-www-implement" / ".claude"
+    stale_dir = (tmp_path / ".worktrees" / "pb-www-implement-1775" / ".claude"
                  / "state" / "pla-pipelines" / "1775-yesterdays-run")
     stale_dir.mkdir(parents=True)
     stale = stale_dir / "state.md"
@@ -235,7 +235,7 @@ def test_a_surviving_checkpoint_is_kept_and_a_fresh_write_wins(tmp_path):
     run; the old checkpoint file is left in place."""
     edges = _Edges()
     (tmp_path / "pb-www").mkdir(exist_ok=True)
-    root = (tmp_path / ".worktrees" / "pb-www-implement" / ".claude"
+    root = (tmp_path / ".worktrees" / "pb-www-implement-1775" / ".claude"
             / "state" / "pla-pipelines")
     stale = root / "1775-yesterdays-run"
     stale.mkdir(parents=True)
@@ -251,7 +251,7 @@ def test_state_for_another_issue_is_left_alone(tmp_path):
     business -- its state is neither read nor touched."""
     edges = _Edges()
     (tmp_path / "pb-www").mkdir(exist_ok=True)
-    root = (tmp_path / ".worktrees" / "pb-www-implement" / ".claude"
+    root = (tmp_path / ".worktrees" / "pb-www-implement-1775" / ".claude"
             / "state" / "pla-pipelines")
     other = root / "1701-other-issue"
     other.mkdir(parents=True)
@@ -625,3 +625,27 @@ def test_a_vanished_session_retries_the_leg_fresh(tmp_path):
     assert len(edges.claude_argvs) == 3
     assert edges.claude_argvs[1][1] == "--resume"
     assert edges.claude_argvs[2][1] == "-p"      # the cold retry
+
+
+# --- 2026-09-09: the implement lane writes the issue dossier ----------------
+
+def test_a_finished_pipeline_claim_records_the_dossier_link_and_session(tmp_path):
+    from worksweep import dossier
+    edges = _Edges(claude_out=json.dumps({"result": "pipeline complete",
+                                          "session_id": "sess-impl-1"}))
+    cfg = _cfg(tmp_path, issues_root=str(tmp_path / "issues"))
+    result, _ = _run(tmp_path, edges=edges, cfg=cfg)
+    assert result.mr_iid == 4099
+    text = dossier.read(cfg, "pb-www", 1775)
+    assert "## Implement" in text
+    assert "!4099" in text and "fix/1775-inline" in text and "dev2" in text
+    assert "MAGI: r2 codex READY" in text            # the state file rides along
+    assert dossier.issue_for_mr(cfg, "pb-www", 4099) == 1775
+    assert dossier.load_session(cfg, "pb-www", 1775) == "sess-impl-1"
+
+
+def test_a_dossier_failure_never_fails_the_claim(tmp_path):
+    (tmp_path / "issues").write_text("not a directory")
+    cfg = _cfg(tmp_path, issues_root=str(tmp_path / "issues"))
+    result, _ = _run(tmp_path, cfg=cfg)
+    assert result.mr_iid == 4099

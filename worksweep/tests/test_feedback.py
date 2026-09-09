@@ -2153,3 +2153,110 @@ def test_gc_drops_holds_of_rows_no_longer_waiting(tmp_path):
     dropped = feedback.gc_holds(recs, _cfg(tmp_path), sub)
     assert dropped == [2]
     assert [c for c in calls if "remove" in c][0][2] == str(dead)
+
+
+# --- 2026-09-09: the issue dossier + session resume ------------------------
+#
+# The feedback round used to start cold: threads + description, nothing of why
+# the implement session chose what it chose. Now it reads the issue's dossier
+# (linked from the MR) into the prompt, resumes the implement session when one
+# is fresh enough, and appends its own round to the dossier when done.
+
+def _dossier_cfg(tmp_path, **kw):
+    return _cfg(tmp_path, issues_root=str(tmp_path / "issues"), **kw)
+
+
+def _claude_prompt(sub):
+    return next(c for c in sub.calls if c and c[0] == "claude")[2]
+
+
+def test_the_prompt_carries_the_issue_dossier_when_the_mr_is_linked(tmp_path, worktree):
+    from worksweep import dossier
+    cfg = _dossier_cfg(tmp_path)
+    dossier.link_mr(cfg, "pb-www", 3997, 1588)
+    dossier.record(cfg, "pb-www", 1588, "Implement", "chose discard over 403 because getDefaults pre-mints ids")
+    sub = _Subprocess(worktree, report=_report(replied=["t1"]))
+    _run(tmp_path, worktree, sub, [_waiting("t1")], [_answered("t1")], cfg=cfg)
+    prompt = _claude_prompt(sub)
+    assert "ISSUE DOSSIER" in prompt and "discard over 403" in prompt
+    assert "history, not truth" in prompt
+
+
+def test_an_unlinked_mr_gets_no_dossier_block_and_runs_cold(tmp_path, worktree):
+    sub = _Subprocess(worktree, report=_report(replied=["t1"]))
+    _run(tmp_path, worktree, sub, [_waiting("t1")], [_answered("t1")], cfg=_dossier_cfg(tmp_path))
+    prompt = _claude_prompt(sub)
+    assert "ISSUE DOSSIER" not in prompt
+    assert "--resume" not in next(c for c in sub.calls if c[0] == "claude")
+
+
+def test_a_fresh_implement_session_is_resumed_with_the_history_preamble(tmp_path, worktree):
+    from worksweep import dossier
+    cfg = _dossier_cfg(tmp_path)
+    dossier.link_mr(cfg, "pb-www", 3997, 1588)
+    dossier.save_session(cfg, "pb-www", 1588, "sess-impl-9", "implement")
+    sub = _Subprocess(worktree, report=_report(replied=["t1"]))
+    _run(tmp_path, worktree, sub, [_waiting("t1")], [_answered("t1")], cfg=cfg)
+    argv = next(c for c in sub.calls if c[0] == "claude")
+    assert argv[1:3] == ["--resume", "sess-impl-9"]
+    prompt = argv[argv.index("-p") + 1]
+    assert prompt.startswith("You are being RESUMED")
+    assert "READ THIS BEFORE THE THREADS" in prompt      # the real instructions follow
+
+
+def test_resume_is_off_when_the_config_says_so_or_the_session_is_stale(tmp_path, worktree):
+    from worksweep import dossier
+    cfg = _dossier_cfg(tmp_path, resume_sessions=False)
+    dossier.link_mr(cfg, "pb-www", 3997, 1588)
+    dossier.save_session(cfg, "pb-www", 1588, "sess-impl-9", "implement")
+    sub = _Subprocess(worktree, report=_report(replied=["t1"]))
+    _run(tmp_path, worktree, sub, [_waiting("t1")], [_answered("t1")], cfg=cfg)
+    assert "--resume" not in next(c for c in sub.calls if c[0] == "claude")
+
+
+class _VanishedSession(_Subprocess):
+    """The first claude call is a --resume that cannot find its session."""
+    def __call__(self, cmd, **kw):
+        if cmd[0] == "claude" and "--resume" in cmd:
+            self.calls.append(list(cmd))
+            return _Proc(1, "", "No conversation found with session ID sess-gone")
+        return super().__call__(cmd, **kw)
+
+
+def test_a_vanished_session_falls_back_to_a_cold_run(tmp_path, worktree):
+    from worksweep import dossier
+    cfg = _dossier_cfg(tmp_path)
+    dossier.link_mr(cfg, "pb-www", 3997, 1588)
+    dossier.save_session(cfg, "pb-www", 1588, "sess-gone", "implement")
+    sub = _VanishedSession(worktree, report=_report(replied=["t1"]))
+    res = _run(tmp_path, worktree, sub, [_waiting("t1")], [_answered("t1")], cfg=cfg)
+    claude_calls = [c for c in sub.calls if c[0] == "claude"]
+    assert len(claude_calls) == 2
+    assert "--resume" in claude_calls[0] and "--resume" not in claude_calls[1]
+    assert res.replied == 1
+
+
+class _SessionReporting(_Subprocess):
+    """claude -p --output-format json: stdout carries the session id."""
+    def __call__(self, cmd, **kw):
+        proc = super().__call__(cmd, **kw)
+        if cmd[0] == "claude":
+            return _Proc(proc.returncode, json.dumps({"result": "ok", "session_id": "sess-fb-2"}))
+        return proc
+
+
+def test_a_finished_round_is_appended_to_the_dossier_and_hands_on_its_session(tmp_path, worktree):
+    from worksweep import dossier
+    cfg = _dossier_cfg(tmp_path)
+    dossier.link_mr(cfg, "pb-www", 3997, 1588)
+    sub = _SessionReporting(worktree, report=_report(addressed=[{"thread": "t1", "sha": "deadbee"}],
+                                                     replied=["t2"]),
+                            remote_shas=(PRE_SHA, POST_SHA))
+    _run(tmp_path, worktree, sub, [_waiting("t1"), _waiting("t2")],
+         [_answered("t1"), _answered("t2")], cfg=cfg)
+    text = dossier.read(cfg, "pb-www", 1588)
+    assert "## Feedback round" in text
+    assert "addressed: t1" in text and "replied: t2" in text
+    assert "vitest 30/30" in text                         # the receipt rides along
+    assert dossier.load_session(cfg, "pb-www", 1588) == "sess-fb-2"
+    assert "--output-format" in next(c for c in sub.calls if c[0] == "claude")

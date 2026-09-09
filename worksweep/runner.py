@@ -10,7 +10,9 @@ import datetime
 import glob as _glob
 import os
 import re
+import contextlib
 import subprocess
+import threading
 import sys
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -82,15 +84,16 @@ def _replace(rec: QueueRecord, now: str, **item_changes) -> QueueRecord:
 
 
 def pick_claim(records: List[QueueRecord],
-               executors: Tuple[str, ...] = _ALL_EXECUTORS
-               ) -> Optional[QueueRecord]:
+               executors: Tuple[str, ...] = _ALL_EXECUTORS,
+               implement_limit: int = 1) -> Optional[QueueRecord]:
     """Lowest-numbered approved record whose executor is in `executors`.
 
-    Single-flight kinds (implement) are skipped entirely while one of their
-    own is already `running` — a second implement must not claim a second dev
-    box or a second `/rubric:do` while the first is mid-flight. magi-review is
-    unaffected by a running implement (and vice versa): the two kinds hold
-    separate lock files and may run one each per pass.
+    Single-flight kinds (implement) are skipped while `implement_limit` of
+    their own are already `running` (2026-09-09: the implement pass runs up
+    to cfg.implement_concurrency claims at once, each on its own dev box in
+    its own worktree; the default of 1 keeps every other caller sequential).
+    magi-review is unaffected by a running implement (and vice versa): the
+    two kinds hold separate lock files and may run one each per pass.
 
     A BRANCH already being worked by any running record is also skipped, no
     matter which executor holds it. The lock files make each executor
@@ -101,15 +104,18 @@ def pick_claim(records: List[QueueRecord],
     in. Items with no branch (magi-review, triage) are unaffected -- an empty
     branch is the absence of one, not a shared resource.
     """
-    running_kinds = {r.item.executor for r in records
-                     if r.item.status == "running"}
+    running_count: Dict[str, int] = {}
+    for r in records:
+        if r.item.status == "running":
+            running_count[r.item.executor] = running_count.get(r.item.executor, 0) + 1
     running_branches = {r.item.branch for r in records
                         if r.item.status == "running" and r.item.branch}
+    limit = max(1, int(implement_limit or 1))
     candidates = [r for r in records
                   if r.item.status == "approved"
                   and r.item.executor in executors
                   and not (r.item.executor in _SINGLE_FLIGHT
-                           and r.item.executor in running_kinds)
+                           and running_count.get(r.item.executor, 0) >= limit)
                   and r.item.branch not in running_branches]
     return min(candidates, key=lambda r: r.number) if candidates else None
 
@@ -370,6 +376,10 @@ def execute(item: WorkItem, cfg,
     return item.sha, report
 
 
+_THREAD_QUEUE_LOCK = threading.RLock()
+
+
+@contextlib.contextmanager
 def _queue_lock(deps):
     """The cross-process queue lock, or an inert one when unwired.
 
@@ -377,8 +387,14 @@ def _queue_lock(deps):
     executor run. A pass holding it across a 30-minute claude run would stall
     the sweep, intake and every dashboard tap -- the same mistake that pulled
     address-feedback out of the shared runner lock in the first place.
+
+    Also an in-process lock (2026-09-09): the implement pass now runs its
+    claims on worker threads, and the file lock alone does not serialise two
+    threads of the same process whose injected lock is the inert test one.
     """
-    return deps.get("queue_lock", _null_lock)()
+    with _THREAD_QUEUE_LOCK:
+        with deps.get("queue_lock", _null_lock)():
+            yield
 
 
 def _apply_to_fresh(deps, cfg, number: int,
@@ -863,18 +879,25 @@ def _chain_magi_review(records: List[QueueRecord], item: WorkItem, result,
 _IMPLEMENT_DRAIN_MAX = 9
 
 
+def _implement_concurrency(cfg) -> int:
+    return max(1, int(getattr(cfg, "implement_concurrency", 1) or 1))
+
+
 def _run_implement_pass(cfg, deps: Dict[str, Callable], lock_path: str) -> int:
-    """Drain approved implement items back-to-back, one at a time, under the
-    one lock. Every claim's exit is either a no-op (nothing approved / lock
-    held) or ends in BOTH a queue status and a Discord post — this executor
-    writes to GitLab and occupies a dev box, so a silent failure would leave
-    a claimed box and a half-open branch with nobody told. A failed claim
-    does not stop the drain: the next item deserves its run, and the failure
-    already posted."""
+    """Drain approved implement items under the one lock, up to
+    cfg.implement_concurrency at a time (2026-09-09), each claim on its own
+    worker thread with its own dev box and per-issue worktree. Every claim's
+    exit is either a no-op (nothing approved / lock held) or ends in BOTH a
+    queue status and a Discord post — this executor writes to GitLab and
+    occupies a dev box, so a silent failure would leave a claimed box and a
+    half-open branch with nobody told. A failed claim does not stop the
+    drain: the next item deserves its run, and the failure already posted.
+    """
+    limit = _implement_concurrency(cfg)
     # Cheap pre-check before taking the lock (and before probing dev boxes over
     # ssh): the overwhelmingly common case is "nothing approved".
     try:
-        if pick_claim(deps["load"](), (_IMPLEMENT,)) is None:
+        if pick_claim(deps["load"](), (_IMPLEMENT,), limit) is None:
             return 0
     except Exception as e:
         _post(deps, cfg, f"⚠️ Worksweep runner: could not read the queue for "
@@ -883,27 +906,103 @@ def _run_implement_pass(cfg, deps: Dict[str, Callable], lock_path: str) -> int:
     if not acquire_lock(lock_path):
         return 0    # an implement run is already live under this lock
     try:
-        worst = 0
-        for _ in range(_IMPLEMENT_DRAIN_MAX):
-            rc = _run_one_implement_claim(cfg, deps)
-            if rc is None:             # nothing approved any more — done
+        rcs: List[int] = []
+        workers: List[threading.Thread] = []
+        fatal: List[BaseException] = []
+        spawned = 0
+
+        def _worker():
+            try:
+                rc = _run_one_implement_claim(cfg, deps)
+            except Exception as e:      # never let a thread die silently
+                _post(deps, cfg, f"⚠️ Worksweep runner: implement pass crashed "
+                                 f"in a worker — {type(e).__name__}: {e}")
+                rc = 1
+            except BaseException as e:  # ^C / SystemExit: re-raised by the pass
+                fatal.append(e)
+                rc = 1
+            if rc:
+                rcs.append(rc)
+
+        while spawned < _IMPLEMENT_DRAIN_MAX:
+            alive = [t for t in workers if t.is_alive()]
+            pickable = False
+            if len(alive) < limit:
+                try:
+                    pickable = pick_claim(deps["load"](), (_IMPLEMENT,),
+                                          limit) is not None
+                except Exception:
+                    pickable = False
+            if pickable:
+                t = threading.Thread(target=_worker, name=f"implement-{spawned}",
+                                     daemon=True)
+                t.start()
+                workers.append(t)
+                spawned += 1
+                # Let the worker claim under the lock before re-checking, so
+                # the same record is not picked twice in a tight loop.
+                t.join(timeout=0.2)
+                continue
+            if not alive:
                 break
-            worst = worst or rc
-        return worst
+            alive[0].join(timeout=2)
+        for t in workers:
+            t.join()
+        if fatal:
+            raise fatal[0]
+        try:
+            _gc_finished_worktrees(cfg, deps)
+        except Exception:
+            pass
+        return max(rcs) if rcs else 0
     finally:
         release_lock(lock_path)
 
 
+def _gc_finished_worktrees(cfg, deps: Dict[str, Callable]) -> None:
+    """Per-issue implement worktrees outlive their claim so a halted or
+    resumed claim finds its state file; once no implement record for that
+    issue is live any more the tree is just disk. Injected via deps so tests
+    and --dry-run stay off the filesystem."""
+    gc = deps.get("gc_worktrees")
+    if gc is None:
+        return
+    from . import implementer      # local: implementer imports runner
+    records = deps["load"]()
+    keep = set()
+    for r in records:
+        if r.item.executor != _IMPLEMENT:
+            continue
+        if r.item.status in ("approved", "running", "needs-input", "error"):
+            try:
+                keep.add(str(implementer.issue_iid(r.item)))
+            except Exception:
+                continue
+    gc(cfg, keep)
+
+
 def _run_one_implement_claim(cfg, deps: Dict[str, Callable]) -> Optional[int]:
-    """One implement claim, called WITH the implement lock held. Returns the
-    claim's rc, or None when nothing is approved (the drain's stop signal)."""
+    """One implement claim, called WITH the implement lock held (possibly on
+    a worker thread beside other claims). Returns the claim's rc, or None
+    when nothing is approved.
+
+    The pick and the claim happen together under the queue lock, so two
+    workers can never take the same record; the dev slot is stamped under
+    the lock too, against the boxes OTHER live records already hold, so two
+    workers that probed the same free box cannot both keep it."""
     from . import implementer      # local: implementer imports runner
     now = deps["now"]()
-    records = deps["load"]()
-    target = pick_claim(records, (_IMPLEMENT,))
-    if target is None:
-        return None                # raced with another pass — fine
-    number = target.number
+    limit = _implement_concurrency(cfg)
+
+    # 1. pick + claim atomically (no box yet -- probing is slow and must not
+    #    happen under the lock).
+    with _queue_lock(deps):
+        records = deps["load"]()
+        target = pick_claim(records, (_IMPLEMENT,), limit)
+        if target is None:
+            return None                # raced with another worker — fine
+        number = target.number
+        deps["save"](claim(records, number, now))
 
     if "boxes" not in deps or "execute_implement" not in deps:
         _fail_and_post(deps, cfg, number,
@@ -917,24 +1016,27 @@ def _run_one_implement_claim(cfg, deps: Dict[str, Callable]) -> Optional[int]:
         _fail_and_post(deps, cfg, number, str(e), _IMPLEMENT)
         return 1
 
+    # 2. probe (slow, outside the lock), then stamp a box under the lock
+    #    excluding every box another live implement record already holds.
     try:
-        slot = implementer.select_slot(deps["boxes"]())
+        boxes = list(deps["boxes"]())
         reason = "no dev slot available — free one or reclaim"
     except Exception as e:
-        slot, reason = None, (f"dev-slot probe failed: "
-                              f"{type(e).__name__}: {e}")
+        boxes, reason = [], (f"dev-slot probe failed: "
+                             f"{type(e).__name__}: {e}")
+    slot = None
+    with _queue_lock(deps):
+        fresh = deps["load"]()
+        taken = {r.item.dev_box for r in fresh
+                 if r.item.dev_box and r.item.executor == _IMPLEMENT
+                 and r.item.status in ("running", "approved")
+                 and r.number != number}
+        slot = implementer.select_slot([b for b in boxes if b.name not in taken])
+        if slot is not None:
+            deps["save"](claim(fresh, number, now, dev_box=slot.name))
     if slot is None:
         _fail_and_post(deps, cfg, number, reason, _IMPLEMENT)
         return 1
-
-    # Claim the box on disk BEFORE the long work: a concurrent sweep's
-    # devslots.classify reads dev_box off running/approved records, so an
-    # unstamped claim could hand the same box to the next implement item.
-    with _queue_lock(deps):
-        # Re-load: selecting a dev slot probes every box over ssh, so the
-        # `records` read at the top of this pass is seconds old by now.
-        deps["save"](claim(deps["load"](), number, now,
-                           dev_box=slot.name))
     _post(deps, cfg, _implement_claim_message(iid, slot, branch))
 
     try:

@@ -47,19 +47,27 @@ _TAIL_LINES = 15
 
 
 def worktree_for(cfg, repo: str, executor: str,
-                 run_subprocess: Callable = subprocess.run) -> str:
+                 run_subprocess: Callable = subprocess.run,
+                 suffix: str = "") -> str:
     """The checkout directory `executor` should use for `repo`. See the
     module docstring for the layout. Raises RunnerError when the shared
     clone (`<checkouts_root>/<repo>`) is missing, or when `git worktree add`
-    fails while creating a fresh worktree."""
+    fails while creating a fresh worktree.
+
+    `suffix` (2026-09-09) makes the worktree per-claim rather than per-
+    executor: `<repo>-implement-1830`. Two implement claims running at once
+    each get their own tree, so neither `checkout -B` can land in the other's
+    live work. Per-issue trees also keep the pipeline's state file with the
+    issue it belongs to across resumed claims; gc_worktrees() clears the
+    finished ones."""
     root = os.path.join(cfg.checkouts_root or "", repo)
     if executor not in _WORKTREE_EXECUTORS:
         return root
     if not os.path.isdir(root):
         raise RunnerError(f"no checkout for {repo} at {root}")
 
-    path = os.path.join(cfg.checkouts_root or "", ".worktrees",
-                        f"{repo}-{executor}")
+    leaf = f"{repo}-{executor}" + (f"-{suffix}" if suffix else "")
+    path = os.path.join(cfg.checkouts_root or "", ".worktrees", leaf)
     if os.path.isdir(path):
         check = _run(["git", "-C", path, "rev-parse", "--git-dir"],
                      run_subprocess)
@@ -79,6 +87,42 @@ def worktree_for(cfg, repo: str, executor: str,
         out = f"{added.stderr or ''}{added.stdout or ''}"
         raise RunnerError(f"git worktree add {path} failed: {_tail(out)}")
     return path
+
+
+def gc_worktrees(cfg, repo: str, executor: str, keep,
+                 run_subprocess: Callable = subprocess.run) -> List[str]:
+    """Remove the per-claim worktrees (`<repo>-<executor>-<suffix>`) whose
+    suffix is not in `keep` and whose tree is clean. A dirty tree is left
+    alone -- somebody's uncommitted work is never tidied away -- and every
+    failure is swallowed: GC is housekeeping, never an outcome. Returns the
+    paths removed. The un-suffixed per-executor tree is never touched."""
+    root = os.path.join(cfg.checkouts_root or "", repo)
+    base = os.path.join(cfg.checkouts_root or "", ".worktrees")
+    prefix = f"{repo}-{executor}-"
+    keep = {str(k) for k in keep}
+    removed: List[str] = []
+    try:
+        names = sorted(os.listdir(base))
+    except OSError:
+        return removed
+    for name in names:
+        if not name.startswith(prefix):
+            continue
+        suffix = name[len(prefix):]
+        if not suffix or suffix in keep:
+            continue
+        path = os.path.join(base, name)
+        try:
+            if not _is_clean(run_subprocess, path):
+                continue
+            gone = _run(["git", "-C", root, "worktree", "remove", "--force", path],
+                        run_subprocess)
+            if gone.returncode == 0 or not os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=True)
+                removed.append(path)
+        except Exception:
+            continue
+    return removed
 
 
 def detach(checkout: str, run_subprocess: Callable = subprocess.run) -> bool:
