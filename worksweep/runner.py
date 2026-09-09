@@ -811,7 +811,8 @@ def _run_address_feedback_claim(cfg, deps: Dict[str, Callable],
                 deps, cfg, number,
                 lambda fresh: needs_input(fresh, number, str(e),
                                           deps["now"]())) is not None:
-            _post(deps, cfg, _clamped(f"❓ #{number} needs your input: {e}"))
+            _post(deps, cfg, _clamped(f"❓ #{number} needs your input: {e} "
+                                      f"(Fable consult queued)"))
         return 0        # a question is a handled outcome, not a failure
     except RunnerError as e:
         _fail_and_post(deps, cfg, number, str(e), _ADDRESS_FEEDBACK)

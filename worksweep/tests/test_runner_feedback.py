@@ -156,6 +156,10 @@ def test_zero_handled_with_escalations_asks_rather_than_errors(tmp_path):
     assert len(asked) == 1
     assert "#7" in asked[0]
     assert "product call" in asked[0]
+    # 2026-09-09: needs_input() auto-requests the consult lane, and the post
+    # says so -- same wording as the implement lane's ❓.
+    assert asked[0].endswith("(Fable consult queued)")
+    assert state["records"][0].item.consult == "requested"
 
 
 def test_a_needs_input_row_is_not_reclaimed_on_the_next_pass(tmp_path):
