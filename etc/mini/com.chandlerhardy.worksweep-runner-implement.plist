@@ -13,8 +13,18 @@
         <string>--families</string>
         <string>implement</string>
     </array>
-    <key>StartInterval</key>
-    <integer>600</integer>
+    <!-- 2026-09-09: StartInterval timers in the gui domain stopped firing (a fresh 60s test
+         agent never ran; calendar agents did). Every interval agent moved to
+         StartCalendarInterval -- same cadence, wall-clock slots. -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Minute</key><integer>5</integer></dict>
+        <dict><key>Minute</key><integer>15</integer></dict>
+        <dict><key>Minute</key><integer>25</integer></dict>
+        <dict><key>Minute</key><integer>35</integer></dict>
+        <dict><key>Minute</key><integer>45</integer></dict>
+        <dict><key>Minute</key><integer>55</integer></dict>
+    </array>
     <key>RunAtLoad</key>
     <false/>
     <key>EnvironmentVariables</key>
