@@ -523,79 +523,116 @@ def _guarded_pass(cfg, deps: Dict[str, Callable], kind: str,
         return 1
 
 
-def _run_magi_pass(cfg, deps: Dict[str, Callable], lock_path: str) -> int:
-    """One claim from magi-review, keep-current, park OR address-feedback
-    (lowest number wins across all four — see pick_claim). They share this
-    pass/lock deliberately: each is a short op (a git fetch/merge/push, a
-    branch sync plus one API write, or one bounded claude pass over an MR's
-    threads), not worth its own lock file, and this pass only ever runs one
-    claim per invocation either way."""
-    if not acquire_lock(lock_path):
-        return 0    # another runner is live — that's fine, not an error
-    try:
-        now = deps["now"]()
-        with _queue_lock(deps):
-            records = deps["load"]()
+# 2026-09-09: how many EXTRA keep-current claims one short pass may run after
+# its first claim. After a big master merge the queue fills with a dozen
+# keep-current rows at once, and one-per-tick (10 min each) turned a two-minute
+# job into a two-hour one. A master merge is the cheap, self-contained op
+# (fetch/merge/push, aborts cleanly on conflict, no claude, no dev-box claim
+# beyond a sync), so it is the one kind worth chaining; magi-review and park
+# stay one per tick.
+_KEEP_CURRENT_DRAIN_MAX = 12
+
+
+def _pick_short_claim(cfg, deps: Dict[str, Callable], executors: Tuple[str, ...],
+                      reap: bool):
+    """Reap (optionally), pick the lowest approved claim among `executors`,
+    mark it running -- all under the queue lock. Returns (target, reaped)."""
+    now = deps["now"]()
+    reaped: List[QueueRecord] = []
+    with _queue_lock(deps):
+        records = deps["load"]()
+        if reap:
             records, reaped = reap_stale(
                 records, now, implement_timeout=_implement_timeout(cfg),
                 magi_timeout=_magi_timeout(cfg),
                 feedback_timeout=_feedback_timeout(cfg))
             if reaped:
                 deps["save"](records)
-            target = pick_claim(records, (_MAGI, _KEEP_CURRENT, _PARK))
-            if target is not None:
-                records = claim(records, target.number, now)
-                deps["save"](records)
+        target = pick_claim(records, executors)
+        if target is not None:
+            records = claim(records, target.number, now)
+            deps["save"](records)
+    return target, reaped
+
+
+def _run_magi_pass(cfg, deps: Dict[str, Callable], lock_path: str) -> int:
+    """One claim from magi-review, keep-current or park (lowest number wins
+    across the three -- see pick_claim), then every remaining keep-current
+    claim up to _KEEP_CURRENT_DRAIN_MAX. They share this pass/lock
+    deliberately: each is a short op (a git fetch/merge/push, a branch sync
+    plus one API write, or one bounded claude pass), not worth its own lock
+    file. Only keep-current is chained; a second magi-review or park waits
+    for the next tick as before."""
+    if not acquire_lock(lock_path):
+        return 0    # another runner is live — that's fine, not an error
+    try:
+        target, reaped = _pick_short_claim(
+            cfg, deps, (_MAGI, _KEEP_CURRENT, _PARK), reap=True)
         # Discord posts and the executor itself run OUTSIDE the lock.
         for r in reaped:
             _post(deps, cfg, f"⚠️ Worksweep runner: reaped stale claim "
                              f"#{r.number} ({r.item.repo} {r.item.id})")
         if target is None:
             return 0
-        if target.item.executor == _KEEP_CURRENT:
-            return _run_keep_current_claim(cfg, deps, target)
-        if target.item.executor == _PARK:
-            return _run_park_claim(cfg, deps, target)
-        try:
-            result_sha, report_path = deps["execute"](target.item, cfg)
-        except RunnerError as e:
-            _fail_and_post(deps, cfg, target.number, str(e), _MAGI)
-            return 1
-        except Exception as e:
-            # Non-RunnerError failures (e.g. FileNotFoundError when `claude`/git
-            # is missing from launchd's minimal PATH) must still flip the claim
-            # to error and post — otherwise the item is stuck `running` silently
-            # until the 45-min reap, with no signal anything went wrong.
-            _fail_and_post(deps, cfg, target.number,
-                           f"{type(e).__name__}: {e}", _MAGI)
-            return 1
-        updated = _apply_to_fresh(
-            deps, cfg, target.number,
-            lambda fresh: complete(fresh, target.number, result_sha, report_path,
-                                   deps["now"]()))
-        if updated is not None and target.item.kind == "re_review":
-            # The re-review is done at this head: record it so the sensor's
-            # sha comparison resolves the row instead of re-proposing it.
-            record_edge = deps.get("record_reviewed")
-            if record_edge is not None:
-                try:
-                    record_edge(f"{target.item.repo}!{_iid_of(target.item)}",
-                                result_sha or target.item.sha)
-                except Exception as e:
-                    print(f"worksweep: could not record reviewed sha for "
-                          f"#{target.number}: {type(e).__name__}: {e}",
-                          file=sys.stderr)
-        if updated is not None:
-            verdict = extract_verdict(report_path) if report_path else ""
-            msg = (f"🧙 magi-review done — #{target.number} {target.item.repo} "
-                   f"<{target.item.web_url}>\n"
-                   + (f"```\n{verdict}\n```\n" if verdict else "")
-                   + (f"report: `{report_path}`" if report_path
-                      else "(no report file found)"))
-            _post(deps, cfg, msg)
-        return 0
+        rc = _run_short_claim(cfg, deps, target)
+        drained = 0
+        while drained < _KEEP_CURRENT_DRAIN_MAX:
+            nxt, _ = _pick_short_claim(cfg, deps, (_KEEP_CURRENT,), reap=False)
+            if nxt is None:
+                break
+            drained += 1
+            # A failed merge already flipped its row to error and posted;
+            # the next branch still deserves its merge.
+            rc = max(rc, _run_short_claim(cfg, deps, nxt))
+        return rc
     finally:
         release_lock(lock_path)
+
+
+def _run_short_claim(cfg, deps: Dict[str, Callable], target: QueueRecord) -> int:
+    """Run ONE already-claimed short-pass record to its queue status + post."""
+    if target.item.executor == _KEEP_CURRENT:
+        return _run_keep_current_claim(cfg, deps, target)
+    if target.item.executor == _PARK:
+        return _run_park_claim(cfg, deps, target)
+    try:
+        result_sha, report_path = deps["execute"](target.item, cfg)
+    except RunnerError as e:
+        _fail_and_post(deps, cfg, target.number, str(e), _MAGI)
+        return 1
+    except Exception as e:
+        # Non-RunnerError failures (e.g. FileNotFoundError when `claude`/git
+        # is missing from launchd's minimal PATH) must still flip the claim
+        # to error and post — otherwise the item is stuck `running` silently
+        # until the 45-min reap, with no signal anything went wrong.
+        _fail_and_post(deps, cfg, target.number,
+                       f"{type(e).__name__}: {e}", _MAGI)
+        return 1
+    updated = _apply_to_fresh(
+        deps, cfg, target.number,
+        lambda fresh: complete(fresh, target.number, result_sha, report_path,
+                               deps["now"]()))
+    if updated is not None and target.item.kind == "re_review":
+        # The re-review is done at this head: record it so the sensor's
+        # sha comparison resolves the row instead of re-proposing it.
+        record_edge = deps.get("record_reviewed")
+        if record_edge is not None:
+            try:
+                record_edge(f"{target.item.repo}!{_iid_of(target.item)}",
+                            result_sha or target.item.sha)
+            except Exception as e:
+                print(f"worksweep: could not record reviewed sha for "
+                      f"#{target.number}: {type(e).__name__}: {e}",
+                      file=sys.stderr)
+    if updated is not None:
+        verdict = extract_verdict(report_path) if report_path else ""
+        msg = (f"🧙 magi-review done — #{target.number} {target.item.repo} "
+               f"<{target.item.web_url}>\n"
+               + (f"```\n{verdict}\n```\n" if verdict else "")
+               + (f"report: `{report_path}`" if report_path
+                  else "(no report file found)"))
+        _post(deps, cfg, msg)
+    return 0
 
 
 def _run_keep_current_claim(cfg, deps: Dict[str, Callable],
