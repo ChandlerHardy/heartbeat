@@ -174,8 +174,8 @@ class _Collide:
     """
 
     def __init__(self, holder, dirty=False, holder_branch=BRANCH,
-                 detach_rc=0, retry_rc=0):
-        self.holder, self.dirty = holder, dirty
+                 detach_rc=0, retry_rc=0, littered=False):
+        self.holder, self.dirty, self.littered = holder, dirty, littered
         self.holder_branch, self.detach_rc = holder_branch, detach_rc
         self.retry_rc = retry_rc
         self.calls, self.released = [], False
@@ -204,9 +204,13 @@ class _Collide:
                                             ("/elsewhere/pb-www", None)),
                 stderr="")
         if rest[:1] == ["status"]:
-            return subprocess.CompletedProcess(
-                c, 0, stdout=" M www/home/x.php\n" if self.dirty else "",
-                stderr="")
+            # `--untracked-files=no` is what makes litter invisible: without
+            # it the fake reports the untracked leftovers too.
+            tracked = " M www/home/x.php\n" if self.dirty else ""
+            untracked = ("" if "--untracked-files=no" in rest
+                         else "?? .magi/\n?? .codex/\n" if self.littered else "")
+            return subprocess.CompletedProcess(c, 0, stdout=tracked + untracked,
+                                               stderr="")
         return subprocess.CompletedProcess(c, 0, stdout="", stderr="")
 
     def ran(self, *args):
@@ -368,3 +372,26 @@ def test_gc_worktrees_removes_clean_finished_suffix_trees_and_keeps_the_rest(tmp
     gone = gc_worktrees(cfg, "pb-www", "implement", keep={"1829"}, run_subprocess=fake_run)
     assert sorted(os.path.basename(p) for p in gone) == ["pb-www-implement-1830"]
     assert sorted(os.path.basename(p) for p in removed) == ["pb-www-implement-1830"]
+
+
+def test_untracked_litter_in_a_sibling_worktree_does_not_block_the_hand_over(tmp_path):
+    """2026-09-09 (#277): every finished pipeline worktree carries `.magi/` and
+    `.codex/`. A detach at HEAD never touches an untracked file, so litter is
+    not unfinished business -- only a modified TRACKED file refuses."""
+    from worksweep.checkouts import checkout_branch
+    holder = _sibling(tmp_path, "wt-1830-pb-www")
+    git = _Collide(holder, littered=True)
+    checkout_branch(_cfg(tmp_path), str(tmp_path / "mine"), BRANCH,
+                    f"origin/{BRANCH}", git.run)
+    assert git.released is True
+    assert git.ran("status", "--porcelain", "--untracked-files=no")
+    assert len(git.ran("checkout", "-B", BRANCH)) == 2
+
+
+def test_tracked_modification_plus_litter_still_refuses(tmp_path):
+    from worksweep.checkouts import checkout_branch
+    git = _Collide(_sibling(tmp_path), dirty=True, littered=True)
+    with pytest.raises(RunnerError):
+        checkout_branch(_cfg(tmp_path), str(tmp_path / "mine"), BRANCH,
+                        f"origin/{BRANCH}", git.run)
+    assert git.released is False

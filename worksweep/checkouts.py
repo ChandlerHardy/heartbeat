@@ -223,8 +223,14 @@ def _is_our_worktree(cfg, path: str) -> bool:
 
 
 def _is_clean(run_subprocess: Callable, checkout: str) -> bool:
-    status = _run(["git", "-C", checkout, "status", "--porcelain"],
-                  run_subprocess)
+    """No TRACKED modifications. Untracked files do not count (2026-09-09):
+    every finished pipeline worktree carries `.magi/` and `.codex/` leftovers,
+    and a detach at HEAD never touches an untracked file -- so they are not
+    "somebody's unfinished business", they are litter. A modified tracked
+    file still is, and still refuses the hand-over (#277: a rewritten
+    .magi-accept.json kept keep-current off fix/1830 until a human looked)."""
+    status = _run(["git", "-C", checkout, "status", "--porcelain",
+                   "--untracked-files=no"], run_subprocess)
     return status.returncode == 0 and not (status.stdout or "").strip()
 
 
