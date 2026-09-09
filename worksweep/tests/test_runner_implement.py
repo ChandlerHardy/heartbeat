@@ -499,3 +499,15 @@ def test_concurrency_one_keeps_the_old_sequential_behaviour(tmp_path):
     assert order == [("start", "issue:pb-www#1830"), ("end", "issue:pb-www#1830"),
                      ("start", "issue:pb-www#1829"), ("end", "issue:pb-www#1829")]
     assert all(r.item.status == "done" for r in state["records"])
+
+
+def test_run_once_implement_no_change_completes_with_its_reason(tmp_path):
+    """#258: the pipeline's completed_no_change is a completion, not an error."""
+    res = _result(mr_iid=0, mr_url="", dev_url="", no_change=True,
+                  magi_note="PREMISE DEAD ON MASTER: fixed by 155df45614")
+    deps, posts, saves, state = _deps([_rec(1)], execute_implement=lambda i, c, b: res)
+    assert run_once(_cfg(tmp_path), deps, lock_path=str(tmp_path / "runner.lock"),
+                    families=("implement",)) == 0
+    item = state["records"][0].item
+    assert item.status == "done" and item.done_reason == "completed-no-change"
+    assert any("no change needed" in p and "155df45614" in p for p in posts)
