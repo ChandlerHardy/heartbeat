@@ -317,7 +317,7 @@ def is_pure_ack(body) -> bool:
 
 
 def unaddressed_threads(raw_json, username: str, reviewers=(),
-                        seen=()) -> tuple:
+                        seen=(), classify=None) -> tuple:
     """The threads on this MR that are waiting on `username`.
 
     TWO shapes count, because GitLab review feedback arrives in two and only
@@ -340,6 +340,13 @@ def unaddressed_threads(raw_json, username: str, reviewers=(),
 
     `reviewers` defaults to empty, which reproduces the old resolvable-only
     behaviour exactly for any caller that has none to offer.
+
+    `classify(note_id, body) -> True|False|None` (2026-09-09, optional) is the
+    cheap-model second opinion for a LISTED reviewer's last word that the
+    allowlist could not call an ack -- "LGTM, nice work, thanks for the fast
+    turnaround" is an ack with a compliment, not an ask. Only an explicit True
+    suppresses the thread; False/None keep it (fail closed). Never consulted
+    for a bare ack (the allowlist already decided) or for a non-reviewer.
 
     "Last non-system note" also skips access-token bots (see _is_bot): an
     integration answering is not a reviewer waiting on Chandler, and treating
@@ -373,6 +380,15 @@ def unaddressed_threads(raw_json, username: str, reviewers=(),
         # "LGTM" nags forever with nothing to do (cmnoble on !4084).
         if t.last_author in listed and is_pure_ack(t.last_note):
             continue
+        if (t.last_author in listed and classify is not None
+                and (not t.resolvable or not t.resolved)):
+            try:
+                if classify(t.last_note_id, t.last_note) is True:
+                    continue
+            except Exception as e:      # a classifier failure is an ask
+                print(f"worksweep: ack classifier raised for note "
+                      f"{t.last_note_id}: {type(e).__name__}: {e}",
+                      file=sys.stderr)
         if t.resolvable:
             if not t.resolved:
                 out.append(t)

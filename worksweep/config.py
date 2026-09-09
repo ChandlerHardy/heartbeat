@@ -63,6 +63,10 @@ class WorksweepConfig:
     # same issue (dossier.load_session, capped at a week). Off = cold start
     # with the dossier text only.
     resume_sessions: bool = True
+    # 2026-09-09: the cheap-model ack/ask second opinion on reviewer notes the
+    # allowlist could not call an ack (ackclassifier.py). Off = allowlist only.
+    ack_classifier: bool = True
+    ack_model: str = ""          # "" -> ackclassifier.DEFAULT_MODEL (haiku)
     # 2026-08-31 domain guard: where the domain-check registry (domains.json)
     # lives on THIS machine. "" -> models.DEFAULT_DOMAIN_REGISTRY (the
     # ferdinand checkout). The mini has no ferdinand checkout, so its config
@@ -162,6 +166,14 @@ def load_config(path: str | None = None) -> WorksweepConfig:
     if not isinstance(resume_raw, bool):
         raise RuntimeError(
             f"config runner.resume_sessions must be a boolean, got {resume_raw!r}")
+    ack_raw = rn.get("ack_classifier", True)
+    if not isinstance(ack_raw, bool):
+        raise RuntimeError(
+            f"config runner.ack_classifier must be a boolean, got {ack_raw!r}")
+    ack_model_raw = rn.get("ack_model", "")
+    if not isinstance(ack_model_raw, str):
+        raise RuntimeError(
+            f"config runner.ack_model must be a string, got {ack_model_raw!r}")
     hold_raw = rn.get("feedback_hold", False)
     if not isinstance(hold_raw, bool):
         raise RuntimeError(
@@ -209,6 +221,8 @@ def load_config(path: str | None = None) -> WorksweepConfig:
         model=model_raw,
         issues_root=issues_root_raw,
         resume_sessions=resume_raw,
+        ack_classifier=ack_raw,
+        ack_model=ack_model_raw,
         domain_registry_path=str(rn.get("domain_registry_path", "") or ""),
         pipeline_resume_attempts=int(
             rn.get("pipeline_resume_attempts", 3) or 3),

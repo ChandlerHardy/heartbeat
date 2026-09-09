@@ -425,7 +425,7 @@ def _run_intake(cfg: WorksweepConfig) -> int:
 
 def _with_unaddressed(mr, cfg: WorksweepConfig,
                       discussions: Callable[[str, int], str],
-                      seen=()) -> tuple:
+                      seen=(), classify=None) -> tuple:
     """`(mr rebound with its unaddressed-thread count, probe_ok)`. Never raises.
 
     Skipped (count stays 0, probe_ok True) for an MR with nothing unresolved --
@@ -456,7 +456,7 @@ def _with_unaddressed(mr, cfg: WorksweepConfig,
               f"{type(e).__name__}: {e}", file=sys.stderr)
         return mr, False
     threads = collectors.unaddressed_threads(raw, cfg.username, mr.reviewers,
-                                             seen)
+                                             seen, classify=classify)
     # Carry the evidence onto the MR so the emitted row can carry it too: the
     # dashboard only has the row, and a dismissal keys on (discussion, note).
     return dataclasses.replace(
@@ -599,7 +599,8 @@ def run_sweep(cfg: WorksweepConfig, deps: Dict[str, Callable]) -> int:
             probed = []
             for mr in authored:
                 mr, ok = _with_unaddressed(mr, cfg, discussions_edge,
-                                           seen_notes)
+                                           seen_notes,
+                                           classify=deps.get("ack_classify"))
                 probed.append(mr)
                 if not ok:
                     probe_failed.add(f"feedback:{mr.repo}!{mr.iid}")
@@ -1127,6 +1128,9 @@ def main(argv=None) -> int:
     # side-effect-free preview); every other invocation gets the real edge.
     if not args.dry_run:
         deps["llm"] = curator.make_run_llm(cfg)
+    if getattr(cfg, "ack_classifier", True) and not args.dry_run:
+        from . import ackclassifier
+        deps["ack_classify"] = ackclassifier.make_classifier(cfg)
     # M4 Task F: dev-slot ssh probing is read-only (git branch/rev-parse on
     # the box), so --dry-run still runs it for real -- unlike the LLM/post
     # edges above, there's no side effect to preview around. run_sweep only

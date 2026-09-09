@@ -1178,3 +1178,18 @@ def test_sweep_stays_quiet_about_auth_on_an_ordinary_curator_failure():
     deps["llm"] = boom
     assert run_sweep(_cfg(), deps) == 0
     assert not [p for p in posts if isinstance(p, str) and p.startswith("🔴")]
+
+
+def test_the_sweep_hands_the_ack_classifier_to_the_probe():
+    """2026-09-09: a reviewer's 'LGTM plus a compliment' is suppressed at the
+    sensor when the injected classifier calls it an ack; no row is proposed."""
+    posts = []
+    asked = []
+    # leyang must be a LISTED reviewer for the classifier to be consulted
+    deps = _probe_deps(posts, _gql(authored_nodes=[_authored(changes_requested=True)]),
+                       discussions=lambda repo, iid: _threads("leyang"))
+    deps["ack_classify"] = lambda note_id, body: (asked.append(note_id), True)[1]
+    rc = run_sweep(_cfg(), deps)
+    assert rc == 0
+    assert asked, "the probe never consulted the classifier"
+    assert "feedback:pb-www!3997" not in _saved_items(posts)
