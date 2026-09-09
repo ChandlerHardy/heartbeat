@@ -625,3 +625,27 @@ def test_a_vanished_session_retries_the_leg_fresh(tmp_path):
     assert len(edges.claude_argvs) == 3
     assert edges.claude_argvs[1][1] == "--resume"
     assert edges.claude_argvs[2][1] == "-p"      # the cold retry
+
+
+# --- 2026-09-09: the implement lane writes the issue dossier ----------------
+
+def test_a_finished_pipeline_claim_records_the_dossier_link_and_session(tmp_path):
+    from worksweep import dossier
+    edges = _Edges(claude_out=json.dumps({"result": "pipeline complete",
+                                          "session_id": "sess-impl-1"}))
+    cfg = _cfg(tmp_path, issues_root=str(tmp_path / "issues"))
+    result, _ = _run(tmp_path, edges=edges, cfg=cfg)
+    assert result.mr_iid == 4099
+    text = dossier.read(cfg, "pb-www", 1775)
+    assert "## Implement" in text
+    assert "!4099" in text and "fix/1775-inline" in text and "dev2" in text
+    assert "MAGI: r2 codex READY" in text            # the state file rides along
+    assert dossier.issue_for_mr(cfg, "pb-www", 4099) == 1775
+    assert dossier.load_session(cfg, "pb-www", 1775) == "sess-impl-1"
+
+
+def test_a_dossier_failure_never_fails_the_claim(tmp_path):
+    (tmp_path / "issues").write_text("not a directory")
+    cfg = _cfg(tmp_path, issues_root=str(tmp_path / "issues"))
+    result, _ = _run(tmp_path, cfg=cfg)
+    assert result.mr_iid == 4099

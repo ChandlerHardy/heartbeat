@@ -427,7 +427,7 @@ def _execute_in(item: WorkItem, cfg, checkout: str, iid: int, slot,
                 http_get: Callable) -> ImplementResult:
     if getattr(cfg, "pipeline_command", ""):
         return _execute_pipeline(cfg, iid, slot, checkout,
-                                 run_subprocess, http_get)
+                                 run_subprocess, http_get, repo=item.repo)
     branch = branch_name(iid, item.title or "")
 
     _git(run_subprocess, checkout, ["fetch", "origin"], timeout=_FETCH_TIMEOUT)
@@ -517,7 +517,8 @@ sftp, port 22, username chandlerhardy, openSsh true, remotePath \
 
 def _execute_pipeline(cfg, iid: int, slot: DevBox, checkout: str,
                       run_subprocess: Callable,
-                      http_get: Callable[[str], int]) -> ImplementResult:
+                      http_get: Callable[[str], int],
+                      repo: str = "") -> ImplementResult:
     """M5: one claude run drives cfg.pipeline_command (the full pla-pipeline)
     end-to-end; this executor shrinks to claim -> run -> PROVE. The pipeline
     itself implements, ship-gates, runs the full magi fix loop, parks on the
@@ -674,13 +675,36 @@ def _execute_pipeline(cfg, iid: int, slot: DevBox, checkout: str,
                       if "MAGI" in ln.upper() and ("[x]" in ln or "SHIP" in ln)),
                      "")
     verdict = "SHIP" if re.search(r"SHIP|RESOLVED|review-clean", magi_line) else ""
-    return ImplementResult(
+    result = ImplementResult(
         iid=iid, mr_iid=mr_iid, mr_url=mr_url, dev_url=slot.url,
         dev_box=slot.name, branch=branch, report_path=state_path,
         verdict=verdict, result_sha=head,
         reassigned_from=(str(slot.mr_iid)
                          if slot.tier == _TIER_HANDED_OFF and slot.mr_iid else ""),
         magi_note=magi_line)
+    # The issue dossier (2026-09-09): what the next lane -- a feedback round,
+    # a consult -- needs to know about this run, plus the session it can
+    # resume. Never an outcome: dossier writes swallow their own failures.
+    if repo:
+        _record_dossier(cfg, repo, iid, result, state, session_id)
+    return result
+
+
+def _record_dossier(cfg, repo: str, iid: int, result: ImplementResult,
+                    state: str, session_id: Optional[str]) -> None:
+    from . import dossier
+    body = (f"MR !{result.mr_iid} ({result.mr_url}) on branch `{result.branch}` "
+            f"@ {result.result_sha[:10]}, parked on {result.dev_box} "
+            f"({result.dev_url}). Tribunal: {result.verdict or 'no SHIP line'}"
+            + (f" -- {result.magi_note}" if result.magi_note else "")
+            + (f". Box reassigned from !{result.reassigned_from}."
+               if result.reassigned_from else "")
+            + "\n\nPipeline state file at completion:\n\n```\n"
+            + (state or "").strip()[:4000] + "\n```")
+    dossier.record(cfg, repo, iid, f"Implement — MR !{result.mr_iid}", body)
+    dossier.link_mr(cfg, repo, result.mr_iid, iid)
+    if session_id:
+        dossier.save_session(cfg, repo, iid, session_id, "implement")
 
 
 # A resumed pipeline leg needs at least this much of the claim's budget left

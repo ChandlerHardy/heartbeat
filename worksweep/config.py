@@ -57,6 +57,12 @@ class WorksweepConfig:
     # the pin lives with the config that says which pool a lane bills to.
     # consult_model still wins for the consult lane.
     model: str = ""
+    # 2026-09-09: where the per-issue dossiers live ("" -> ~/.worksweep/issues).
+    issues_root: str = ""
+    # 2026-09-09: let feedback lanes --resume the implement session of the
+    # same issue (dossier.load_session, capped at a week). Off = cold start
+    # with the dossier text only.
+    resume_sessions: bool = True
     # 2026-08-31 domain guard: where the domain-check registry (domains.json)
     # lives on THIS machine. "" -> models.DEFAULT_DOMAIN_REGISTRY (the
     # ferdinand checkout). The mini has no ferdinand checkout, so its config
@@ -148,6 +154,14 @@ def load_config(path: str | None = None) -> WorksweepConfig:
     if not isinstance(model_raw, str):
         raise RuntimeError(
             f"config runner.model must be a string, got {model_raw!r}")
+    issues_root_raw = rn.get("issues_root", "")
+    if not isinstance(issues_root_raw, str):
+        raise RuntimeError(
+            f"config runner.issues_root must be a string, got {issues_root_raw!r}")
+    resume_raw = rn.get("resume_sessions", True)
+    if not isinstance(resume_raw, bool):
+        raise RuntimeError(
+            f"config runner.resume_sessions must be a boolean, got {resume_raw!r}")
     hold_raw = rn.get("feedback_hold", False)
     if not isinstance(hold_raw, bool):
         raise RuntimeError(
@@ -193,6 +207,8 @@ def load_config(path: str | None = None) -> WorksweepConfig:
         feedback_hold=hold_raw,
         implement_concurrency=conc_raw,
         model=model_raw,
+        issues_root=issues_root_raw,
+        resume_sessions=resume_raw,
         domain_registry_path=str(rn.get("domain_registry_path", "") or ""),
         pipeline_resume_attempts=int(
             rn.get("pipeline_resume_attempts", 3) or 3),
