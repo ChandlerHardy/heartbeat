@@ -186,13 +186,27 @@ def test_run_once_implement_claims_box_before_long_work(tmp_path):
     assert seen["at_execute"] == [(1, "running", "dev1")]
 
 
-def test_run_once_implement_no_slot_errors_and_posts(tmp_path):
+def test_run_once_implement_no_slot_defers_quietly(tmp_path):
+    """2026-09-11: every box live is the normal state with three concurrent
+    claims and parked MRs. The row goes BACK to approved -- no claim residue,
+    no ⚠️, no human re-approval -- and the next tick simply tries again."""
     deps, posts, saves, state = _deps([_rec(1)], boxes=[_box(tier="live")])
-    assert run_once(_cfg(tmp_path), deps, **_locks(tmp_path)) == 1
+    assert run_once(_cfg(tmp_path), deps, **_locks(tmp_path)) == 0
     rec = state["records"][0]
-    assert rec.item.status == "error"
-    assert "no dev slot" in rec.item.error_summary
-    assert any(p.startswith("⚠️") and "no dev slot" in p for p in posts)
+    assert rec.item.status == "approved"
+    assert rec.item.claimed_at == ""
+    assert rec.item.dev_box == ""
+    assert rec.item.error_summary == ""
+    assert not any("⚠️" in p for p in posts)
+    assert not any("implementing" in p for p in posts)
+
+
+def test_run_once_implement_deferred_row_is_claimed_when_a_box_frees(tmp_path):
+    deps, posts, saves, state = _deps([_rec(1)], boxes=[_box(tier="live")])
+    assert run_once(_cfg(tmp_path), deps, **_locks(tmp_path)) == 0
+    deps["boxes"] = lambda: [_box()]                  # next tick: a free box
+    assert run_once(_cfg(tmp_path), deps, **_locks(tmp_path)) == 0
+    assert state["records"][0].item.status == "done"
 
 
 def test_run_once_implement_box_probe_failure_errors_and_posts(tmp_path):
@@ -463,7 +477,9 @@ def test_run_once_runs_two_implement_claims_concurrently_on_distinct_boxes(tmp_p
 
 def test_two_concurrent_claims_never_share_one_free_box(tmp_path):
     """Both workers probe the same box list; the slot stamp under the queue
-    lock must hand dev1 to exactly one of them and fail the other honestly."""
+    lock must hand dev1 to exactly one of them. The other goes back to
+    approved (2026-09-11: a capacity wait, not a failure) and the pass stops
+    picking instead of spinning on the same row while dev1 is in flight."""
     import time
 
     def execute(item, cfg, bx):
@@ -477,10 +493,12 @@ def test_two_concurrent_claims_never_share_one_free_box(tmp_path):
                   lock_path=str(tmp_path / "runner.lock"), families=("implement",))
     final = {r.number: r.item for r in state["records"]}
     statuses = sorted(i.status for i in final.values())
-    assert statuses == ["done", "error"]
+    assert statuses == ["approved", "done"]
     assert [i.dev_box for i in final.values() if i.status == "done"] == ["dev1"]
-    assert any("no dev slot" in p for p in posts)
-    assert rc == 1
+    assert [i.dev_box for i in final.values() if i.status == "approved"] == [""]
+    assert not any("no dev slot" in p or "⚠️" in p for p in posts)
+    assert sum("implementing" in p for p in posts) == 1     # no spin re-claims
+    assert rc == 0
 
 
 def test_concurrency_one_keeps_the_old_sequential_behaviour(tmp_path):

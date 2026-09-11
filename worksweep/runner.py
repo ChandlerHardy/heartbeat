@@ -132,6 +132,16 @@ def claim(records: List[QueueRecord], number: int, now: str,
             for r in records]
 
 
+def defer(records: List[QueueRecord], number: int, now: str) -> List[QueueRecord]:
+    """Undo a claim that found no dev box: back to approved, box and claim
+    time cleared, so the next tick tries again for free. Capacity is a wait,
+    not a failure (2026-09-11: with six boxes and three concurrent claims
+    plus parked MRs, an approved row that has to wait for a box is the
+    NORMAL case, and an error there costs a human re-approval per tick)."""
+    return [_replace(r, now, status="approved", claimed_at="", dev_box="")
+            if r.number == number else r for r in records]
+
+
 def complete(records: List[QueueRecord], number: int, result_sha: str,
              report_path: str, now: str, mr_iid: int = 0,
              done_reason: str = "executor-completed") -> List[QueueRecord]:
@@ -964,11 +974,15 @@ def _run_implement_pass(cfg, deps: Dict[str, Callable], lock_path: str) -> int:
         rcs: List[int] = []
         workers: List[threading.Thread] = []
         fatal: List[BaseException] = []
+        deferred: List[int] = []       # a claim found every box live
         spawned = 0
 
         def _worker():
             try:
                 rc = _run_one_implement_claim(cfg, deps)
+                if rc == _DEFERRED:
+                    deferred.append(1)
+                    rc = 0
             except Exception as e:      # never let a thread die silently
                 _post(deps, cfg, f"⚠️ Worksweep runner: implement pass crashed "
                                  f"in a worker — {type(e).__name__}: {e}")
@@ -982,7 +996,7 @@ def _run_implement_pass(cfg, deps: Dict[str, Callable], lock_path: str) -> int:
         while spawned < _IMPLEMENT_DRAIN_MAX:
             alive = [t for t in workers if t.is_alive()]
             pickable = False
-            if len(alive) < limit:
+            if len(alive) < limit and not deferred:
                 try:
                     pickable = pick_claim(deps["load"](), (_IMPLEMENT,),
                                           limit) is not None
@@ -1036,6 +1050,12 @@ def _gc_finished_worktrees(cfg, deps: Dict[str, Callable]) -> None:
     gc(cfg, keep)
 
 
+# What _run_one_implement_claim returns when every dev box is live: the row
+# went back to approved, and the pass must stop picking -- the same row would
+# come straight back, and no box frees inside one tick.
+_DEFERRED = "deferred"
+
+
 def _run_one_implement_claim(cfg, deps: Dict[str, Callable]) -> Optional[int]:
     """One implement claim, called WITH the implement lock held (possibly on
     a worker thread beside other claims). Returns the claim's rc, or None
@@ -1073,12 +1093,12 @@ def _run_one_implement_claim(cfg, deps: Dict[str, Callable]) -> Optional[int]:
 
     # 2. probe (slow, outside the lock), then stamp a box under the lock
     #    excluding every box another live implement record already holds.
+    probe_error = ""
     try:
         boxes = list(deps["boxes"]())
-        reason = "no dev slot available — free one or reclaim"
     except Exception as e:
-        boxes, reason = [], (f"dev-slot probe failed: "
-                             f"{type(e).__name__}: {e}")
+        boxes, probe_error = [], (f"dev-slot probe failed: "
+                                  f"{type(e).__name__}: {e}")
     slot = None
     with _queue_lock(deps):
         fresh = deps["load"]()
@@ -1089,9 +1109,18 @@ def _run_one_implement_claim(cfg, deps: Dict[str, Callable]) -> Optional[int]:
         slot = implementer.select_slot([b for b in boxes if b.name not in taken])
         if slot is not None:
             deps["save"](claim(fresh, number, now, dev_box=slot.name))
+        elif not probe_error:
+            # Every box is live: a capacity wait, not a failure. Hand the
+            # row back as approved and let the next tick retry; the
+            # dashboard shows it waiting, nothing is posted.
+            deps["save"](defer(fresh, number, now))
     if slot is None:
-        _fail_and_post(deps, cfg, number, reason, _IMPLEMENT)
-        return 1
+        if probe_error:
+            _fail_and_post(deps, cfg, number, probe_error, _IMPLEMENT)
+            return 1
+        print(f"worksweep runner: #{number} waiting for a dev box "
+              f"(all {len(boxes)} live) — left approved")
+        return _DEFERRED
     _post(deps, cfg, _implement_claim_message(iid, slot, branch))
 
     try:
