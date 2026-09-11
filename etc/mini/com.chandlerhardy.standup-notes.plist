@@ -2,11 +2,11 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   Monday standup notes (mini launchd agent). Migrated from the OCI cron on
-  2026-09-08 -- the mini already holds the PLA `glab` token and a GUI-session
+  2026-09-08: the mini already holds the PLA `glab` token and a GUI-session
   Claude login, and it is where the rest of the PLA automation lives.
 
   Sunday 20:05 CT (the OCI slot was 01:05 UTC Monday = the same moment).
-  `worksweep standup --discord`: classify the week's pushes, one claude -p
+  `worksweep standup` with the discord flag: classify the week's pushes, one claude -p
   pass for prose, validate, post; a collection failure is a 🔴, a model
   failure ships the deterministic fallback. Never silent.
 
@@ -16,7 +16,7 @@
   Run once now:
     launchctl kickstart gui/$(id -u)/com.chandlerhardy.standup-notes
   Preview without posting:
-    bin/worksweep.sh standup --dry-run
+    bin/worksweep.sh standup (with the dry-run flag)
   Logs: ~/heartbeat-reports/standup-notes.log / standup-notes.err
 -->
 <plist version="1.0">

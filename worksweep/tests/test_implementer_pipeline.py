@@ -25,7 +25,10 @@ def _cfg(tmp_path, **kw):
                 discord_webhook="https://discord.com/api/webhooks/x/y",
                 checkouts_root=str(tmp_path), claude_bin="claude",
                 runner_timeout=1800, implement_timeout=5400,
-                pipeline_command="/chandler-personal:pla-pipeline")
+                pipeline_command="/chandler-personal:pla-pipeline",
+                # hermetic: the prompt now reads the issue dossier, and the
+                # default root is the real ~/.worksweep/issues
+                issues_root=str(tmp_path / "issues"))
     base.update(kw)
     return WorksweepConfig(**base)
 
@@ -711,3 +714,96 @@ def test_the_resume_prompt_orders_the_leg_to_wait_on_external_legs():
     assert "{wait_order}" in _RESUME_PROMPT
     assert "do NOT end the session" in _WAIT_ORDER
     assert "Codex" in _WAIT_ORDER and "sleep" in _WAIT_ORDER
+
+
+# --- issue context in the pipeline prompt (2026-09-11) ----------------------
+#
+# #1706's run built a search bar from two sentences while Allie's mockup PNG
+# sat unread in the issue body, and the orchestrator's dossier notes (written
+# before approval) never reached the run either: the implement lane wrote the
+# dossier but never read it. The prompt now carries both -- and stays
+# byte-identical to before when an issue has neither.
+
+_SECRET = "02a929fbf97e0a53108f195ab6a16c5b"
+_ISSUE_JSON = {
+    "iid": 1775,
+    "author": {"username": "alliecather"},
+    "description": ("Add a search bar.\n\n"
+                    f"![mock](/uploads/{_SECRET}/Image_8-24-26.png){{width=842}}"),
+}
+
+
+class _IssueEdges(_Edges):
+    def __init__(self, issue=_ISSUE_JSON, issue_rc=0, **kw):
+        super().__init__(**kw)
+        self.issue, self.issue_rc = issue, issue_rc
+
+    def run(self, cmd, **kw):
+        c = list(cmd)
+        if c[:2] == ["glab", "api"] and "/issues/1775" in c[2]:
+            self.calls.append((c, kw))
+            return subprocess.CompletedProcess(
+                c, self.issue_rc, stdout=json.dumps(self.issue), stderr="boom")
+        if c[0] == "bash" and "glab api" in c[2]:
+            self.calls.append((c, kw))
+            dest = c[2].split(" > ")[1].strip("'\"")
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            with open(dest, "wb") as f:
+                f.write(b"\x89PNG")
+            return subprocess.CompletedProcess(c, 0, stdout="", stderr="")
+        if c[:2] == ["git", "-C"] and "rev-parse" in c:
+            self.calls.append((c, kw))
+            return subprocess.CompletedProcess(c, 1, stdout="", stderr="")
+        return super().run(cmd, **kw)
+
+
+def _prompt_of(edges):
+    return next(c for c, _ in edges.calls if c[0] == "claude")[2]
+
+
+def test_pipeline_prompt_carries_the_dossier_and_issue_uploads(tmp_path):
+    from worksweep import dossier
+    cfg = _cfg(tmp_path, issues_root=str(tmp_path / "issues"))
+    assert dossier.record(cfg, "pb-www", 1775, "Orchestrator context",
+                          "Le's !4097 touches health.groups.js -- avoid.")
+    _, edges = _run(tmp_path, edges=_IssueEdges(), cfg=cfg)
+    prompt = _prompt_of(edges)
+    assert prompt.startswith("/chandler-personal:pla-pipeline #1775 --dev 2")
+    # constraints first, context after -- the gate text is never displaced
+    assert prompt.index("DOMAIN GATE") < prompt.index("ISSUE DOSSIER")
+    assert "Le's !4097 touches health.groups.js" in prompt
+    assert "ISSUE ATTACHMENTS" in prompt
+    local = os.path.join(edges.checkout, ".worksweep-attachments", _SECRET,
+                         "Image_8-24-26.png")
+    assert f"image `{local}` -- Read it." in prompt
+    assert "alliecather" in prompt
+    assert "usually IS the spec" in prompt
+    assert os.path.exists(local)
+
+
+def test_pipeline_prompt_is_unchanged_for_a_bare_issue(tmp_path):
+    bare = {"iid": 1775, "author": {"username": "x"}, "description": "words"}
+    _, edges = _run(tmp_path, edges=_IssueEdges(issue=bare))
+    prompt = _prompt_of(edges)
+    assert "ISSUE DOSSIER" not in prompt
+    assert "ATTACHMENTS" not in prompt
+    assert prompt.rstrip().endswith("pb-www.")     # the constraints' last line
+
+
+def test_pipeline_prompt_survives_a_failed_issue_fetch(tmp_path):
+    _, edges = _run(tmp_path, edges=_IssueEdges(issue_rc=1))
+    prompt = _prompt_of(edges)
+    assert prompt.startswith("/chandler-personal:pla-pipeline #1775 --dev 2")
+    assert "ATTACHMENTS" not in prompt
+
+
+def test_pipeline_prompt_survives_issue_garbage(tmp_path):
+    class _Garbage(_IssueEdges):
+        def run(self, cmd, **kw):
+            c = list(cmd)
+            if c[:2] == ["glab", "api"] and "/issues/1775" in c[2]:
+                return subprocess.CompletedProcess(c, 0, stdout="<html>", stderr="")
+            return super().run(cmd, **kw)
+    result, edges = _run(tmp_path, edges=_Garbage())
+    assert result.mr_iid == 4099
+    assert "ATTACHMENTS" not in _prompt_of(edges)

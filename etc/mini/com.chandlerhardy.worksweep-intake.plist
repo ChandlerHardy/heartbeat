@@ -13,7 +13,7 @@
     </array>
     <!-- 2026-09-09: StartInterval timers in the gui domain stopped firing (a fresh 60s test
          agent never ran; calendar agents did). Every interval agent moved to
-         StartCalendarInterval -- same cadence, wall-clock slots. -->
+         StartCalendarInterval: same cadence, wall-clock slots. -->
     <key>StartCalendarInterval</key>
     <array>
         <dict><key>Minute</key><integer>0</integer></dict>
