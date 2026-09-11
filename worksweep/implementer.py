@@ -540,7 +540,8 @@ def _execute_pipeline(cfg, iid: int, slot: DevBox, checkout: str,
     devnum = re.sub(r"\D", "", slot.name) or slot.name
     prompt = (f"{cfg.pipeline_command} #{iid} --dev {devnum}"
               + _PIPELINE_CONSTRAINTS.format(box=slot.name,
-                                             gate=domain_gate_text()))
+                                             gate=domain_gate_text())
+              + _issue_context(cfg, repo, iid, checkout, run_subprocess))
 
     # An unattended `claude -p` run routinely ends itself after 25-50 minutes
     # with the pipeline mid-phase (2026-09-01: four such exits in one day,
@@ -892,6 +893,40 @@ def _pipeline_state_bases(checkout: str) -> list:
         if os.path.isdir(shared):
             bases.append(shared)
     return bases
+
+
+def _issue_context(cfg, repo: str, iid: int, checkout: str,
+                   run_subprocess: Callable) -> str:
+    """What the pipeline run should know about the issue beyond its number:
+    the issue dossier (prior lanes' and the orchestrator's notes) and the
+    files uploaded into the issue body, downloaded so the run can Read them
+    (2026-09-11: #1706's mockup PNG was the spec, and the run never saw it).
+    Best effort at every step -- context is never the reason a claim fails --
+    and "" when there is nothing to add, so the prompt is byte-identical to
+    before for an issue with neither."""
+    if not repo:
+        return ""
+    parts = []
+    try:
+        from . import dossier
+        parts.append(dossier.prompt_block(dossier.read(cfg, repo, iid)))
+    except Exception as e:                       # noqa: BLE001
+        print(f"worksweep: dossier for #{iid} skipped: {e}")
+    try:
+        from . import attachments, collectors
+        proc = _run(["glab", "api",
+                     f"projects/{collectors._project(repo)}/issues/{iid}"],
+                    run_subprocess, cwd=checkout, timeout=_GLAB_TIMEOUT)
+        if proc.returncode == 0:
+            data = json.loads(proc.stdout or "{}")
+            author = str((data.get("author") or {}).get("username") or "")
+            parts.append(attachments.fetch_text_block(
+                cfg, repo, checkout, str(data.get("description") or ""),
+                author, run_subprocess))
+    except Exception as e:                       # noqa: BLE001
+        print(f"worksweep: issue #{iid} attachments skipped: {e}")
+    body = "\n\n".join(p.strip() for p in parts if p and p.strip())
+    return f"\n\n{body}\n" if body else ""
 
 
 def _find_pipeline_state(checkout: str, iid: int) -> tuple:
