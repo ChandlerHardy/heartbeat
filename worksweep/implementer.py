@@ -39,7 +39,8 @@ from . import checkouts, devslots
 from .devslots import DevBox
 from .models import (DOMAIN_GATE_OWNER, MergeRequest, WorkItem,
                      domain_gate_text, touches_domain_gate)
-from .runner import NeedsInputError, RunnerError, extract_verdict, find_report
+from .runner import (BudgetExhaustedError, NeedsInputError, RunnerError,
+                     extract_verdict, find_report)
 
 # `/rubric:do` (via the plan-author agent) stops rather than guessing; these
 # are the shapes it stops with. A halt is NOT a failure — it is a question.
@@ -630,9 +631,16 @@ def _execute_pipeline(cfg, iid: int, slot: DevBox, checkout: str,
         if state is not None and _pipeline_no_change(state):
             break                  # premise dead: a completion, handled below
         progress = _pipeline_progress(state)
-        if attempt < attempts and progress > last_progress:
+        if progress > last_progress:
             last_progress = progress
-            continue               # the checkpoint moved: resume in-claim
+            if attempt < attempts:
+                continue           # the checkpoint moved: resume in-claim
+            # Moved on the LAST allowed leg too: a long pipeline, not a
+            # stuck one. The runner re-queues it to continue next tick.
+            raise BudgetExhaustedError(
+                f"pipeline for #{iid} is still advancing (phase "
+                f"{progress[0]}) but this claim's {attempts} attempt(s) are "
+                f"spent — no MR yet ({state_path})", phase=progress[0])
         leg_seconds = time.monotonic() - leg_started
         if (attempt < attempts and not short_retry_used
                 and leg_seconds < _SHORT_LEG_SECONDS):
@@ -668,8 +676,13 @@ def _execute_pipeline(cfg, iid: int, slot: DevBox, checkout: str,
         return result
     mr = _pipeline_mr_of(state)
     if mr is None:
-        raise RunnerError(f"pipeline state for #{iid} names no MR "
-                          f"({state_path}) — the run did not reach Phase 7")
+        # Only reachable via the budget-short `break` above, which follows a
+        # leg that advanced: still moving, out of time.
+        phase = _pipeline_progress(state)[0]
+        raise BudgetExhaustedError(
+            f"pipeline for #{iid} is still advancing (phase {phase}) but the "
+            f"claim's time budget is spent — no MR yet ({state_path})",
+            phase=phase)
     # The f-021 guard, relocated: an MR is only THIS claim's result if the
     # state file was written during this claim. A surviving checkpoint that
     # names an MR but was never touched by these legs is a previous run's

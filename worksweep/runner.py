@@ -77,6 +77,25 @@ class NeedsInputError(RunnerError):
     """
 
 
+class BudgetExhaustedError(RunnerError):
+    """An implement claim spent its whole budget while the pipeline was STILL
+    ADVANCING (every leg moved the checkpoint; the last one too). Not a stuck
+    pipeline, not a fault: a long one. The runner re-queues the row so the next
+    tick continues from the checkpoint, up to CONTINUATION_MAX times
+    (2026-09-11, #1825: three fix rounds of MAGI ate the budget at Phase 5 and
+    the row went `error`, costing a sweep and a human re-approval to resume).
+    """
+
+    def __init__(self, message: str, phase: int = -1) -> None:
+        super().__init__(message)
+        self.phase = phase
+
+
+# How many times a still-advancing claim may be re-queued before the honest
+# error: bounds a pipeline that inches forward forever.
+CONTINUATION_MAX = 3
+
+
 def _replace(rec: QueueRecord, now: str, **item_changes) -> QueueRecord:
     return QueueRecord(number=rec.number, first_seen=rec.first_seen,
                        last_seen=now,
@@ -139,6 +158,14 @@ def defer(records: List[QueueRecord], number: int, now: str) -> List[QueueRecord
     plus parked MRs, an approved row that has to wait for a box is the
     NORMAL case, and an error there costs a human re-approval per tick)."""
     return [_replace(r, now, status="approved", claimed_at="", dev_box="")
+            if r.number == number else r for r in records]
+
+
+def requeue(records: List[QueueRecord], number: int, now: str) -> List[QueueRecord]:
+    """A still-advancing claim ran out of budget: back to approved to continue
+    at the next tick, counting the continuation (the runner caps it)."""
+    return [_replace(r, now, status="approved", claimed_at="", dev_box="",
+                     continuations=int(getattr(r.item, "continuations", 0) or 0) + 1)
             if r.number == number else r for r in records]
 
 
@@ -1133,6 +1160,25 @@ def _run_one_implement_claim(cfg, deps: Dict[str, Callable]) -> Optional[int]:
             _post(deps, cfg, f"❓ #{iid} needs your input: {e} "
                              f"(Fable consult queued)")
         return 0        # a question is a handled outcome, not a failure
+    except BudgetExhaustedError as e:
+        used = int(getattr(target.item, "continuations", 0) or 0)
+        if used >= CONTINUATION_MAX:
+            _fail_and_post(deps, cfg, number,
+                           f"{e} — continued {used} time(s) already "
+                           f"(cap {CONTINUATION_MAX}); not re-queuing again",
+                           _IMPLEMENT)
+            return 1
+        if _apply_to_fresh(deps, cfg, number,
+                           lambda fresh: requeue(fresh, number,
+                                                 deps["now"]())) is not None:
+            where = f" at phase {e.phase}" if e.phase >= 0 else ""
+            _post(deps, cfg, f"⏭️ #{iid}: claim budget spent while still "
+                             f"advancing{where} — re-queued to continue "
+                             f"({used + 1}/{CONTINUATION_MAX})")
+        # A handled outcome, not a failure -- and the row is approved again,
+        # so the pass must stop picking or it would re-claim it right now
+        # and burn the continuation cap inside one tick.
+        return _DEFERRED
     except RunnerError as e:
         _fail_and_post(deps, cfg, number, str(e), _IMPLEMENT)
         return 1
