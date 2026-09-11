@@ -520,13 +520,15 @@ def test_no_progress_between_attempts_fails_instead_of_spinning(tmp_path, monkey
 
 def test_the_attempts_cap_bounds_the_loop(tmp_path):
     """Progress on every attempt still ends at the cap — the reap window is
-    sized to implement_timeout, and an unbounded resumer would outlive it."""
+    sized to implement_timeout, and an unbounded resumer would outlive it.
+    (Since 2026-09-11 the cap raises BudgetExhaustedError, a RunnerError the
+    runner turns into a re-queue; the loop still stops here.)"""
     edges = _ResumingEdges([_STATE_PHASE3, _STATE_PHASE5, _STATE_PHASE5])
     with pytest.raises(RunnerError) as e:
         _run(tmp_path, edges=edges,
              cfg=_cfg(tmp_path, pipeline_resume_attempts=2))
     assert edges.claude_calls == 2
-    assert "did not reach Phase 7" in str(e.value)
+    assert "no MR yet" in str(e.value)
 
 
 def test_a_first_attempt_that_reaches_phase7_never_resumes(tmp_path):
@@ -807,3 +809,39 @@ def test_pipeline_prompt_survives_issue_garbage(tmp_path):
     result, edges = _run(tmp_path, edges=_Garbage())
     assert result.mr_iid == 4099
     assert "ATTACHMENTS" not in _prompt_of(edges)
+
+
+# --- still advancing at the cap = continue, not error (2026-09-11) ---------
+#
+# #1825: three MAGI fix rounds ate the claim at Phase 5 with the checkpoint
+# moving on every leg. That is a long pipeline, not a stuck one, and the row
+# should come back to continue -- the runner does that on BudgetExhaustedError.
+
+def test_advancing_at_the_attempts_cap_raises_budget_exhausted(tmp_path):
+    from worksweep.runner import BudgetExhaustedError
+    edges = _ResumingEdges([_STATE_PHASE3, _STATE_PHASE5, _STATE_PHASE5])
+    with pytest.raises(BudgetExhaustedError) as e:
+        _run(tmp_path, edges=edges,
+             cfg=_cfg(tmp_path, pipeline_resume_attempts=2))
+    assert edges.claude_calls == 2
+    assert e.value.phase == 5
+    assert "still advancing" in str(e.value)
+
+
+def test_stuck_at_the_cap_is_a_plain_runner_error(tmp_path, monkeypatch):
+    """Same cap, but the last leg did NOT move the checkpoint: that stays the
+    honest error -- re-queuing a pipeline that cannot move would spin."""
+    from worksweep import implementer as _impl
+    from worksweep.runner import BudgetExhaustedError
+    clock = {"t": 0.0}
+
+    def slow(*_):
+        clock["t"] += 600.0
+        return clock["t"]
+    monkeypatch.setattr(_impl.time, "monotonic", slow)
+    edges = _ResumingEdges([_STATE_PHASE3, _STATE_PHASE3])
+    with pytest.raises(RunnerError) as e:
+        _run(tmp_path, edges=edges,
+             cfg=_cfg(tmp_path, pipeline_resume_attempts=2))
+    assert not isinstance(e.value, BudgetExhaustedError)
+    assert "did not reach Phase 7" in str(e.value)

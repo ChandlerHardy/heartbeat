@@ -557,3 +557,53 @@ def test_run_once_implement_halt_message_says_the_consult_is_queued(tmp_path):
     run_once(_cfg(tmp_path), deps, lock_path=str(tmp_path / "runner.lock"), families=("implement",))
     assert state["records"][0].item.consult == "requested"
     assert any(p.startswith("❓") and "Fable consult queued" in p for p in posts)
+
+
+# --- budget exhausted while advancing: re-queue to continue (2026-09-11) ---
+
+def _budget_exhausted(item, cfg, boxes):
+    from worksweep.runner import BudgetExhaustedError
+    raise BudgetExhaustedError("pipeline for #1775 is still advancing (phase 5)", phase=5)
+
+
+def test_budget_exhausted_requeues_the_row_and_says_so(tmp_path):
+    deps, posts, saves, state = _deps([_rec(1)], execute_implement=_budget_exhausted)
+    assert run_once(_cfg(tmp_path), deps, **_locks(tmp_path)) == 0
+    rec = state["records"][0]
+    assert rec.item.status == "approved"
+    assert rec.item.claimed_at == ""
+    assert rec.item.dev_box == ""
+    assert rec.item.continuations == 1
+    assert rec.item.error_summary == ""
+    assert any(p.startswith("⏭️ #1775") and "phase 5" in p and "(1/3)" in p
+               for p in posts)
+    assert not any("⚠️" in p for p in posts)
+
+
+def test_budget_exhausted_at_the_continuation_cap_errors(tmp_path):
+    from dataclasses import replace
+    from worksweep.runner import CONTINUATION_MAX
+    rec = _rec(1)
+    rec = replace(rec, item=replace(rec.item, continuations=CONTINUATION_MAX))
+    deps, posts, saves, state = _deps([rec], execute_implement=_budget_exhausted)
+    assert run_once(_cfg(tmp_path), deps, **_locks(tmp_path)) == 1
+    final = state["records"][0]
+    assert final.item.status == "error"
+    assert "cap 3" in final.item.error_summary
+    assert any(p.startswith("⚠️") for p in posts)
+
+
+def test_continuations_survive_a_queue_round_trip(tmp_path):
+    from worksweep.queue import load_queue, save_queue
+    from dataclasses import replace
+    rec = _rec(1)
+    rec = replace(rec, item=replace(rec.item, continuations=2))
+    path = str(tmp_path / "queue.json")
+    save_queue(path, [rec])
+    assert load_queue(path)[0].item.continuations == 2
+    # and a row written before the field existed loads as 0
+    import json
+    raw = json.load(open(path))
+    del raw[0]["item"]["continuations"]
+    json.dump(raw, open(path, "w"))
+    assert load_queue(path)[0].item.continuations == 0

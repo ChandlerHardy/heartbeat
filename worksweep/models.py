@@ -382,6 +382,9 @@ class WorkItem:
     error_summary: str = ""   # short failure text (status=error)
     title: str = ""           # mr.title / issue.title -- "" for todo items
     dev_box: str = ""         # name of the dev box claimed by an `implement` executor
+    continuations: int = 0    # implement claims that ran out of budget while the
+                              # pipeline was still advancing and were re-queued to
+                              # continue (2026-09-11); capped by the runner
     mr_iid: int = 0           # Draft MR iid opened by the `implement` executor
     branch: str = ""          # M4 Task H: mr.source_branch, set by assess_stale --
                               # the `keep-current` executor's checkout target
