@@ -3433,6 +3433,30 @@ def test_htmx_is_configured_shut_before_it_is_used():
     assert "selfRequestsOnly:true" in src       # the default we are pinning
 
 
+def test_htmx_eval_is_switched_off_and_nothing_on_the_page_needs_it():
+    """htmx 2.0.7 ships allowEval:true, which lets `hx-on`, `hx-vars` and
+    `js:`-prefixed values run strings as code. This page uses none of them,
+    so a tampered fragment carrying one must not execute. Declared in the
+    head, where htmx reads it before it processes the body, AND pinned in the
+    body script's config line so there is no window before that read."""
+    page = _page([_rec(1)])
+    head = page[:page.index("</head>")]
+    m = re.search(r"<meta name=\"htmx-config\" content='([^']*)'>", head)
+    assert m, "no htmx-config meta in the head"
+    assert json.loads(m.group(1)) == {"allowEval": False}
+    js = _script(page).replace(" ", "").replace("\n", "")
+    assert "htmx.config.allowEval=false;" in js
+    assert js.index("htmx.config.allowEval") < js.index("htmx.ajax(")
+    src = open(_static("htmx.min.js")).read()
+    assert "allowEval:true" in src                       # the default overridden
+    assert 'querySelector(\'meta[name="htmx-config"]\')' in src  # and it is read
+    # the page itself relies on no eval path, in the markup or our own script
+    markup = _markup(page)
+    for token in ("hx-on", "hx-vars", "js:"):
+        assert token not in markup, token
+        assert token not in dashboard._BODY_SCRIPT, token
+
+
 def test_the_vendored_pin_records_a_second_source():
     """A sha256 you can only check against the CDN you fetched from proves
     nothing about that CDN. Two independent CDNs agreeing does."""

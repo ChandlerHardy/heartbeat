@@ -875,7 +875,9 @@ _BODY_SCRIPT = """
   // fragments carry no script tags and everything we fetch is same-origin, so
   // say so: htmx 2.0.7 ships allowScriptTags:true, and a malformed or tampered
   // response should not be able to smuggle one past a default we do not need.
-  try{htmx.config.allowScriptTags=false;htmx.config.selfRequestsOnly=true;}catch(e){}
+  // allowEval likewise (the head meta says it too; this closes the window
+  // before htmx reads that meta on ready): nothing here needs htmx to eval.
+  try{htmx.config.allowScriptTags=false;htmx.config.selfRequestsOnly=true;htmx.config.allowEval=false;}catch(e){}
 
   function scope(){
     return document.querySelector(root.getAttribute('data-layout')==='branches'?'.branches':'.sections');
@@ -1706,6 +1708,12 @@ def render_page(records: Sequence[QueueRecord], now: str,
         '<title>Worksweep</title>\n'
         f'<style>{_CSS}</style>\n'
         f'<script>{_HEAD_SCRIPT}</script>\n'
+        # htmx 2.0.7 defaults allowEval:true (hx-on, hx-vars, `js:` values run
+        # strings as code). Nothing here uses those, so a tampered fragment
+        # carrying one must not execute. htmx merges this meta into its config
+        # on ready, before it processes the body. After the restore script for
+        # the same AC #31 reason as the library below.
+        '<meta name="htmx-config" content=\'{"allowEval":false}\'>\n'
         # AFTER the layout-restore script: that script must sit within the
         # first few hundred characters before <body> for AC #31's lookback, and
         # 51KB of library in front of it would push it out of that window.
