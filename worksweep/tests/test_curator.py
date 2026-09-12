@@ -114,6 +114,54 @@ def test_validate_strips_held_count_tally_before_scanning():
     assert validate(out2, _queue()) is True
 
 
+@pytest.mark.parametrize("held_line", [
+    "5 low priority items held in queue: 43, 44",
+    "5 low-priority items held in the queue: 43, 44",
+    "5 low-priority items held: 43, 44",
+    "5 items held in queue: 43, 44",
+    "5 Low-Priority items held in queue: 43, 44",
+    "**5** low-priority items held in queue: 43, 44",
+    "7 low-priority item held in queue: 43",
+])
+def test_the_held_tally_survives_reasonable_phrasing_drift(held_line):
+    """The tally is exempt from the whitelist because it is a count, not a
+    reference. Anchoring that exemption on one exact phrase meant an LLM that
+    wrote "low priority" or "in the queue" threw away a correct digest for
+    the raw fallback. 5 is in no record, so each of these fails if the tally
+    is not recognised."""
+    out = f"1. pb-www !4061 — x\n{held_line}"
+    assert validate(out, _queue()) is True
+
+
+@pytest.mark.parametrize("fabricated", [
+    # a fabricated number in the held LIST, not the tally position
+    "5 low-priority items held in queue: 43, 44, 999",
+    # a count-shaped number on a line that is not the held tally
+    "999 items need your attention",
+    "999 items were reviewed",
+    # a ref is never a tally, whatever words follow it
+    "!999 items held in queue: 43",
+    "#999 low-priority items held: 43",
+    # the tally exemption covers the number right before the phrase, only
+    "999 5 low-priority items held in queue: 43, 44",
+    # emphasis between a ref sigil and the number is still a ref: Discord
+    # renders `!**999**` as "!999"
+    "!**999** items held in queue: 43",
+    "#*999* item held: 43",
+    "**!999** items held: 43",
+    # the count and the phrase belong to ONE line
+    "999\nitems held in queue: 43",
+    # the collapse line is instructed exactly once; a second "N items held"
+    # is somebody laundering numbers, so neither count is exempt
+    "5 items held in queue: 43\n6 items held: 44",
+])
+def test_a_looser_held_tally_still_rejects_fabricated_numbers(fabricated):
+    """The security property the loosening must not cost: every number
+    outside the one tally slot is still checked against the whitelist."""
+    out = f"1. pb-www !4061 — x\n{fabricated}"
+    assert validate(out, _queue()) is False
+
+
 # Critical fix: a link/URL is a hard rejection, not stripped-then-allowed.
 # This is the injection bound -- an untrusted MR/issue title riding into the
 # prompt via `why` can make the LLM emit arbitrary prose, but it must never
@@ -125,6 +173,15 @@ def test_validate_rejects_bare_https_url():
 
 def test_validate_rejects_markdown_link():
     out = "1. pb-www [!4061](https://gitlab.com/x/-/merge_requests/4061) -- review requested"
+    assert validate(out, _queue()) is False
+
+
+@pytest.mark.parametrize("hidden", ["​", "⁠", "­", "‮"])
+def test_validate_rejects_invisible_format_characters(hidden):
+    """An invisible character between a sigil and its digits renders as a ref
+    ("#999") while every ref-shaped regex, the held-count lookbehind included,
+    sees something else. Nothing legitimate in a digest needs one."""
+    out = f"1. pb-www !4061 -- review requested\n#{hidden}999 items held in queue: 43"
     assert validate(out, _queue()) is False
 
 
