@@ -176,6 +176,15 @@ def test_validate_rejects_markdown_link():
     assert validate(out, _queue()) is False
 
 
+@pytest.mark.parametrize("hidden", ["​", "⁠", "­", "‮"])
+def test_validate_rejects_invisible_format_characters(hidden):
+    """An invisible character between a sigil and its digits renders as a ref
+    ("#999") while every ref-shaped regex, the held-count lookbehind included,
+    sees something else. Nothing legitimate in a digest needs one."""
+    out = f"1. pb-www !4061 -- review requested\n#{hidden}999 items held in queue: 43"
+    assert validate(out, _queue()) is False
+
+
 def test_validate_accepts_clean_output_with_no_links():
     out = "1. pb-www !4061 -- review requested\n1 low-priority items held in queue: 43"
     assert validate(out, _queue()) is True
