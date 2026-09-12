@@ -25,6 +25,8 @@ import sys
 import tempfile
 from typing import Iterable, List
 
+from .queue import write_lock
+
 # Same window as queue compaction, for the same reason: a note nobody has seen
 # in three months is not coming back, and this file should not grow forever.
 SEEN_TTL_DAYS = 90
@@ -44,19 +46,30 @@ def record_seen(path: str, pairs: Iterable, now: str) -> None:
     A pair with an empty half is dropped: an old queue row carries no note
     refs, and recording `("", "")` would dismiss every thread that has no id at
     once -- silently, and forever.
+
+    The read -> prune -> add -> save cycle runs under the queue's cross-process
+    write lock, on this file's OWN sidecar (`<path>.write.lock`). Atomic
+    replace stops a corrupt file, not a lost one: two overlapping dismissals
+    that both read before either saved would keep only the second, and the
+    first comes back next sweep as if Chandler had never seen it. A lock that
+    cannot be taken raises (QueueLockError) rather than writing anyway -- the
+    dashboard already reports a failed record as "dismissed, notes not
+    recorded", which is the honest outcome.
     """
-    entries = prune_seen(_read(path), now)
-    have = {(e["discussion"], e["note"]) for e in entries}
-    for pair in (pairs or ()):
-        try:
-            discussion, note = (str(x or "") for x in tuple(pair)[:2])
-        except (TypeError, ValueError):
-            continue
-        if not discussion or not note or (discussion, note) in have:
-            continue
-        have.add((discussion, note))
-        entries.append({"discussion": discussion, "note": note, "seen": now})
-    save_seen(path, entries)
+    with write_lock(path):
+        entries = prune_seen(_read(path), now)
+        have = {(e["discussion"], e["note"]) for e in entries}
+        for pair in (pairs or ()):
+            try:
+                discussion, note = (str(x or "") for x in tuple(pair)[:2])
+            except (TypeError, ValueError):
+                continue
+            if not discussion or not note or (discussion, note) in have:
+                continue
+            have.add((discussion, note))
+            entries.append({"discussion": discussion, "note": note,
+                            "seen": now})
+        save_seen(path, entries)
 
 
 def prune_seen(entries: List[dict], now: str = "") -> List[dict]:

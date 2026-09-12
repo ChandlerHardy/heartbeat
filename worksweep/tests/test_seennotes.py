@@ -131,3 +131,61 @@ def test_save_seen_replaces_wholesale(tmp_path):
     save_seen(p, [{"discussion": "d1", "note": "1", "seen": NOW}])
     save_seen(p, [{"discussion": "d2", "note": "2", "seen": NOW}])
     assert load_seen(p) == frozenset({("d2", "2")})
+
+
+# --- the cross-process write lock -------------------------------------------
+#
+# record_seen is a read-modify-write of a whole file. Atomic replace keeps the
+# file from being CORRUPT; it does nothing about a LOST update, where two
+# writers both read, both add, and only the second one's pair survives -- a
+# dismissal Chandler made that silently comes back next sweep. Real files and
+# real fcntl, like test_queue_lock: the lock is the subject.
+
+import multiprocessing  # noqa: E402
+
+
+# Module level, not a closure: macOS spawns rather than forks, so the worker
+# has to be importable in the child.
+def _slow_record(path, pair, read_done):
+    """record_seen, stretched out between its read and its write -- the
+    window a second writer's whole cycle fits inside."""
+    import time
+    from worksweep import seennotes
+    real_save = seennotes.save_seen
+
+    def slow_save(p, entries):
+        read_done.set()
+        time.sleep(0.5)
+        real_save(p, entries)
+
+    seennotes.save_seen = slow_save
+    seennotes.record_seen(path, [pair], NOW)
+
+
+def test_two_dismissals_that_overlap_both_survive(tmp_path):
+    """FALSIFYING. Writer A has read the file and is about to save; writer B
+    records its own pair in that window. Without the lock B's pair is written
+    and then overwritten by A's stale view -- B's dismissal is gone."""
+    p = _path(tmp_path)
+    ctx = multiprocessing.get_context("spawn")
+    read_done = ctx.Event()
+    a = ctx.Process(target=_slow_record, args=(p, ("d-a", "1"), read_done))
+    a.start()
+    try:
+        assert read_done.wait(5)
+        record_seen(p, [("d-b", "2")], NOW)
+    finally:
+        a.join(10)
+    assert a.exitcode == 0
+    assert load_seen(p) == frozenset({("d-a", "1"), ("d-b", "2")})
+
+
+def test_the_seen_lock_is_a_sidecar_and_not_the_queue_lock(tmp_path):
+    """A sidecar for the same reason as the queue's (os.replace swaps the
+    inode), and its OWN sidecar: the dashboard records notes right after
+    releasing the queue lock, and one shared lock file would make a slow
+    dismissal stall every approval on the page."""
+    p = _path(tmp_path)
+    record_seen(p, [("d1", "101")], NOW)
+    assert os.path.exists(p + ".write.lock")
+    assert not os.path.exists(str(tmp_path / "queue.json.write.lock"))
