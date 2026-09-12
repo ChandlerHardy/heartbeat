@@ -418,6 +418,94 @@ def test_an_accepted_ruling_survives_the_sweep_until_the_claim():
     assert out[0].item.ruling == "Do X."
 
 
+def _errored_issue(ruling="Delete the dead branch.", consult="done",
+                   consult_rec="Fable: delete it  ·  Why: unused"):
+    """An implement row that failed AFTER an operator decision landed on it:
+    an accepted ruling, and the consult conversation that produced it."""
+    return QueueRecord(
+        number=9, first_seen=T0, last_seen=T0,
+        item=WorkItem(schema_version=1, id="issue:pb-www#1588", repo="pb-www",
+                      kind="issue", executor="implement", risk="low",
+                      why="assigned issue: ranch data", web_url="https://gl/x/-/issues/1588",
+                      sha="", status="error", error_summary="pipeline crashed",
+                      claimed_at=T0, dev_box="dev3", continuations=2,
+                      ruling=ruling, consult=consult, consult_rec=consult_rec))
+
+
+def _fresh_issue():
+    return WorkItem(schema_version=1, id="issue:pb-www#1588", repo="pb-www",
+                    kind="issue", executor="implement", risk="low",
+                    why="assigned issue: ranch data",
+                    web_url="https://gl/x/-/issues/1588", sha="")
+
+
+def test_an_errored_rows_ruling_and_rec_survive_the_sweeps_repropose():
+    """FALSIFYING. Recovering an `error` row runs through the sweep's
+    error -> proposed retry, which rebuilt the row from the FRESH item -- and
+    the fresh item carries no ruling. An accepted Fable ruling is an operator
+    decision; a run crashing afterwards is not a reason to forget it, and the
+    human re-approving would silently hand the executor nothing."""
+    out = reconcile([_errored_issue()], [_fresh_issue()], NOW)
+    row = out[0].item
+    assert row.status == "proposed"
+    assert row.ruling == "Delete the dead branch."
+    assert (row.consult, row.consult_rec) == ("done",
+                                              "Fable: delete it  ·  Why: unused")
+    # the failed claim's own bookkeeping does NOT ride along: that run is over
+    assert (row.error_summary, row.claimed_at, row.dev_box,
+            row.continuations) == ("", "", "", 0)
+
+
+def test_an_errored_feedback_rows_ruling_survives_a_push_that_kept_the_ask():
+    """address-feedback consent is keyed on the thread ask, not the sha: a
+    push alone does not change what the ruling was about."""
+    prior_item = _dc.replace(_fb(status="error", sha="s1").item,
+                             ruling="Decline in-MR.", error_summary="boom")
+    out = reconcile([_dc.replace(_fb(), item=prior_item)],
+                    [_fb(sha="s2").item], NOW)
+    assert out[0].item.status == "proposed"
+    assert out[0].item.ruling == "Decline in-MR."
+
+
+def test_an_errored_rows_ruling_is_dropped_when_the_ask_changed():
+    """The other side of the boundary: a ruling answers a SPECIFIC ask. A
+    reviewer adding a thread (why-keyed), a new head (sha-keyed), or the row
+    switching arms is a different question, and the old answer must not be
+    carried onto it -- the same rule that revokes a ✅."""
+    fb_prior = _dc.replace(_fb(), item=_dc.replace(
+        _fb(status="error").item, ruling="Decline in-MR.",
+        consult="done", consult_rec="r"))
+    grown = reconcile([fb_prior], [_fb(why="3 unaddressed threads").item], NOW)
+    assert (grown[0].item.ruling, grown[0].item.consult_rec) == ("", "")
+
+    magi_prior = QueueRecord(number=1, first_seen=T0, last_seen=T0,
+                             item=_dc.replace(_item("m", sha="old", status="error"),
+                                              ruling="Skip the tribunal on docs."))
+    moved = reconcile([magi_prior], [_item("m", sha="new")], NOW)
+    assert moved[0].item.ruling == ""
+
+    arm_prior = _dc.replace(_fb(), item=_dc.replace(
+        _fb(status="error").item, ruling="Decline in-MR."))
+    switched = reconcile([arm_prior], [_fb(executor="triage").item], NOW)
+    assert switched[0].item.ruling == ""
+
+
+def test_an_approved_rows_consult_rec_survives_the_sweep_like_its_ruling():
+    """The consent carry kept `ruling` but rebuilt `consult`/`consult_rec`
+    from the fresh item, so a row approved (or Retried) with a recommendation
+    on it lost the rec at the next sweep -- and a re-park then burned a new
+    consult instead of keeping it (runner.needs_input's rule)."""
+    prior = [QueueRecord(number=9, first_seen=T0, last_seen=T0,
+                         item=_dc.replace(_errored_issue().item,
+                                          status="approved", error_summary=""))]
+    out = reconcile(prior, [_fresh_issue()], NOW)
+    row = out[0].item
+    assert row.status == "approved"
+    assert row.ruling == "Delete the dead branch."
+    assert (row.consult, row.consult_rec) == ("done",
+                                              "Fable: delete it  ·  Why: unused")
+
+
 def test_request_consult_flips_exactly_the_parked_row():
     records = [_parked(number=3)]
     out, outcome = request_consult(records, 3, NOW)

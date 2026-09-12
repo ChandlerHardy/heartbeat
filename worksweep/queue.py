@@ -527,6 +527,20 @@ def reconcile(existing: List[QueueRecord], fresh: List[WorkItem],
                                          hold_action=prior.item.hold_action)
         elif ps == "error":
             merged = dataclasses.replace(it, status="proposed")
+            if _consent_holds(prior.item, it):
+                # The retry is a fresh start for the RUN (the failed claim's
+                # error, box and continuation count stay behind) but not for
+                # the operator's DECISIONS about the ask. An accepted ruling
+                # and the consult conversation behind it answer this exact
+                # ask; rebuilding from the fresh item silently dropped them,
+                # so recovering a crashed row handed the executor nothing.
+                # Only while consent holds: a moved sha, a grown thread ask
+                # or (above) a switched arm is a different question, and the
+                # old answer resets exactly as a ✅ does.
+                merged = dataclasses.replace(merged,
+                                             ruling=prior.item.ruling,
+                                             consult=prior.item.consult,
+                                             consult_rec=prior.item.consult_rec)
         elif ps == "done":
             if prior.item.sha == it.sha:
                 out.append(QueueRecord(number=prior.number, item=prior.item,
@@ -548,6 +562,14 @@ def reconcile(existing: List[QueueRecord], fresh: List[WorkItem],
                                          # executor even if a sweep runs
                                          # between Accept and the claim
                                          ruling=prior.item.ruling,
+                                         # and so does the consult behind
+                                         # it: a row approved (or Retried)
+                                         # with a rec on it keeps the rec,
+                                         # so a re-park reuses it rather than
+                                         # burning a new consult
+                                         # (runner.needs_input's rule)
+                                         consult=prior.item.consult,
+                                         consult_rec=prior.item.consult_rec,
                                          # a Publish is consent WITH content
                                          # too: the held commit and replies
                                          # must survive a sweep between the
