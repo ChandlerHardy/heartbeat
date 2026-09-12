@@ -57,6 +57,18 @@ def teardown_function(_fn):
     refresh_domain_gate(path=None)
 
 
+def test_a_test_that_never_chose_a_registry_sees_the_fallback():
+    """The gate resolves LAZILY from the real domains.json in the home
+    directory. Without the suite-wide pin in conftest, a prompt test run on
+    its own got whatever that file says today, while the same test in the full
+    suite got the fallback this file's teardown left behind -- green in CI,
+    red alone. A test that did not pick a registry must never read one.
+
+    Falsifies on any host that has the ferdinand checkout when this test runs
+    first in its process (`pytest this_file::this_test`)."""
+    assert models._gate_in_force() == (DOMAIN_GATE_PATHS, ())
+
+
 def test_fallback_constant_is_pinned():
     # The fail-closed floor. Editing this list is a deliberate act that must
     # break a test, not a drive-by.
