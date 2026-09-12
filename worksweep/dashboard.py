@@ -54,8 +54,9 @@ from .models import RUNNABLE_EXECUTORS, QueueRecord, WorkItem
 from .queue import (_TERMINAL, accept_rec as accept_rec_record,
                     publish_hold as publish_hold_record,
                     discard_hold as discard_hold_record,
-                    dismiss as dismiss_record, is_dismissable, load_queue,
-                    request_consult as request_consult_record, save_queue,
+                    dismiss as dismiss_record, is_dismissable, is_retryable,
+                    load_queue, request_consult as request_consult_record,
+                    retry_error as retry_error_record, save_queue,
                     write_lock)
 
 DEFAULT_PORT = 8787
@@ -639,6 +640,8 @@ button.cnt:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
 .btn-dismiss:hover{background:var(--panel-2);color:var(--ink);border-color:var(--ink-3)}
 .btn-dismiss:active{transform:translateY(1px);background:var(--line)}
 .btn-dismiss:focus-visible{outline:2px solid var(--focus);outline-offset:1px}
+/* Retry reuses the slot and touch target, but it RUNS something: accent, not grey. */
+.btn-retry{color:var(--accent);border-color:var(--accent)}
 /* Send-to-Fable: the parked question, the recommendation, and its controls */
 .ask{font-size:12px;color:var(--violet);margin-top:2px;white-space:pre-wrap}
 .rec{font-size:12px;color:var(--ink-2);margin-top:4px;padding:6px 8px;
@@ -1181,6 +1184,11 @@ _BODY_SCRIPT = """
       if(!inflight){send('/accept-rec',{number:parseInt(a.getAttribute('data-accept-rec'),10)});}
       return;
     }
+    var r=e.target.closest('[data-retry]');
+    if(r){
+      if(!inflight){send('/retry',{number:parseInt(r.getAttribute('data-retry'),10)});}
+      return;
+    }
     var p=e.target.closest('[data-publish]');
     if(p){
       if(!inflight){send('/publish',{number:parseInt(p.getAttribute('data-publish'),10)});}
@@ -1264,6 +1272,10 @@ def _checkbox(record: QueueRecord, view: str) -> str:
     """
     item = record.item
     if not is_actionable(item):
+        if is_retryable(item):
+            # The row-action slot, so both views that render rows (sections
+            # and branch cards) offer it from this one place.
+            return _retry_button(record.number)
         return '<span class="spacer"></span>'
     if not has_checkbox(item):
         # Nothing executes these, so the only resolution is "I looked at it".
@@ -1289,6 +1301,13 @@ def _dismiss_button(number: int, title: str) -> str:
             f'data-dismiss="{_e(number)}" '
             f'aria-label="dismiss item {_e(number)}" '
             f'title="{_e(title)}">Dismiss</button>')
+
+
+def _retry_button(number: int) -> str:
+    return (f'<button type="button" class="btn-dismiss btn-retry" '
+            f'data-retry="{_e(number)}" '
+            f'aria-label="retry item {_e(number)}" '
+            f'title="approve this failed run again">Retry</button>')
 
 
 def _hold_html(record: QueueRecord) -> str:
@@ -2179,7 +2198,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         path = self._path()
         if path not in ("/approve", "/approve-all", "/sweep", "/dismiss",
                         "/consult", "/accept-rec", "/publish",
-                        "/discard-hold"):
+                        "/discard-hold", "/retry"):
             self._reject(404, "not found")
             return
         if not self._csrf_ok():
@@ -2224,7 +2243,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self._json(500, {"dismissed": False, "error": "dismiss failed"})
             return
 
-        if path in ("/consult", "/accept-rec", "/publish", "/discard-hold"):
+        if path in ("/consult", "/accept-rec", "/publish", "/discard-hold",
+                    "/retry"):
             number = _valid_number(payload)
             if number is None:
                 self._reject(400, "bad request")
@@ -2232,6 +2252,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             try:
                 if path == "/consult":
                     self._consult_request(number)
+                elif path == "/retry":
+                    self._retry(number, _valid_actor(payload))
                 elif path == "/publish":
                     self._publish_hold(number, _valid_actor(payload))
                 elif path == "/discard-hold":
@@ -2424,6 +2446,52 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 post(webhook, confirm)
             except Exception as e:
                 print(f"worksweep: dashboard accept-rec post failed: {e}",
+                      file=sys.stderr)
+        else:
+            print(confirm)
+        self._json(200, {"ok": True, "approved": number})
+
+    def _retry(self, number: int, actor: str = "") -> None:
+        """Retry a failed run: queue.retry_error flips an `error` row on a
+        runnable executor straight to approved, clearing the failed claim's
+        leftovers and keeping the operator's ruling / consult rec. Replaces
+        the old two-step recovery (kick a sweep to re-propose, then approve).
+
+        For Claude, exactly like /approve:
+
+            POST /retry
+            X-Worksweep: approve
+            Content-Type: application/json
+            {"number": 12, "actor": "claude"}
+
+        `actor` is optional attribution ("claude" is the only value that
+        renders). 200 {"ok": true, "approved": 12} on the flip; 400
+        {"ok": false, ...} when #12 is not an errored runnable row -- judged
+        on FRESH disk under both locks, never on the page that was tapped, so
+        a row a sweep re-proposed or a runner re-claimed since render is
+        refused rather than flipped.
+        """
+        with _WRITE_LOCK, write_lock(self.server.queue_path):
+            records = load_queue(self.server.queue_path)
+            updated, retried = retry_error_record(records, number,
+                                                  self.server.now())
+            if retried is None:
+                self._json(400, {"ok": False,
+                                 "error": f"#{number} is not a failed run "
+                                          f"that can be retried"})
+                return
+            # Durable BEFORE the audit post, as with every approval.
+            save_queue(self.server.queue_path, updated)
+        suffix = (" (dashboard · claude · retried error)"
+                  if actor == _ACTOR else " (dashboard · retried error)")
+        confirm = (f"✅ Approved: #{number} {retried.item.repo} "
+                   f"{retried.item.id}{suffix}")
+        post, webhook = self.server.post, self.server.webhook
+        if post and webhook:
+            try:
+                post(webhook, confirm)
+            except Exception as e:
+                print(f"worksweep: dashboard retry post failed: {e}",
                       file=sys.stderr)
         else:
             print(confirm)

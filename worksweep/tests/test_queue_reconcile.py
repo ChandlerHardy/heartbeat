@@ -537,6 +537,47 @@ def test_accept_rec_approves_with_the_rec_as_ruling():
     assert row.error_summary == ""                       # question answered
 
 
+def test_retry_flips_an_errored_row_straight_to_approved_keeping_its_decisions():
+    """Retry is the one-tap recovery for a crashed run: no sweep kickstart,
+    no second approval. It is a fresh approval of the SAME ask, so the failed
+    claim's leftovers clear (error text, claim time, box, the continuation
+    budget) and the operator's decisions stay (ruling, consult rec)."""
+    from worksweep.queue import retry_error
+    out, retried = retry_error([_errored_issue()], 9, NOW)
+    assert retried is not None and retried.number == 9
+    row = out[0]
+    assert (row.number, row.first_seen, row.last_seen) == (9, T0, NOW)
+    it = row.item
+    assert it.status == "approved"
+    assert (it.error_summary, it.claimed_at, it.dev_box,
+            it.continuations) == ("", "", "", 0)
+    assert it.ruling == "Delete the dead branch."
+    assert (it.consult, it.consult_rec) == ("done",
+                                            "Fable: delete it  ·  Why: unused")
+    assert out[0] == retried
+
+
+def test_retry_refuses_anything_but_an_errored_runnable_row():
+    """FALSIFYING for the gate. A retried `triage` row would strand as a
+    permanently-approved zombie (nothing claims it); a retried `running` row
+    would re-enter a live claim; a parked or proposed row has its own verbs."""
+    from worksweep.queue import is_retryable, retry_error
+    errored_triage = _dc.replace(_fb(status="error", executor="triage"),
+                                 number=4)
+    ineligible = [errored_triage, _fb(number=5, status="running"),
+                  _parked(number=6), _fb(number=7, status="proposed"),
+                  _fb(number=8, status="done")]
+    for rec in ineligible:
+        assert is_retryable(rec.item) is False, rec.number
+        out, retried = retry_error(ineligible, rec.number, NOW)
+        assert retried is None, rec.number
+        assert out == ineligible, rec.number
+    assert retry_error(ineligible, 99, NOW) == (ineligible, None)
+    from worksweep.models import RUNNABLE_EXECUTORS
+    for ex in RUNNABLE_EXECUTORS:
+        assert is_retryable(_fb(status="error", executor=ex).item) is True, ex
+
+
 def test_accept_rec_refuses_a_row_without_a_rec():
     """FALSIFYING: accepting nothing would approve a run with an empty ruling
     -- the plain checkbox already exists for that, and it says so honestly."""

@@ -454,6 +454,50 @@ def accept_rec(records: List[QueueRecord], number: int,
     return out, accepted
 
 
+def is_retryable(item: WorkItem) -> bool:
+    """True when a row may be Retried from the dashboard: `error`, on an
+    executor the runner will actually claim.
+
+    The executor half is the same safety gate as the blanket approvals: a
+    retried `triage` row would sit `approved` forever with nothing to claim
+    it and no un-approve path. Only `error` because every other status
+    already has its own way forward (proposed/needs-input: approve; running:
+    the claim itself or the stale reap; done: a fresh sweep signal).
+    """
+    return item.status == "error" and item.executor in RUNNABLE_EXECUTORS
+
+
+def retry_error(records: List[QueueRecord], number: int,
+                now: str) -> Tuple[List[QueueRecord], Optional[QueueRecord]]:
+    """Retry a failed run: error -> approved in one step. Returns (records,
+    the retried record or None when #number is not is_retryable).
+
+    Before this, recovery was a sweep kickstart (reconcile's error ->
+    proposed) and then a second approval. The retry is a fresh approval of
+    the SAME ask, so what clears is exactly what belonged to the failed claim:
+    the error text, the claim time, the dev box, and the continuation count
+    (that cap bounds UNATTENDED self-requeues of one approval; a human's
+    Retry is new consent, and the sweep's error -> proposed path already
+    restarted the count at 0). Everything that is a decision about the ask
+    stays: `ruling`, the consult fields, and any hold (a failed Publish
+    retries the publish). The per-issue dossier lives on disk, not on the
+    row, so it is untouched by construction.
+    """
+    out: List[QueueRecord] = []
+    retried: Optional[QueueRecord] = None
+    for r in records:
+        if r.number == number and is_retryable(r.item):
+            retried = QueueRecord(
+                number=r.number, first_seen=r.first_seen, last_seen=now,
+                item=dataclasses.replace(r.item, status="approved",
+                                         error_summary="", claimed_at="",
+                                         dev_box="", continuations=0))
+            out.append(retried)
+        else:
+            out.append(r)
+    return out, retried
+
+
 def reconcile(existing: List[QueueRecord], fresh: List[WorkItem],
               now: str, resolved: dict | None = None,
               resets: set | None = None) -> List[QueueRecord]:
