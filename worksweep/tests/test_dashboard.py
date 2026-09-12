@@ -3433,6 +3433,30 @@ def test_htmx_is_configured_shut_before_it_is_used():
     assert "selfRequestsOnly:true" in src       # the default we are pinning
 
 
+def test_htmx_eval_is_switched_off_and_nothing_on_the_page_needs_it():
+    """htmx 2.0.7 ships allowEval:true, which lets `hx-on`, `hx-vars` and
+    `js:`-prefixed values run strings as code. This page uses none of them,
+    so a tampered fragment carrying one must not execute. Declared in the
+    head, where htmx reads it before it processes the body, AND pinned in the
+    body script's config line so there is no window before that read."""
+    page = _page([_rec(1)])
+    head = page[:page.index("</head>")]
+    m = re.search(r"<meta name=\"htmx-config\" content='([^']*)'>", head)
+    assert m, "no htmx-config meta in the head"
+    assert json.loads(m.group(1)) == {"allowEval": False}
+    js = _script(page).replace(" ", "").replace("\n", "")
+    assert "htmx.config.allowEval=false;" in js
+    assert js.index("htmx.config.allowEval") < js.index("htmx.ajax(")
+    src = open(_static("htmx.min.js")).read()
+    assert "allowEval:true" in src                       # the default overridden
+    assert 'querySelector(\'meta[name="htmx-config"]\')' in src  # and it is read
+    # the page itself relies on no eval path, in the markup or our own script
+    markup = _markup(page)
+    for token in ("hx-on", "hx-vars", "js:"):
+        assert token not in markup, token
+        assert token not in dashboard._BODY_SCRIPT, token
+
+
 def test_the_vendored_pin_records_a_second_source():
     """A sha256 you can only check against the CDN you fetched from proves
     nothing about that CDN. Two independent CDNs agreeing does."""
@@ -3694,6 +3718,105 @@ def test_consult_routes_demand_the_csrf_header(serve_queue):
                              {"Content-Type": "application/json"})
     assert status == 403
     assert load_queue(qpath)[0].item.consult == ""
+
+
+# --- Retry: one-tap recovery for an errored runnable row -----------------------
+#
+# Recovering an `error` row used to mean kicking a sweep (error -> proposed)
+# and approving it again. Retry flips it straight to approved via
+# queue.retry_error; the dashboard only renders the control and maps the POST.
+
+def _retry_post(s, number, actor=_UNSET, headers=None, body=None):
+    h = {"X-Worksweep": "approve", "Content-Type": "application/json"}
+    h.update(headers or {})
+    if body is None:
+        payload = {"number": number}
+        if actor is not _UNSET:
+            payload["actor"] = actor
+        body = json.dumps(payload)
+    return s.request("POST", "/retry", body, h)
+
+
+def _errored(n=1, executor="magi-review", **kw):
+    return _rec(n, status="error", executor=executor,
+                error_summary="stale claim reaped", **kw)
+
+
+def test_an_errored_runnable_row_offers_retry_in_every_view():
+    """Both row renderers (sections -- checklist and panels share it -- and
+    the branches cards) carry the control, and ONLY on errored runnable rows:
+    an errored triage row has nothing a runner would claim."""
+    page = _page([_errored(1), _errored(2, executor="triage"), _rec(3),
+                  _rec(4, status="running")])
+    html = _markup(page)
+    sections = html[html.index('id="sections"'):html.index('id="branches"')]
+    branches = html[html.index('id="branches"'):]
+    for view in (sections, branches):
+        assert re.findall(r'data-retry="(\d+)"', view) == ["1"]
+    tag = re.search(r'<button[^>]*data-retry="1"[^>]*>([^<]*)</button>',
+                    sections)
+    assert tag and tag.group(1) == "Retry"
+
+
+def test_the_retry_button_posts_to_retry_with_its_number():
+    js = _script(_page([_errored(1)])).replace(" ", "").replace("\n", "")
+    assert ("varr=e.target.closest('[data-retry]');"
+            "if(r){if(!inflight){send('/retry',"
+            "{number:parseInt(r.getAttribute('data-retry'),10)});}return;}") in js
+
+
+def test_post_retry_approves_the_errored_row_and_audits_it(serve_queue):
+    posts = []
+    s, qpath = serve_queue([_errored(1, continuations=2, dev_box="dev3",
+                                     ruling="Do X.")],
+                           post=lambda hook, c: posts.append(c),
+                           webhook="https://discord/hook")
+    status, _, body = _retry_post(s, 1)
+    assert status == 200
+    assert json.loads(body) == {"ok": True, "approved": 1}
+    it = load_queue(qpath)[0].item
+    assert (it.status, it.error_summary, it.dev_box, it.continuations,
+            it.ruling) == ("approved", "", "", 0, "Do X.")
+    assert posts == ["✅ Approved: #1 pb-www id1 (dashboard · retried error)"]
+
+
+def test_a_claude_retry_is_attributed_in_the_channel(serve_queue):
+    posts = []
+    s, _ = serve_queue([_errored(1)], post=lambda hook, c: posts.append(c),
+                       webhook="https://discord/hook")
+    assert _retry_post(s, 1, actor="claude")[0] == 200
+    assert posts == [
+        "✅ Approved: #1 pb-www id1 (dashboard · claude · retried error)"]
+
+
+def test_post_retry_refuses_a_row_that_is_not_an_errored_runnable_one(serve_queue):
+    """Validated against FRESH disk, never the page: a sweep that re-proposed
+    the row, or a runner that re-claimed it, since render wins."""
+    posts = []
+    s, qpath = serve_queue([_errored(1, executor="triage"), _rec(2),
+                            _rec(3, status="running")],
+                           post=lambda hook, c: posts.append(c),
+                           webhook="https://discord/hook")
+    before = open(qpath, "rb").read()
+    for n in (1, 2, 3, 99):
+        status, _, body = _retry_post(s, n)
+        assert status == 400, n
+        assert json.loads(body)["ok"] is False, n
+    assert open(qpath, "rb").read() == before
+    assert posts == []
+
+
+def test_retry_demands_the_csrf_header_and_a_matching_origin(serve_queue):
+    s, qpath = serve_queue([_errored(1)])
+    before = open(qpath, "rb").read()
+    status, _, _ = s.request("POST", "/retry", json.dumps({"number": 1}),
+                             {"Content-Type": "application/json"})
+    assert status == 403
+    status, _, _ = _retry_post(s, 1, headers={"Origin": "http://evil.example"})
+    assert status == 403
+    status, _, _ = _retry_post(s, 1, body=json.dumps({"number": True}))
+    assert status == 400                    # a bool is not record #1
+    assert open(qpath, "rb").read() == before
 
 
 # --- 2026-09-04: held for review (Publish / Discard) --------------------------

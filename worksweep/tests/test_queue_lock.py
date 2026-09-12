@@ -255,3 +255,5 @@ def test_the_dashboard_approve_path_takes_the_cross_process_lock(tmp_path):
     assert "_WRITE_LOCK" in src                # both, not one instead of the other
     src_dismiss = inspect.getsource(dashboard.DashboardHandler._dismiss)
     assert "write_lock(" in src_dismiss
+    src_retry = inspect.getsource(dashboard.DashboardHandler._retry)
+    assert "write_lock(" in src_retry and "_WRITE_LOCK" in src_retry

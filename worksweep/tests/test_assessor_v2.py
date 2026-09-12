@@ -87,13 +87,13 @@ def _authored_mr(**kw):
 
 def test_covered_issue_iids_extracts_from_title():
     mrs = [_authored_mr(title="feat(#1701): Add Usage column")]
-    assert covered_issue_iids(mrs) == {1701}
+    assert covered_issue_iids(mrs) == {("pb-www", 1701)}
 
 
 def test_covered_issue_iids_ignores_untagged_titles():
     mrs = [_authored_mr(title="feat(#1701): x"),
            _authored_mr(iid=101, title="chore: cleanup")]
-    assert covered_issue_iids(mrs) == {1701}
+    assert covered_issue_iids(mrs) == {("pb-www", 1701)}
 
 
 def test_covered_issue_iids_empty_for_no_authored_mrs():
@@ -107,12 +107,12 @@ def test_covered_issue_iids_empty_for_no_authored_mrs():
 # keywords only.
 def test_covered_issue_iids_ignores_incidental_mid_title_ref():
     mrs = [_authored_mr(title="feat(#1701): follow-up to #796 review")]
-    assert covered_issue_iids(mrs) == {1701}
+    assert covered_issue_iids(mrs) == {("pb-www", 1701)}
 
 
 def test_covered_issue_iids_leading_tag_with_draft_prefix():
     mrs = [_authored_mr(title="Draft: feat(#1598): bulk edit")]
-    assert covered_issue_iids(mrs) == {1598}
+    assert covered_issue_iids(mrs) == {("pb-www", 1598)}
 
 
 def test_covered_issue_iids_parenthetical_mention_not_covered():
@@ -122,18 +122,38 @@ def test_covered_issue_iids_parenthetical_mention_not_covered():
 
 def test_covered_issue_iids_closing_keyword_without_leading_tag():
     mrs = [_authored_mr(title="chore: cleanup — Closes #42")]
-    assert covered_issue_iids(mrs) == {42}
+    assert covered_issue_iids(mrs) == {("pb-www", 42)}
 
 
 def test_assess_issue_suppressed_when_covered():
     issue = Issue(repo="pb-www", iid=1701, title="t", web_url="u")
-    assert assess_issue(issue, covered={1701}) == []
+    assert assess_issue(issue, covered={("pb-www", 1701)}) == []
 
 
 def test_assess_issue_survives_when_not_covered():
     issue = Issue(repo="pb-www", iid=42, title="t", web_url="u")
-    items = assess_issue(issue, covered={1701})
+    items = assess_issue(issue, covered={("pb-www", 1701)})
     assert len(items) == 1
+
+
+def test_an_mr_in_one_repo_does_not_suppress_the_same_issue_number_in_another():
+    """Issue iids are per-project, and a bare `#123` in a GitLab title means
+    #123 of the MR's OWN project. The sensor covers more than one repo, so an
+    unscoped iid set let `feat(#123)` in ck-www silently swallow pb-www's
+    assigned issue #123 -- the implement row never appeared and nothing said
+    why. Coverage is (repo, iid); only the MR's own repo is suppressed."""
+    mrs = [_authored_mr(repo="ck-www", title="feat(#123): x"),
+           _authored_mr(repo="pb-www", iid=101, title="chore: y — Closes #7")]
+    covered = covered_issue_iids(mrs)
+    assert covered == {("ck-www", 123), ("pb-www", 7)}
+    other_repo = Issue(repo="pb-www", iid=123, title="t",
+                       web_url="https://gl/pb-www/-/issues/123")
+    [item] = assess_issue(other_repo, covered=covered)
+    assert item.id == "issue:pb-www#123"
+    # and the MR's own repo still is suppressed -- the guard did not just vanish
+    same_repo = Issue(repo="ck-www", iid=123, title="t",
+                      web_url="https://gl/ck-www/-/issues/123")
+    assert assess_issue(same_repo, covered=covered) == []
 
 
 def test_assess_issue_default_covered_is_empty():

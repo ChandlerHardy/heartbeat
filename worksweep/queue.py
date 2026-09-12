@@ -22,7 +22,8 @@ import tempfile
 import time
 from typing import List, Optional, Tuple
 
-from .models import RUNNABLE_EXECUTORS, QueueRecord, WorkItem
+from .models import (DISMISSABLE_RUNNABLE_EXECUTORS, RUNNABLE_EXECUTORS,
+                     QueueRecord, WorkItem)
 
 # f-007/f-028/f-029: queue.json is a whole-file replace written by FOUR
 # independent processes -- the sweep, intake, each runner pass, and the live
@@ -47,8 +48,6 @@ _TERMINAL = ("done", "error")
 # it is never compacted away and never auto-re-proposed. The only path back
 # to `approved` is a fresh Discord ✅ (approvals.apply_approvals).
 _RETAIN_IF_GONE = ("approved", "running", "done", "error", "needs-input")
-# Runnable executors that may ALSO be dismissed. See is_dismissable.
-_DISMISSABLE_RUNNABLE = ("address-feedback",)
 _NEEDS_INPUT = "needs-input"
 # Executors whose approval is tied to the SIZE of the ask, not just the sha.
 # An address-feedback ✅ covers the threads it named; three threads is not the
@@ -292,7 +291,8 @@ def auto_approve(records: List[QueueRecord],
 def is_dismissable(item: WorkItem) -> bool:
     """True when a row may be dismissed from the dashboard.
 
-    Non-terminal, and either non-runnable or one of _DISMISSABLE_RUNNABLE.
+    Non-terminal, and either non-runnable or one of
+    models.DISMISSABLE_RUNNABLE_EXECUTORS.
 
     The executor half is a safety gate: anything the runner claims is
     approve-territory, and dismissing it would silently drop work the human
@@ -308,7 +308,7 @@ def is_dismissable(item: WorkItem) -> bool:
     """
     return (item.status not in _TERMINAL
             and (item.executor not in RUNNABLE_EXECUTORS
-                 or item.executor in _DISMISSABLE_RUNNABLE
+                 or item.executor in DISMISSABLE_RUNNABLE_EXECUTORS
                  # re_review gets BOTH controls for the address-feedback
                  # reason: approve runs the targeted magi pass, dismiss
                  # records "I re-reviewed this head myself" (reviewedstate).
@@ -454,6 +454,50 @@ def accept_rec(records: List[QueueRecord], number: int,
     return out, accepted
 
 
+def is_retryable(item: WorkItem) -> bool:
+    """True when a row may be Retried from the dashboard: `error`, on an
+    executor the runner will actually claim.
+
+    The executor half is the same safety gate as the blanket approvals: a
+    retried `triage` row would sit `approved` forever with nothing to claim
+    it and no un-approve path. Only `error` because every other status
+    already has its own way forward (proposed/needs-input: approve; running:
+    the claim itself or the stale reap; done: a fresh sweep signal).
+    """
+    return item.status == "error" and item.executor in RUNNABLE_EXECUTORS
+
+
+def retry_error(records: List[QueueRecord], number: int,
+                now: str) -> Tuple[List[QueueRecord], Optional[QueueRecord]]:
+    """Retry a failed run: error -> approved in one step. Returns (records,
+    the retried record or None when #number is not is_retryable).
+
+    Before this, recovery was a sweep kickstart (reconcile's error ->
+    proposed) and then a second approval. The retry is a fresh approval of
+    the SAME ask, so what clears is exactly what belonged to the failed claim:
+    the error text, the claim time, the dev box, and the continuation count
+    (that cap bounds UNATTENDED self-requeues of one approval; a human's
+    Retry is new consent, and the sweep's error -> proposed path already
+    restarted the count at 0). Everything that is a decision about the ask
+    stays: `ruling`, the consult fields, and any hold (a failed Publish
+    retries the publish). The per-issue dossier lives on disk, not on the
+    row, so it is untouched by construction.
+    """
+    out: List[QueueRecord] = []
+    retried: Optional[QueueRecord] = None
+    for r in records:
+        if r.number == number and is_retryable(r.item):
+            retried = QueueRecord(
+                number=r.number, first_seen=r.first_seen, last_seen=now,
+                item=dataclasses.replace(r.item, status="approved",
+                                         error_summary="", claimed_at="",
+                                         dev_box="", continuations=0))
+            out.append(retried)
+        else:
+            out.append(r)
+    return out, retried
+
+
 def reconcile(existing: List[QueueRecord], fresh: List[WorkItem],
               now: str, resolved: dict | None = None,
               resets: set | None = None) -> List[QueueRecord]:
@@ -527,6 +571,20 @@ def reconcile(existing: List[QueueRecord], fresh: List[WorkItem],
                                          hold_action=prior.item.hold_action)
         elif ps == "error":
             merged = dataclasses.replace(it, status="proposed")
+            if _consent_holds(prior.item, it):
+                # The retry is a fresh start for the RUN (the failed claim's
+                # error, box and continuation count stay behind) but not for
+                # the operator's DECISIONS about the ask. An accepted ruling
+                # and the consult conversation behind it answer this exact
+                # ask; rebuilding from the fresh item silently dropped them,
+                # so recovering a crashed row handed the executor nothing.
+                # Only while consent holds: a moved sha, a grown thread ask
+                # or (above) a switched arm is a different question, and the
+                # old answer resets exactly as a ✅ does.
+                merged = dataclasses.replace(merged,
+                                             ruling=prior.item.ruling,
+                                             consult=prior.item.consult,
+                                             consult_rec=prior.item.consult_rec)
         elif ps == "done":
             if prior.item.sha == it.sha:
                 out.append(QueueRecord(number=prior.number, item=prior.item,
@@ -548,6 +606,14 @@ def reconcile(existing: List[QueueRecord], fresh: List[WorkItem],
                                          # executor even if a sweep runs
                                          # between Accept and the claim
                                          ruling=prior.item.ruling,
+                                         # and so does the consult behind
+                                         # it: a row approved (or Retried)
+                                         # with a rec on it keeps the rec,
+                                         # so a re-park reuses it rather than
+                                         # burning a new consult
+                                         # (runner.needs_input's rule)
+                                         consult=prior.item.consult,
+                                         consult_rec=prior.item.consult_rec,
                                          # a Publish is consent WITH content
                                          # too: the held commit and replies
                                          # must survive a sweep between the

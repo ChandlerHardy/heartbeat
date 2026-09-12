@@ -270,26 +270,34 @@ _ISSUE_TAG_RE = re.compile(r"^\s*(?:Draft:\s*)?[a-z]+\(#(\d+)\)")
 _ISSUE_CLOSE_RE = re.compile(r"(?:[Cc]loses|[Ff]ixes|[Rr]esolves)\s+#(\d+)")
 
 
-def covered_issue_iids(authored: List[MergeRequest]) -> Set[int]:
-    """Issue iids already covered by an open authored MR's title, so
-    assess_issue can suppress the redundant separate issue item. Only the
-    leading conventional-commit tag and explicit closing keywords count --
-    an incidental "#NNN" reference elsewhere in the title does not."""
-    covered: Set[int] = set()
+def covered_issue_iids(authored: List[MergeRequest]) -> Set[Tuple[str, int]]:
+    """(repo, iid) of every issue already covered by an open authored MR's
+    title, so assess_issue can suppress the redundant separate issue item.
+    Only the leading conventional-commit tag and explicit closing keywords
+    count -- an incidental "#NNN" reference elsewhere in the title does not.
+
+    Scoped by the MR's repo because issue iids are per-project, and a bare
+    `#123` in a GitLab title means #123 of the MR's OWN project. The sweep
+    covers more than one repo, so a bare iid set let an MR titled
+    `feat(#123)` in one repo silently suppress assigned issue #123 in
+    another -- the implement row never appeared, and nothing said why."""
+    covered: Set[Tuple[str, int]] = set()
     for mr in authored:
         tag = _ISSUE_TAG_RE.match(mr.title)
         if tag:
-            covered.add(int(tag.group(1)))
-        covered.update(int(n) for n in _ISSUE_CLOSE_RE.findall(mr.title))
+            covered.add((mr.repo, int(tag.group(1))))
+        covered.update((mr.repo, int(n))
+                       for n in _ISSUE_CLOSE_RE.findall(mr.title))
     return covered
 
 
 def assess_issue(issue: Issue,
-                 covered: FrozenSet[int] = frozenset()) -> List[WorkItem]:
-    """An assigned issue -- suppressed when an open authored MR's title
-    already references it (covered_issue_iids), since the MR item is the
+                 covered: FrozenSet[Tuple[str, int]] = frozenset()
+                 ) -> List[WorkItem]:
+    """An assigned issue -- suppressed when an open authored MR in the SAME
+    repo already references it (covered_issue_iids), since the MR item is the
     actionable one and a separate issue item would just be a duplicate."""
-    if issue.iid in covered:
+    if (issue.repo, issue.iid) in covered:
         return []
     return [WorkItem(
         schema_version=1, id=f"issue:{issue.repo}#{issue.iid}", repo=issue.repo,

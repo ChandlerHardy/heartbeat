@@ -131,6 +131,25 @@ def test_is_dismissable_matrix():
         assert is_dismissable(_drec(1, executor=ex).item) is False
 
 
+def test_the_dismissable_runnable_executors_are_declared_once_beside_the_runnable_set():
+    """The runnable executors that may ALSO be dismissed used to be a second
+    hand-kept tuple in queue.py, beside models.RUNNABLE_EXECUTORS. Two lists
+    drift silently: rename an executor in one and dismiss either vanishes from
+    a row that needs it, or appears on work the runner is meant to claim.
+    One declaration, in models, and it can only name runnable executors."""
+    from worksweep import models, queue
+    from worksweep.queue import is_dismissable
+    dismissable = models.DISMISSABLE_RUNNABLE_EXECUTORS
+    assert dismissable == ("address-feedback",)
+    assert set(dismissable) <= set(models.RUNNABLE_EXECUTORS)
+    assert not hasattr(queue, "_DISMISSABLE_RUNNABLE")     # no second copy
+    # and is_dismissable answers from that one declaration, for every
+    # runnable executor on a plain (non re_review) proposed row
+    for ex in models.RUNNABLE_EXECUTORS:
+        assert is_dismissable(_drec(1, executor=ex, kind="mr").item) is (
+            ex in dismissable), ex
+
+
 def test_dismiss_flips_only_the_named_dismissable_record():
     from worksweep.queue import dismiss
     recs = [_drec(1), _drec(2), _drec(3, executor="magi-review")]
