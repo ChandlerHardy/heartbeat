@@ -28,6 +28,7 @@ import os
 import re
 import subprocess
 import sys
+import unicodedata
 from typing import Callable, List, Optional, Tuple
 
 from .formatter import _sanitize_title
@@ -280,6 +281,14 @@ def validate(output: str, records: List[QueueRecord]) -> bool:
     if _URL_RE.search(output) or _MD_LINK_RE.search(output):
         print("worksweep: curator validation failed: "
               "output contains a URL or markdown link", file=sys.stderr)
+        return False
+    # Invisible format characters (zero-width space, soft hyphen, bidi
+    # overrides) let "#<ZWSP>999" render as a ref that no ref-shaped regex
+    # here can see. A digest never needs one; an emoji ZWJ sequence falling
+    # back to the raw digest is the safe direction.
+    if any(unicodedata.category(ch) == "Cf" for ch in output):
+        print("worksweep: curator validation failed: "
+              "output contains an invisible format character", file=sys.stderr)
         return False
 
     stripped = _strip_noise(output)
