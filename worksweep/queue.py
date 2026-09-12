@@ -22,7 +22,8 @@ import tempfile
 import time
 from typing import List, Optional, Tuple
 
-from .models import RUNNABLE_EXECUTORS, QueueRecord, WorkItem
+from .models import (DISMISSABLE_RUNNABLE_EXECUTORS, RUNNABLE_EXECUTORS,
+                     QueueRecord, WorkItem)
 
 # f-007/f-028/f-029: queue.json is a whole-file replace written by FOUR
 # independent processes -- the sweep, intake, each runner pass, and the live
@@ -47,8 +48,6 @@ _TERMINAL = ("done", "error")
 # it is never compacted away and never auto-re-proposed. The only path back
 # to `approved` is a fresh Discord ✅ (approvals.apply_approvals).
 _RETAIN_IF_GONE = ("approved", "running", "done", "error", "needs-input")
-# Runnable executors that may ALSO be dismissed. See is_dismissable.
-_DISMISSABLE_RUNNABLE = ("address-feedback",)
 _NEEDS_INPUT = "needs-input"
 # Executors whose approval is tied to the SIZE of the ask, not just the sha.
 # An address-feedback ✅ covers the threads it named; three threads is not the
@@ -292,7 +291,8 @@ def auto_approve(records: List[QueueRecord],
 def is_dismissable(item: WorkItem) -> bool:
     """True when a row may be dismissed from the dashboard.
 
-    Non-terminal, and either non-runnable or one of _DISMISSABLE_RUNNABLE.
+    Non-terminal, and either non-runnable or one of
+    models.DISMISSABLE_RUNNABLE_EXECUTORS.
 
     The executor half is a safety gate: anything the runner claims is
     approve-territory, and dismissing it would silently drop work the human
@@ -308,7 +308,7 @@ def is_dismissable(item: WorkItem) -> bool:
     """
     return (item.status not in _TERMINAL
             and (item.executor not in RUNNABLE_EXECUTORS
-                 or item.executor in _DISMISSABLE_RUNNABLE
+                 or item.executor in DISMISSABLE_RUNNABLE_EXECUTORS
                  # re_review gets BOTH controls for the address-feedback
                  # reason: approve runs the targeted magi pass, dismiss
                  # records "I re-reviewed this head myself" (reviewedstate).

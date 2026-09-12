@@ -351,6 +351,14 @@ class Issue:
 # test_runnable_executors_matches_the_runner_claim_gate pins it to the runner.
 RUNNABLE_EXECUTORS = ("magi-review", "keep-current", "implement", "park",
                       "address-feedback")
+# The runnable executors that may ALSO be dismissed (queue.is_dismissable has
+# the why). Declared here, beside the set it must be a subset of, because it
+# used to be a second hand-kept tuple in queue.py: rename an executor in one
+# list and not the other, and dismiss silently appears on work the runner is
+# meant to claim or vanishes from a row that needs it.
+# test_the_dismissable_runnable_executors_are_declared_once_beside_the_runnable_set
+# pins the subset.
+DISMISSABLE_RUNNABLE_EXECUTORS = ("address-feedback",)
 
 
 @dataclass(frozen=True)
