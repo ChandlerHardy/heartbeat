@@ -161,6 +161,33 @@ def test_covered_issue_suppressed_from_digest():
     assert not any(r.item.kind == "issue" for r in records)
 
 
+def test_an_mr_in_another_repo_does_not_suppress_a_same_numbered_issue_in_the_sweep():
+    """End to end through run_sweep, with both repos configured: ck-www's
+    `feat(#42)` MR is about ck-www#42. pb-www's assigned #42 must still reach
+    the queue as its implement row -- iids are per-project."""
+    from worksweep.config import WorksweepConfig
+    from worksweep.models import Issue
+
+    posts = []
+    authored = [{"iid": "40", "title": "feat(#42): thing", "draft": False,
+                "webUrl": "https://gl/ck/-/merge_requests/40",
+                "diffHeadSha": "s40", "updatedAt": "2026-08-07T00:00:00Z",
+                "description": "Available on https://dev1.chandlerhardy-dev.performancebeef.com/",
+                "project": {"fullPath": "performancelivestock/ck-www"},
+                "author": {"username": "me"},
+                "reviewers": {"nodes": []}, "headPipeline": {"status": "success"},
+                "resolvableDiscussionsCount": 0, "resolvedDiscussionsCount": 0}]
+    deps = _deps(posts, _gql(authored_nodes=authored))
+    deps["issues"] = lambda repo, user: (
+        [Issue(repo="pb-www", iid=42, title="pb thing",
+               web_url="https://gl/x/-/issues/42")] if repo == "pb-www" else [])
+    cfg = WorksweepConfig(repos=("pb-www", "ck-www"), username="me",
+                          discord_webhook="https://discord.com/api/webhooks/x/y")
+    assert run_sweep(cfg, deps) == 0
+    issue_ids = [r.item.id for r in _saved(posts) if r.item.kind == "issue"]
+    assert issue_ids == ["issue:pb-www#42"]
+
+
 def test_uncovered_issue_still_appears_in_digest():
     from worksweep.models import Issue
 
