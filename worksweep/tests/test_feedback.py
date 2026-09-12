@@ -2260,3 +2260,101 @@ def test_a_finished_round_is_appended_to_the_dossier_and_hands_on_its_session(tm
     assert "vitest 30/30" in text                         # the receipt rides along
     assert dossier.load_session(cfg, "pb-www", 1588) == "sess-fb-2"
     assert "--output-format" in next(c for c in sub.calls if c[0] == "claude")
+
+
+# --- the run-time re-fetch honours dismissals (seen-notes) ----------------
+#
+# The sweep filters threads through the notes Chandler dismissed as "seen",
+# but the executor re-reads the MR at run time -- and that read used to skip
+# the filter, so a dismissed note could still be handed to a run that posts
+# under his name. Same key as the sweep: (discussion id, last note id).
+
+def _ided(tid, *notes):
+    """A resolvable, unresolved thread whose notes carry GitLab ids -- the
+    dismissal key needs the LAST one. `notes` are (id, author, body)."""
+    return {"id": tid, "notes": [dict(_tnote(author, body), id=nid)
+                                 for nid, author, body in notes]}
+
+
+def _claude_prompt(sub):
+    return " ".join(next(c for c in sub.calls if c[0] == "claude"))
+
+
+def test_a_dismissed_note_is_not_handed_to_the_run(tmp_path, worktree):
+    """FALSIFYING. The only waiting thread is one Chandler dismissed: nothing
+    is waiting, and no claude run happens at all."""
+    sub = _Subprocess(worktree, report=_report(replied=["t1"]))
+    glab = _Glab(_payload(_ided("t1", (101, "leyang", "question on t1"))))
+    result = feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                              run_glab=glab, now=lambda: RUN_START,
+                              seen=lambda: frozenset({("t1", "101")}))
+    assert result.already_answered is True
+    assert sub.ran("claude") == []
+
+
+def test_only_the_undismissed_threads_reach_the_prompt(tmp_path, worktree):
+    sub = _Subprocess(worktree, report=_report(replied=["t2"]))
+    before = _payload(_ided("t1", (101, "leyang", "question on t1")),
+                      _ided("t2", (201, "leyang", "question on t2")))
+    glab = _Glab(before, _payload(_answered("t2")))
+    result = feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                              run_glab=glab, now=lambda: RUN_START,
+                              seen=lambda: frozenset({("t1", "101")}))
+    assert result.waiting == 1
+    assert result.replied == 1
+    prompt = _claude_prompt(sub)
+    assert "question on t2" in prompt
+    assert "question on t1" not in prompt
+
+
+def test_a_new_note_on_a_dismissed_thread_still_reaches_the_run(tmp_path,
+                                                                worktree):
+    """FALSIFYING the other way. Dismiss means "seen THIS note". A reviewer's
+    follow-up changes the last note id, so the key stops matching and the
+    thread is work again -- otherwise dismissal is a mute button."""
+    sub = _Subprocess(worktree, report=_report(replied=["t1"]))
+    before = _payload(_ided("t1", (101, "leyang", "question on t1"),
+                            (102, "leyang", "actually, one more thing")))
+    glab = _Glab(before, _payload(_answered("t1")))
+    result = feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                              run_glab=glab, now=lambda: RUN_START,
+                              seen=lambda: frozenset({("t1", "101")}))
+    assert result.waiting == 1
+    assert "actually, one more thing" in _claude_prompt(sub)
+
+
+def test_a_failed_seen_read_runs_on_the_unfiltered_threads(tmp_path,
+                                                           worktree, capsys):
+    """Same direction as the sweep: not knowing what was dismissed shows the
+    thread again (the run can still `note` an acknowledgment), while failing
+    the claim over an unreadable sidecar would strand real feedback."""
+    def boom():
+        raise OSError("disk gone")
+
+    sub = _Subprocess(worktree, report=_report(replied=["t1"]))
+    glab = _Glab(_payload(_ided("t1", (101, "leyang", "question on t1"))),
+                 _payload(_answered("t1")))
+    result = feedback.execute(_item(), _cfg(tmp_path), run_subprocess=sub,
+                              run_glab=glab, now=lambda: RUN_START, seen=boom)
+    assert result.waiting == 1
+    assert "disk gone" in capsys.readouterr().err
+
+
+def test_the_real_edge_hands_the_executor_the_dismissed_notes_file(
+        tmp_path, monkeypatch):
+    """Wiring: the production wrapper must pass a seen edge that reads the
+    same sidecar the dashboard's Dismiss writes."""
+    from worksweep import __main__ as main_mod
+    from worksweep import seennotes
+    seen_file = str(tmp_path / "seen-notes.json")
+    seennotes.record_seen(seen_file, [("t1", "101")], main_mod._now())
+    monkeypatch.setattr(main_mod, "_SEEN_DEFAULT", seen_file)
+    got = {}
+
+    def fake_execute(item, cfg, **kw):
+        got.update(kw)
+        return "ok"
+
+    monkeypatch.setattr(feedback, "execute", fake_execute)
+    assert main_mod._execute_address_feedback(_item(), _cfg(tmp_path)) == "ok"
+    assert got["seen"]() == frozenset({("t1", "101")})

@@ -78,6 +78,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from dataclasses import dataclass
 from typing import Callable, List, Sequence
 
@@ -457,9 +458,15 @@ def execute(item: WorkItem, cfg,
             now: Callable[[], str] = None,
             run_ssh: Callable = None,
             http_get: Callable = None,
-            boxes: Sequence = ()) -> FeedbackResult:
+            boxes: Sequence = (),
+            seen: Callable[[], frozenset] = None) -> FeedbackResult:
     """Answer the threads waiting on Chandler in one MR. See the module
     docstring for the three-outcome contract with the runner.
+
+    `seen() -> {(discussion id, last note id)}` is the dismissed-notes set
+    (seennotes). The run-time re-read filters through it exactly as the sweep
+    does, or a note Chandler dismissed could still be handed to a run that
+    posts under his name. Absent -> nothing is filtered.
 
     Three routes (2026-09-04):
       * hold_action == "publish" -> `_publish_held`: push the held commit,
@@ -490,7 +497,8 @@ def execute(item: WorkItem, cfg,
     try:
         return _execute_in(item, cfg, checkout, iid, branch, run_subprocess,
                            run_glab, now, hold=bool(getattr(cfg, "feedback_hold",
-                                                            False)))
+                                                            False)),
+                           seen=seen)
     finally:
         # These worktrees are permanent, so a run that keeps its branch
         # checked out blocks the NEXT executor that wants the same branch in a
@@ -501,7 +509,8 @@ def execute(item: WorkItem, cfg,
 
 def _execute_in(item: WorkItem, cfg, checkout: str, iid: int, branch: str,
                 run_subprocess: Callable, run_glab: Callable,
-                now: Callable[[], str], hold: bool = False) -> FeedbackResult:
+                now: Callable[[], str], hold: bool = False,
+                seen: Callable[[], frozenset] = None) -> FeedbackResult:
     # Reused worktree: a claim that timed out mid-run can leave it dirty, and
     # can leave its own report file behind. Both are wiped here, so nothing
     # from a previous run can be mistaken for this one's work.
@@ -532,7 +541,8 @@ def _execute_in(item: WorkItem, cfg, checkout: str, iid: int, branch: str,
     # A failed read narrows the thread set rather than widening it.
     reviewers = collectors.mr_reviewers(run_glab, item.repo, iid)
     before = collectors.unaddressed_threads(
-        _fetch_threads(run_glab, item.repo, iid), cfg.username, reviewers)
+        _fetch_threads(run_glab, item.repo, iid), cfg.username, reviewers,
+        _dismissed(seen))
     if not before:
         return FeedbackResult(
             iid=iid, result_sha=pre_refs.get(_ref(branch), ""),
@@ -623,6 +633,21 @@ def _execute_in(item: WorkItem, cfg, checkout: str, iid: int, branch: str,
         _record_round(cfg, item.repo, issue, iid, addressed, replied, noted,
                       escalated, claims, session)
     return result
+
+
+def _dismissed(seen: Callable[[], frozenset]) -> frozenset:
+    """The dismissed-notes set, or empty. Fails in the NOISY direction, like
+    the sweep: an unreadable sidecar shows a dismissed note to the run again
+    (which can still `note` an acknowledgment), while failing the claim would
+    strand real feedback behind a bookkeeping file."""
+    if seen is None:
+        return frozenset()
+    try:
+        return frozenset(seen())
+    except Exception as e:
+        print(f"worksweep: address-feedback could not read dismissed notes: "
+              f"{type(e).__name__}: {e}", file=sys.stderr)
+        return frozenset()
 
 
 def _record_round(cfg, repo: str, issue: int, iid: int, addressed, replied,

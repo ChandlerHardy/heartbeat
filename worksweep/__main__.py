@@ -926,7 +926,10 @@ def _execute_address_feedback(item, cfg):
             host, command, timeout=_SSH_SYNC_TIMEOUT_SECONDS))
         if publishing else None,
         http_get=http_status if publishing else None,
-        boxes=_implement_boxes(cfg) if publishing else ())
+        boxes=_implement_boxes(cfg) if publishing else (),
+        # The same sidecar the dashboard's Dismiss writes and the sweep reads:
+        # the run-time re-read must not hand the run a note already dismissed.
+        seen=lambda: seennotes.load_seen(_seen_path(), _now()))
 
 
 def _gc_holds(records, cfg):
