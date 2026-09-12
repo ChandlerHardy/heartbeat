@@ -174,9 +174,21 @@ _MD_LINK_RE = re.compile(r"\[[^\]]*\]\([^)]*\)")
 _AGE_TOKEN_RE = re.compile(r"\(\d{1,3}d\)")
 # The instructed collapse line's leading count ("N low-priority items held in
 # queue: ...") is a tally, not a queue/ref number, and will routinely NOT
-# coincide with any real queue number -- strip it by anchoring on the exact
+# coincide with any real queue number -- strip it by anchoring on the
 # instructed phrase rather than trying to special-case every small integer.
-_HELD_COUNT_RE = re.compile(r"\b\d{1,4}\b(?=\s+low-priority items held in queue)")
+#
+# Anchored on the phrase's CORE ("item(s) held", optionally preceded by "low
+# priority" in any hyphenation/case, optionally bolded), not its exact words:
+# requiring "low-priority items held in queue" verbatim threw a correct digest
+# away for the raw fallback whenever the model wrote "low priority" or "in the
+# queue". What stays strict is the part that matters -- ONE number, directly
+# before the phrase, on the same line, and never a ref (`!999`, `#999`, or the
+# tail of a longer digit run). Every other number, including everything in the
+# held list itself, still goes through the whitelist.
+_HELD_COUNT_RE = re.compile(
+    r"(?<![!#\w])\d{1,4}\b"
+    r"(?=\**[ \t]+(?:low[ \t-]*priority[ \t]+)?items?[ \t]+held\b)",
+    re.IGNORECASE)
 _NUMBER_RE = re.compile(r"\b\d{1,4}\b")
 
 
