@@ -180,6 +180,37 @@ def test_two_dismissals_that_overlap_both_survive(tmp_path):
     assert load_seen(p) == frozenset({("d-a", "1"), ("d-b", "2")})
 
 
+def test_a_seen_write_in_progress_never_blocks_the_queue_lock(tmp_path,
+                                                              monkeypatch):
+    """The promise itself, not the file names: while record_seen is mid-write
+    (holding ITS lock), the queue's write lock -- what every approval tap and
+    the sweep take -- is still free. In-process on purpose: flock conflicts
+    between two opens of one file even within a process, so a seen write that
+    shared the queue's lock would make this acquire time out. The first
+    acquire proves the seen write really is holding a lock at that moment."""
+    from worksweep import seennotes
+    from worksweep.queue import QueueLockError, write_lock
+    p = _path(tmp_path)
+    qpath = str(tmp_path / "queue.json")
+    real_save = seennotes.save_seen
+    observed = {}
+
+    def save_while_probing(path, entries):
+        try:
+            with write_lock(p, timeout=0.05):
+                observed["seen_lock_free"] = True
+        except QueueLockError:
+            observed["seen_lock_free"] = False
+        with write_lock(qpath, timeout=0.5):
+            observed["queue_lock_taken"] = True
+        real_save(path, entries)
+
+    monkeypatch.setattr(seennotes, "save_seen", save_while_probing)
+    record_seen(p, [("d1", "101")], NOW)
+    assert observed == {"seen_lock_free": False, "queue_lock_taken": True}
+    assert load_seen(p) == frozenset({("d1", "101")})
+
+
 def test_the_seen_lock_is_a_sidecar_and_not_the_queue_lock(tmp_path):
     """A sidecar for the same reason as the queue's (os.replace swaps the
     inode), and its OWN sidecar: the dashboard records notes right after

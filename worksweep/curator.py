@@ -182,13 +182,16 @@ _AGE_TOKEN_RE = re.compile(r"\(\d{1,3}d\)")
 # requiring "low-priority items held in queue" verbatim threw a correct digest
 # away for the raw fallback whenever the model wrote "low priority" or "in the
 # queue". What stays strict is the part that matters -- ONE number, directly
-# before the phrase, on the same line, and never a ref (`!999`, `#999`, or the
-# tail of a longer digit run). Every other number, including everything in the
-# held list itself, still goes through the whitelist.
+# before the phrase, on the same line, and never a ref. The ref check looks
+# PAST any leading emphasis: the character before the `*` run (or the line
+# start) must not be `!`, `#`, `*` or a word character, because `!**999**`
+# renders in Discord as "!999" and a lookbehind on the digit alone sees only
+# the `*`. Every other number, including the held list itself, still goes
+# through the whitelist -- and see _strip_noise for the once-only rule.
 _HELD_COUNT_RE = re.compile(
-    r"(?<![!#\w])\d{1,4}\b"
-    r"(?=\**[ \t]+(?:low[ \t-]*priority[ \t]+)?items?[ \t]+held\b)",
-    re.IGNORECASE)
+    r"(?:^|(?<=[^\w!#*]))\**(\d{1,4})\b\**"
+    r"(?=[ \t]+(?:low[ \t-]*priority[ \t]+)?items?[ \t]+held\b)",
+    re.IGNORECASE | re.MULTILINE)
 _NUMBER_RE = re.compile(r"\b\d{1,4}\b")
 
 
@@ -199,9 +202,18 @@ def _strip_noise(text: str) -> str:
       - the held-count tally in the collapsed low-priority line
     (Links are handled separately, by hard rejection in validate() -- not
     stripped-then-allowed, since a URL is itself the thing being disallowed.)
+
+    The tally is exempt only when it occurs EXACTLY ONCE. The prompt asks for
+    one collapse line; an untrusted title riding into the output could add
+    more "N items held" phrases to launder numbers past the whitelist, so two
+    or more exempt none and the ordinary scan decides (fail-safe: a rejected
+    digest falls back to the raw one).
     """
     text = _AGE_TOKEN_RE.sub("", text)
-    text = _HELD_COUNT_RE.sub("", text)
+    tallies = list(_HELD_COUNT_RE.finditer(text))
+    if len(tallies) == 1:
+        start, end = tallies[0].span(1)
+        text = text[:start] + text[end:]
     return text
 
 

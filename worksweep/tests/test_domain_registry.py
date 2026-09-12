@@ -64,9 +64,15 @@ def test_a_test_that_never_chose_a_registry_sees_the_fallback():
     suite got the fallback this file's teardown left behind -- green in CI,
     red alone. A test that did not pick a registry must never read one.
 
-    Falsifies on any host that has the ferdinand checkout when this test runs
-    first in its process (`pytest this_file::this_test`)."""
-    assert models._gate_in_force() == (DOMAIN_GATE_PATHS, ())
+    Asserted through the public surface the prompts and the push gates use.
+    A migrations path is gated by the live registry (`*/migration*/*`, as of
+    2026-09-12) and by no fallback pattern, so either answer below changes
+    the moment the real file leaks in. Honest limit: this can only fail on a
+    host that HAS the ferdinand checkout, and only when this test runs first
+    in its process (`pytest this_file::this_test`) -- elsewhere the lazy read
+    finds no file and lands on the fallback anyway."""
+    assert touches_domain_gate(["phplib/local/migrations/x.php"]) == ()
+    assert "migration" not in models.domain_gate_text()
 
 
 def test_fallback_constant_is_pinned():

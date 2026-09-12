@@ -144,6 +144,16 @@ def test_the_held_tally_survives_reasonable_phrasing_drift(held_line):
     "#999 low-priority items held: 43",
     # the tally exemption covers the number right before the phrase, only
     "999 5 low-priority items held in queue: 43, 44",
+    # emphasis between a ref sigil and the number is still a ref: Discord
+    # renders `!**999**` as "!999"
+    "!**999** items held in queue: 43",
+    "#*999* item held: 43",
+    "**!999** items held: 43",
+    # the count and the phrase belong to ONE line
+    "999\nitems held in queue: 43",
+    # the collapse line is instructed exactly once; a second "N items held"
+    # is somebody laundering numbers, so neither count is exempt
+    "5 items held in queue: 43\n6 items held: 44",
 ])
 def test_a_looser_held_tally_still_rejects_fabricated_numbers(fabricated):
     """The security property the loosening must not cost: every number
